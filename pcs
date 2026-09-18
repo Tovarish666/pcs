@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  pcs — Proxy Control Service, точка входа на хосте Proxmox.
+#
+#    pcs                 меню
+#    pcs <команда> ...   команда напрямую (cmd/<команда>.sh)
+#    pcs help            список команд
+#
+#  Каждое действие — отдельный скрипт в cmd/, работает и сам по себе.
+#  Меню только вызывает их: упавшая команда возвращает в меню, а не
+#  роняет pcs.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+# shellcheck source=lib/common.sh
+source "$(dirname "$(readlink -f "$0")")/lib/common.sh"
+source "$PCS_ROOT/lib/state.sh"
+
+# команда|описание — порядок = порядок в меню
+COMMANDS=(
+    "vm-create|Создать ВМ Ubuntu 24.04 под mobileproxy.space"
+    "mp-install|Установить софт mobileproxy.space на ВМ"
+    "mp-auth set|Задать/сменить ключ mobileproxy.space (auth.mp)"
+    "mp-auth show|Показать auth.mp"
+    "mp-auth check|Проверить auth.mp и nodejs-server"
+    "vm-use|Список ВМ, выбор активной"
+    "vm-fix-dns|Починить DNS на ВМ"
+    "update|Обновить PCS"
+)
+
+usage() {
+    printf '\n%spcs %s%s — Proxy Control Service\n\n' "$B" "$PCS_VERSION" "$R" >&2
+    local f name desc
+    for f in "$PCS_ROOT"/cmd/*.sh; do
+        name="${f##*/}"; name="${name%.sh}"
+        desc="$(sed -n '3s/^#  pcs [a-z-]* — //p' "$f")"
+        printf '  pcs %-12s %s\n' "$name" "$desc" >&2
+    done
+    printf '\n  pcs <команда> --help — параметры команды\n\n' >&2
+}
+
+header() {
+    local id st
+    id="$(state_active_id)"
+    printf '\n%s┌──────────────────────────────────────────────┐%s\n' "$B" "$R" >&2
+    printf   '%s│  pcs %-10s Proxy Control Service         │%s\n' "$B" "$PCS_VERSION" "$R" >&2
+    printf   '%s└──────────────────────────────────────────────┘%s\n' "$B" "$R" >&2
+    if [[ -n "$id" ]]; then
+        state_load "$id"
+        st="$(qm status "$id" 2>/dev/null | awk '{print $2}')"
+        printf '  Активная ВМ: %s%s%s (%s) @ %s — %s\n\n' "$B" "$id" "$R" "${VM_NAME:-?}" "${VM_IP:-?}" "${st:-нет в Proxmox}" >&2
+    else
+        printf '  %sАктивная ВМ не выбрана%s\n\n' "$D" "$R" >&2
+    fi
+}
+
+menu() {
+    local i item choice cmd
+    while true; do
+        header
+        i=1
+        for item in "${COMMANDS[@]}"; do
+            printf '  %s[%d]%s %s\n' "$B" "$i" "$R" "${item#*|}" >&2
+            i=$((i + 1))
+        done
+        printf '  %s[q]%s Выход\n\n' "$B" "$R" >&2
+        printf '  %s»%s ' "$C" "$R" >&2
+        IFS= read -r choice </dev/tty || exit 0
+        case "$choice" in
+            q|Q|0|"") exit 0 ;;
+        esac
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#COMMANDS[@]} )); then
+            cmd="${COMMANDS[$((choice - 1))]%%|*}"
+            # shellcheck disable=SC2086
+            bash "$PCS_ROOT/cmd/${cmd%% *}.sh" ${cmd#"${cmd%% *}"} || true
+            printf '\n  %sEnter — в меню%s' "$D" "$R" >&2
+            read -r _ </dev/tty || true
+        else
+            warn "нет такого пункта"
+        fi
+    done
+}
+
+case "${1:-}" in
+    "")
+        need_root
+        has_tty && menu
+        usage ;;
+    help|-h|--help) usage ;;
+    version|--version) echo "$PCS_VERSION" ;;
+    *)
+        cmd="$1"; shift
+        [[ "$cmd" =~ ^[a-z0-9-]+$ && -f "$PCS_ROOT/cmd/${cmd}.sh" ]] \
+            || { bad "нет команды: ${cmd}"; usage; exit 1; }
+        exec bash "$PCS_ROOT/cmd/${cmd}.sh" "$@"
+        ;;
+esac

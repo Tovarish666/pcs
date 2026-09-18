@@ -1,0 +1,114 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  pcs-fix-dns — приводит DNS ВМ в предсказуемое состояние. Идемпотентно.
+#  Живёт на ВМ в /usr/local/sbin, зовётся из cloud-init, после установки
+#  софта mp.space и вручную: pcs vm-fix-dns.
+#
+#  Не «rm resolv.conf + chattr +i», как было в v1:
+#   • повторный запуск падал на immutable-файле и рвал установку;
+#   • systemd-resolved продолжал работать и переписывал всё обратно;
+#   • всё, чему нужен resolv.conf, молча ломалось.
+#  Здесь штатный путь: resolved остаётся, серверы наши, DNS от DHCP
+#  отключён в netplan — перебивать нечему.
+# ═══════════════════════════════════════════════════════════════════════════
+set -u
+[ -r /etc/default/pcs-dns ] && . /etc/default/pcs-dns
+DNS1="${PCS_DNS1:-1.1.1.1}"
+DNS2="${PCS_DNS2:-8.8.8.8}"
+FAIL=0
+log() { echo "[pcs-fix-dns] $*"; }
+
+# 0. наследие старых версий pcs
+if lsattr -l /etc/resolv.conf 2>/dev/null | grep -qi immutable; then
+    chattr -i /etc/resolv.conf 2>/dev/null && log "снят immutable с /etc/resolv.conf"
+fi
+
+# 1. глобальные серверы; Domains=~. делает их маршрутом по умолчанию для всех имён
+install -d -m 0755 /etc/systemd/resolved.conf.d
+cat > /etc/systemd/resolved.conf.d/99-pcs.conf <<EOF
+[Resolve]
+DNS=$DNS1 $DNS2
+FallbackDNS=9.9.9.9 1.0.0.1
+Domains=~.
+DNSStubListener=yes
+DNSSEC=no
+DNSOverTLS=no
+Cache=yes
+ReadEtcHosts=yes
+EOF
+log "resolved: DNS=$DNS1 $DNS2"
+
+# 2. netplan: не брать DNS от DHCP. Только там, где DHCP реально включён —
+#    иначе netplan ругается на dhcp4-overrides без dhcp4 и валит сеть.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+    python3 - <<'PY'
+import glob, os, yaml
+OUT = '/etc/netplan/99-pcs-dns.yaml'
+d4, d6 = set(), set()
+for p in sorted(glob.glob('/etc/netplan/*.yaml')):
+    if os.path.basename(p) == os.path.basename(OUT):
+        continue
+    try:
+        doc = yaml.safe_load(open(p)) or {}
+    except Exception:
+        continue
+    eth = ((doc.get('network') or {}).get('ethernets') or {})
+    for name, cfg in eth.items():
+        cfg = cfg or {}
+        if cfg.get('dhcp4') in (True, 'true', 'yes', 'on'):
+            d4.add(name)
+        if cfg.get('dhcp6') in (True, 'true', 'yes', 'on'):
+            d6.add(name)
+names = sorted(d4 | d6)
+if not names:
+    if os.path.exists(OUT):
+        os.remove(OUT)
+    print('[pcs-fix-dns] DHCP-интерфейсов нет — netplan не трогаем')
+else:
+    lines = ['network:', '  version: 2', '  ethernets:']
+    for n in names:
+        lines.append('    %s:' % n)
+        if n in d4:
+            lines += ['      dhcp4-overrides:', '        use-dns: false',
+                      '        use-domains: false']
+        if n in d6:
+            lines += ['      dhcp6-overrides:', '        use-dns: false',
+                      '        use-domains: false']
+    open(OUT, 'w').write('\n'.join(lines) + '\n')
+    os.chmod(OUT, 0o600)
+    print('[pcs-fix-dns] DNS от DHCP отключён для: %s' % ', '.join(names))
+PY
+else
+    log "python3/yaml нет — netplan пропущен (resolved всё равно главнее)"
+fi
+
+# 3. применить; если netplan не переваривает наш drop-in — откатить его:
+#    сеть важнее идеального DNS
+if command -v netplan >/dev/null 2>&1; then
+    if netplan generate >/dev/null 2>&1; then
+        netplan apply >/dev/null 2>&1 || log "netplan apply вернул ошибку"
+    else
+        log "netplan generate не прошёл — drop-in удалён"
+        rm -f /etc/netplan/99-pcs-dns.yaml
+        netplan generate >/dev/null 2>&1
+    fi
+fi
+
+# 4. resolv.conf — штатный симлинк на stub
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+systemctl enable systemd-resolved >/dev/null 2>&1
+systemctl restart systemd-resolved
+sleep 1
+resolvectl flush-caches >/dev/null 2>&1
+
+# 5. проверка — без неё «починили» ничего не значит
+for h in github.com cloud-images.ubuntu.com mobileproxy.space; do
+    if getent ahostsv4 "$h" >/dev/null 2>&1; then
+        log "resolve $h — ok"
+    else
+        log "resolve $h — ОШИБКА"
+        FAIL=1
+    fi
+done
+[ "$FAIL" = 0 ] && log "DNS в порядке" || log "DNS НЕ в порядке"
+exit $FAIL

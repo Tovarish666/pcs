@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  mp-auth — ключ сервера mobileproxy.space (auth.mp) на этой ВМ.
+#
+#    mp-auth show [--full]          что сейчас стоит (ключ замаскирован)
+#    mp-auth set '<json>'           {"auth":"KEY:KEY","port":1800} — из ЛК
+#    mp-auth set -                  то же из stdin
+#    mp-auth set --key K [--port P] без JSON; порт по умолчанию — текущий
+#    mp-auth check                  файл, служба, порт — всё живо?
+#
+#  auth.mp читает только nodejs-server (server.js); mproxy его не трогает.
+#  Поэтому после записи перезапускается только nodejs-server — клиентские
+#  соединения mproxy не рвутся. Перезапуск явный: сам server.js при смене
+#  порта завершается с кодом 0, а Restart=on-failure такой выход не поднимает.
+#
+#  Ставится PCS в /usr/local/sbin. Старые версии файла: auth.mp.bak.<время>,
+#  хранятся последние 5.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+MP_WORK="${MP_WORK:-/home/nodejs/work}"
+AUTH_FILE="${MP_WORK}/auth.mp"
+SERVICE="${MP_SERVICE:-nodejs-server}"
+MP_USER="${MP_USER:-nodejs}"
+KEEP_BACKUPS=5
+
+ok()   { echo "  ✓ $*"; }
+bad()  { echo "  ✗ $*" >&2; }
+step() { echo "  → $*"; }
+die()  { bad "$*"; exit 1; }
+
+usage() { awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, ""); print }' "$0"; }
+
+command -v python3 >/dev/null 2>&1 || die "нет python3"
+
+# ── JSON: разбор, проверка, нормализация ───────────────────────────────────
+# stdin: JSON из ЛК или голый ключ. argv: текущий порт, явный порт.
+# stdout: одна строка нормализованного JSON. Ошибка — код 2 и текст в stderr.
+normalize() {
+    python3 -c '
+import json, re, sys
+raw = sys.stdin.read().strip()
+cur, forced = sys.argv[1], sys.argv[2]
+def fail(m):
+    sys.stderr.write(m + "\n"); sys.exit(2)
+if not raw:
+    fail("пусто")
+if raw.startswith("{"):
+    try:
+        d = json.loads(raw)
+    except Exception as e:
+        fail("это не JSON: %s" % e)
+    if not isinstance(d, dict):
+        fail("ожидался объект {\"auth\": ..., \"port\": ...}")
+else:
+    d = {"auth": raw}
+auth = d.get("auth")
+if not isinstance(auth, str) or not auth.strip():
+    fail("нет поля auth")
+auth = auth.strip()
+if len(auth) > 256 or re.search(r"[\s\"\\\\]", auth):
+    fail("в auth недопустимые символы (пробелы, кавычки, обратный слэш)")
+port = forced or d.get("port")
+if port in (None, ""):
+    port = cur
+if port in (None, ""):
+    fail("нет порта: укажи \"port\" в JSON или --port")
+try:
+    port = int(str(port).strip())
+except ValueError:
+    fail("port не число: %r" % (port,))
+if not 1 <= port <= 65535:
+    fail("port вне 1..65535")
+d["auth"], d["port"] = auth, port
+print(json.dumps(d, ensure_ascii=False))
+' "$1" "$2"
+}
+
+# Поле из auth.mp (или пусто, если файла/поля нет).
+auth_field() {                     # auth_field <auth|port>
+    [[ -f "$AUTH_FILE" ]] || return 0
+    python3 -c '
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+except Exception:
+    v = ""
+print(v if v is not None else "")
+' "$AUTH_FILE" "$1" 2>/dev/null
+}
+
+mask() {                           # a1b2…y9z0
+    local s="$1"
+    if (( ${#s} > 8 )); then printf '%s…%s' "${s:0:4}" "${s: -4}"; else printf '***'; fi
+}
+
+# ── Порт и служба ──────────────────────────────────────────────────────────
+port_listening() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
+port_owner()     { ss -Hltnp "sport = :$1" 2>/dev/null | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2; }
+http_version() {                   # версия server.js, если он отвечает на порту
+    curl -s -m 5 "http://127.0.0.1:$1/" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null
+}
+
+restart_and_verify() {             # restart_and_verify <port>
+    local port="$1" i ver
+    if [[ -n "${MP_AUTH_NO_RESTART:-}" ]]; then
+        step "перезапуск ${SERVICE} пропущен (MP_AUTH_NO_RESTART)"
+        return 0
+    fi
+    systemctl restart "$SERVICE" || die "systemctl restart ${SERVICE} не прошёл"
+    for i in $(seq 1 30); do
+        if port_listening "$port"; then
+            ver="$(http_version "$port")"
+            if [[ -n "$ver" ]]; then ok "${SERVICE} отвечает на :${port} (server.js ${ver})"; return 0; fi
+        fi
+        sleep 1
+    done
+    bad "${SERVICE} не ответил на :${port} за 30с"
+    echo "    journalctl -u ${SERVICE} -n 30:" >&2
+    journalctl -u "$SERVICE" -n 30 --no-pager 2>/dev/null | sed 's/^/    /' >&2
+    return 1
+}
+
+# ── Запись ─────────────────────────────────────────────────────────────────
+write_auth() {                     # write_auth <нормализованный json>
+    local json="$1" tmp
+    install -d -m 775 "$MP_WORK" || die "нет каталога ${MP_WORK}"
+    if [[ -f "$AUTH_FILE" ]]; then
+        cp -p "$AUTH_FILE" "${AUTH_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+        # shellcheck disable=SC2012
+        ls -1t "${AUTH_FILE}".bak.* 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | while IFS= read -r f; do rm -f "$f"; done
+    fi
+    tmp="$(mktemp "${MP_WORK}/.auth.mp.XXXXXX")" || die "не создать временный файл"
+    printf '%s\n' "$json" >"$tmp"
+    chmod 600 "$tmp"
+    if [[ -z "${MP_AUTH_NO_CHOWN:-}" ]] && id "$MP_USER" >/dev/null 2>&1; then
+        chown "${MP_USER}:${MP_USER}" "$tmp"
+    fi
+    mv -f "$tmp" "$AUTH_FILE"      # атомарно: server.js не увидит полфайла
+}
+
+# ── Команды ────────────────────────────────────────────────────────────────
+cmd_show() {
+    local full="" auth port
+    [[ "${1:-}" == "--full" ]] && full=1
+    [[ -f "$AUTH_FILE" ]] || die "нет ${AUTH_FILE}"
+    auth="$(auth_field auth)"; port="$(auth_field port)"
+    [[ -n "$auth" ]] || die "${AUTH_FILE} не разбирается или в нём нет auth"
+    if [[ -n "$full" ]]; then echo "  auth: ${auth}"; else echo "  auth: $(mask "$auth")"; fi
+    echo "  port: ${port:-—}"
+    echo "  файл: ${AUTH_FILE} ($(date -r "$AUTH_FILE" '+%F %T' 2>/dev/null))"
+    if [[ -z "${MP_AUTH_NO_RESTART:-}" ]]; then
+        echo "  служба ${SERVICE}: $(systemctl is-active "$SERVICE" 2>/dev/null)"
+    fi
+}
+
+cmd_set() {
+    local raw="" key="" port="" cur json newport owner
+    while (( $# )); do
+        case "$1" in
+            --key)  key="${2:-}"; shift 2 ;;
+            --port) port="${2:-}"; shift 2 ;;
+            -)      raw="$(cat)"; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *)      raw="$1"; shift ;;
+        esac
+    done
+    [[ -n "$key" ]] && raw="$key"
+    [[ -n "$raw" ]] || die "что записать? mp-auth set '{\"auth\":\"KEY:KEY\",\"port\":1800}'"
+
+    cur="$(auth_field port)"
+    json="$(printf '%s' "$raw" | normalize "$cur" "$port")" || exit 2
+    newport="$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"])')"
+
+    # Новый порт занят кем-то, кроме самого nodejs-server, — не пишем:
+    # сервер после перезапуска просто не поднимется.
+    if [[ "$newport" != "$cur" ]] && port_listening "$newport"; then
+        owner="$(port_owner "$newport")"
+        [[ "$owner" == "node" ]] || die "порт ${newport} занят (${owner:-неизвестно кем})"
+    fi
+
+    write_auth "$json"
+    ok "auth.mp записан: auth $(mask "$(printf '%s' "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["auth"])')"), port ${newport}"
+    restart_and_verify "$newport"
+}
+
+cmd_check() {
+    local rc=0 auth port ver state
+    if [[ ! -f "$AUTH_FILE" ]]; then
+        bad "нет ${AUTH_FILE}"; return 1
+    fi
+    auth="$(auth_field auth)"; port="$(auth_field port)"
+    if [[ -n "$auth" && "$port" =~ ^[0-9]+$ ]]; then
+        ok "auth.mp корректен: auth $(mask "$auth"), port ${port}"
+    else
+        bad "auth.mp битый или неполный"; rc=1
+    fi
+    [[ -n "${MP_AUTH_NO_RESTART:-}" ]] && return $rc
+    state="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+    if [[ "$state" == "active" ]]; then ok "служба ${SERVICE}: active"; else bad "служба ${SERVICE}: ${state:-нет}"; rc=1; fi
+    if [[ -n "$port" ]] && port_listening "$port"; then
+        ver="$(http_version "$port")"
+        if [[ -n "$ver" ]]; then ok "порт ${port}: server.js ${ver} отвечает"
+        else bad "порт ${port} слушается, но server.js не ответил"; rc=1; fi
+    else
+        bad "порт ${port:-?} никто не слушает"; rc=1
+    fi
+    return $rc
+}
+
+case "${1:-}" in
+    show)  shift; cmd_show "$@" ;;
+    set)   shift; cmd_set "$@" ;;
+    check) shift; cmd_check "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 1 ;;
+esac
