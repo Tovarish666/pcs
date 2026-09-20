@@ -1,0 +1,577 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  vmodem — виртуальный модем: одна прокси притворяется USB-модемом Huawei.
+#
+#    vmodem config show                    что настроено (пароль скрыт)
+#    vmodem config set N=64 REAL=101 ...   задать параметры
+#    vmodem up [--dry-run]                 поднять (--dry-run: только показать)
+#    vmodem down                           снять
+#    vmodem restart
+#    vmodem status                         что живо прямо сейчас
+#    vmodem check                          проверка до самого модема и наружу
+#    vmodem install-service                автозапуск через systemd
+#
+#  Что поднимается (снизу вверх):
+#    1. USB-устройство Huawei E3372h — гаджет ядра (configfs, функция ECM),
+#       привязанный к usbip-vudc: его забирает по сети ВМ с mobileproxy.space
+#       и видит у себя как воткнутый в USB модем.
+#    2. usbipd — отдаёт это устройство по сети, только адресу USBIP_ALLOW.
+#    3. usb0 = 192.168.<N>.1/24 — «LAN модема», dnsmasq выдаёт туда .100
+#       и работает DNS, как на настоящем модеме.
+#    4. sing-box — весь TCP и UDP с usb0 уходит в SOCKS5-прокси.
+#    5. vmodem-api — веб-морда настоящего модема на 192.168.<N>.1:80.
+#
+#  Конфиг: /etc/vmodem/vmodem.conf (права 600 — там пароль прокси).
+#  Логи:   /var/log/vmodem/
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+VMODEM_ETC="${VMODEM_ETC:-/etc/vmodem}"
+VMODEM_RUN="${VMODEM_RUN:-/run/vmodem}"
+VMODEM_LOG_DIR="${VMODEM_LOG_DIR:-/var/log/vmodem}"
+VMODEM_LIB="${VMODEM_LIB:-/var/lib/vmodem}"
+CONF="${VMODEM_ETC}/vmodem.conf"
+PASS_FILE="${VMODEM_ETC}/proxy.pass"
+LOG="${VMODEM_LOG_DIR}/vmodem.log"
+
+GADGET_ROOT="${VMODEM_GADGET_ROOT:-/sys/kernel/config/usb_gadget}"
+GADGET="${GADGET_ROOT}/vmodem"
+TUN_IF="${VMODEM_TUN_IF:-vmtun0}"
+TUN_ADDR="${VMODEM_TUN_ADDR:-172.20.0.1}"   # только для маршрутов внутри ВМ
+RT_TABLE="${VMODEM_RT_TABLE:-100}"
+SINGBOX_BIN="${SINGBOX_BIN:-/usr/local/bin/sing-box}"
+API_BIN="${VMODEM_API_BIN:-/usr/local/sbin/vmodem-api}"
+
+# Параметры конфига и значения по умолчанию.
+N=""                 # виртуальный октет: модем 192.168.<N>.1, сервер .100
+REAL=""              # октет настоящего модема за прокси
+PROXY=""             # SOCKS5 host:port
+PROXY_USER=""
+PROXY_PASS=""
+USBIP_ALLOW=""       # IP ВМ mobileproxy.space — только он заберёт USB
+SERIAL=""            # серийный номер в дескрипторе USB
+MAC_HOST="${MAC_HOST:-0c:5b:8f:27:9a:64}"   # каким модем видится серверу
+MAC_DEV=""                                   # сторона гаджета, уникальный
+
+DRY=""
+
+ok()   { echo "  ✓ $*"; }
+bad()  { echo "  ✗ $*" >&2; }
+warn() { echo "  ⚠ $*" >&2; }
+step() { echo "  → $*"; }
+die()  { bad "$*"; exit 1; }
+usage() { awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, ""); print }' "$0"; }
+
+# Команда: в обычном режиме выполняется и пишется в лог, в --dry-run печатается.
+run() {
+    if [[ -n "$DRY" ]]; then
+        printf '  + %s\n' "$*"
+        return 0
+    fi
+    printf '%s + %s\n' "$(date '+%F %T')" "$*" >>"$LOG" 2>/dev/null
+    "$@" >>"$LOG" 2>&1
+}
+
+# Запись в файл ядра (configfs, sysctl-подобное).
+wr() {                             # wr <файл> <значение>
+    if [[ -n "$DRY" ]]; then
+        printf '  + echo %s > %s\n' "$2" "$1"
+        return 0
+    fi
+    printf '%s\n' "$2" >"$1" 2>>"$LOG"
+}
+
+# Фоновый процесс с pid-файлом.
+spawn() {                          # spawn <имя> <команда...>
+    local name="$1"; shift
+    local pidf="${VMODEM_RUN}/${name}.pid"
+    if [[ -n "$DRY" ]]; then
+        printf '  + %s  (фоном, pid → %s)\n' "$*" "$pidf"
+        return 0
+    fi
+    mkdir -p "$VMODEM_RUN"
+    setsid "$@" >>"${VMODEM_LOG_DIR}/${name}.log" 2>&1 </dev/null &
+    echo $! >"$pidf"
+}
+
+pid_of() {                         # pid_of <имя> → живой pid или пусто
+    local pidf="${VMODEM_RUN}/$1.pid" pid
+    pid="$(cat "$pidf" 2>/dev/null)" || return 0
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
+}
+
+kill_named() {                     # kill_named <имя>
+    local pid; pid="$(pid_of "$1")"
+    if [[ -n "$pid" ]]; then
+        run kill "$pid"
+        local i
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.3
+        done
+        kill -0 "$pid" 2>/dev/null && run kill -9 "$pid"
+    fi
+    rm -f "${VMODEM_RUN}/$1.pid" 2>/dev/null
+    return 0
+}
+
+# ── Конфиг ─────────────────────────────────────────────────────────────────
+conf_load() {
+    [[ -f "$CONF" ]] || return 0
+    # shellcheck disable=SC1090
+    source "$CONF"
+}
+
+conf_save() {
+    install -d -m 700 "$VMODEM_ETC"
+    local t="${CONF}.tmp"
+    {
+        echo "# vmodem — виртуальный модем. Пароль прокси здесь же, права 600."
+        local k
+        for k in N REAL PROXY PROXY_USER PROXY_PASS USBIP_ALLOW SERIAL MAC_HOST MAC_DEV; do
+            printf '%s=%q\n' "$k" "${!k:-}"
+        done
+    } >"$t"
+    chmod 600 "$t"
+    mv -f "$t" "$CONF"
+}
+
+octet_ok() { [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 254 )); }
+
+conf_check() {
+    local rc=0
+    octet_ok "${N:-}"    || { bad "N: нужен октет 1..254 (сейчас «${N:-}»)"; rc=1; }
+    octet_ok "${REAL:-}" || { bad "REAL: нужен октет 1..254 (сейчас «${REAL:-}»)"; rc=1; }
+    [[ "${PROXY:-}" =~ ^[A-Za-z0-9._-]+:[0-9]+$ ]] || { bad "PROXY: нужен host:port (сейчас «${PROXY:-}»)"; rc=1; }
+    [[ -n "${USBIP_ALLOW:-}" ]] || warn "USBIP_ALLOW пуст: USB сможет забрать кто угодно в сети"
+    # 153–155 у mobileproxy.space попадают в системные таблицы маршрутизации
+    # (default/main/local), а N и N+200 делят одну таблицу.
+    if [[ "${N:-}" =~ ^(153|154|155)$ ]]; then
+        bad "N=${N}: на сервере mp.space этот номер попадает в системную таблицу маршрутов"
+        rc=1
+    fi
+    # Подсеть модема не должна пересекаться с сетью самой ВМ.
+    if [[ -z "$DRY" ]] && ip -4 -o addr show 2>/dev/null | grep -q " 192\.168\.${N}\."; then
+        local dev
+        dev="$(ip -4 -o addr show 2>/dev/null | awk -v p="192.168.${N}." '$4 ~ p {print $2; exit}')"
+        if [[ "$dev" != "usb0" && "$dev" != "$(gadget_ifname)" ]]; then
+            bad "192.168.${N}.0/24 уже занята на ${dev} — выбери другой N"
+            rc=1
+        fi
+    fi
+    return $rc
+}
+
+mask() { local s="${1:-}"; if (( ${#s} > 6 )); then printf '%s…%s' "${s:0:2}" "${s: -2}"; elif [[ -n "$s" ]]; then printf '***'; else printf '—'; fi; }
+
+cmd_config() {
+    local action="${1:-show}"; shift || true
+    case "$action" in
+        show)
+            conf_load
+            echo "  конфиг:      ${CONF}"
+            echo "  N:           ${N:-—}   (модем 192.168.${N:-N}.1, сервер 192.168.${N:-N}.100)"
+            echo "  REAL:        ${REAL:-—}   (настоящий модем 192.168.${REAL:-REAL}.1)"
+            echo "  PROXY:       ${PROXY:-—}"
+            echo "  PROXY_USER:  ${PROXY_USER:-—}"
+            echo "  PROXY_PASS:  $(mask "${PROXY_PASS:-}")"
+            echo "  USBIP_ALLOW: ${USBIP_ALLOW:-—}"
+            echo "  SERIAL:      ${SERIAL:-—}"
+            ;;
+        set)
+            conf_load
+            (( $# )) || die "что задать? vmodem config set N=64 REAL=101 PROXY=1.2.3.4:15000"
+            local kv k v
+            for kv in "$@"; do
+                [[ "$kv" == *=* ]] || die "нужно КЛЮЧ=значение, а не «${kv}»"
+                k="${kv%%=*}"; v="${kv#*=}"
+                case "$k" in
+                    N|REAL|PROXY|PROXY_USER|PROXY_PASS|USBIP_ALLOW|SERIAL|MAC_HOST|MAC_DEV)
+                        printf -v "$k" '%s' "$v" ;;
+                    *) die "неизвестный параметр: ${k}" ;;
+                esac
+            done
+            # Прокся одной строкой, как в таблице: host:port:login:pass
+            if [[ "$PROXY" == *:*:*:* ]]; then
+                local h p l s
+                IFS=':' read -r h p l s <<<"$PROXY"
+                PROXY="${h}:${p}"; PROXY_USER="$l"; PROXY_PASS="$s"
+            fi
+            [[ -n "$SERIAL" ]] || SERIAL="$(printf 'VMODEM%08d' "${N:-0}")"
+            [[ -n "$MAC_DEV" ]] || MAC_DEV="$(printf '0c:5b:8f:%02x:%02x:%02x' "${N:-0}" "${REAL:-0}" 1)"
+            conf_check || die "конфиг не сохранён"
+            conf_save
+            ok "сохранено в ${CONF}"
+            ;;
+        *) die "vmodem config show | set КЛЮЧ=значение..." ;;
+    esac
+}
+
+# ── USB-гаджет ─────────────────────────────────────────────────────────────
+gadget_ifname() {
+    cat "${GADGET}/functions/ecm.usb0/ifname" 2>/dev/null || echo usb0
+}
+
+udc_name() {
+    local u
+    for u in /sys/class/udc/*; do
+        [[ -e "$u" ]] || continue
+        u="${u##*/}"
+        [[ "$u" == usbip-vudc* ]] && { printf '%s' "$u"; return 0; }
+    done
+    printf 'usbip-vudc.0'          # в --dry-run и до загрузки модуля
+}
+
+gadget_up() {
+    step "USB-устройство Huawei E3372h"
+    run modprobe libcomposite
+    run modprobe usbip-vudc
+    if [[ -z "$DRY" && -d "$GADGET" ]]; then
+        gadget_down
+    fi
+    run mkdir -p "$GADGET"
+    # Дескрипторы как у E3372h в режиме HiLink: сервер должен увидеть Huawei.
+    wr "${GADGET}/idVendor"  "0x12d1"
+    wr "${GADGET}/idProduct" "0x14dc"
+    wr "${GADGET}/bcdDevice" "0x0102"
+    wr "${GADGET}/bcdUSB"    "0x0200"
+    run mkdir -p "${GADGET}/strings/0x409"
+    wr "${GADGET}/strings/0x409/manufacturer" "HUAWEI"
+    wr "${GADGET}/strings/0x409/product"      "HUAWEI_MOBILE"
+    wr "${GADGET}/strings/0x409/serialnumber" "${SERIAL}"
+    run mkdir -p "${GADGET}/configs/c.1/strings/0x409"
+    wr "${GADGET}/configs/c.1/strings/0x409/configuration" "CDC ECM"
+    wr "${GADGET}/configs/c.1/MaxPower" "500"
+    run mkdir -p "${GADGET}/functions/ecm.usb0"
+    # MAC со стороны сервера у всех модемов одинаковый — так и у настоящих
+    # E3372h; скрипты mp.space это учитывают. Сторона гаджета своя у каждого.
+    wr "${GADGET}/functions/ecm.usb0/host_addr" "${MAC_HOST}"
+    wr "${GADGET}/functions/ecm.usb0/dev_addr"  "${MAC_DEV}"
+    run ln -sf "${GADGET}/functions/ecm.usb0" "${GADGET}/configs/c.1/ecm.usb0"
+    wr "${GADGET}/UDC" "$(udc_name)"
+    ok "гаджет 12d1:14dc собран (serial ${SERIAL})"
+}
+
+gadget_down() {
+    [[ -d "$GADGET" || -n "$DRY" ]] || return 0
+    wr "${GADGET}/UDC" ""
+    run rm -f "${GADGET}/configs/c.1/ecm.usb0"
+    run rmdir "${GADGET}/configs/c.1/strings/0x409"
+    run rmdir "${GADGET}/configs/c.1"
+    run rmdir "${GADGET}/functions/ecm.usb0"
+    run rmdir "${GADGET}/strings/0x409"
+    run rmdir "${GADGET}"
+    return 0
+}
+
+# ── Сеть модема ────────────────────────────────────────────────────────────
+lan_up() {
+    local ifn; ifn="$(gadget_ifname)"
+    step "LAN модема: 192.168.${N}.1/24 на ${ifn}"
+    if [[ -z "$DRY" ]]; then
+        local i
+        for i in $(seq 1 50); do
+            [[ -e "/sys/class/net/${ifn}" ]] && break
+            sleep 0.2
+        done
+        [[ -e "/sys/class/net/${ifn}" ]] || { bad "интерфейс ${ifn} не появился"; return 1; }
+    fi
+    run ip addr replace "192.168.${N}.1/24" dev "$ifn"
+    run ip link set "$ifn" mtu 1500 up
+    run sysctl -qw "net.ipv4.conf.${ifn}.rp_filter=0"
+    ok "${ifn} поднят"
+}
+
+lan_down() {
+    local ifn; ifn="$(gadget_ifname)"
+    run ip addr flush dev "$ifn"
+    return 0
+}
+
+dnsmasq_conf() {
+    install -d -m 755 "$VMODEM_ETC" "$VMODEM_LIB"
+    local ifn; ifn="$(gadget_ifname)"
+    cat >"${VMODEM_ETC}/dnsmasq.conf" <<EOF
+# vmodem: DHCP и DNS «модема» — как у настоящего HiLink.
+interface=${ifn}
+bind-interfaces
+listen-address=192.168.${N}.1
+no-resolv
+strict-order
+# Сначала DNS настоящего модема (оператор), потом запасной — оба через туннель.
+server=192.168.${REAL}.1
+server=1.1.1.1
+# Один адрес в пуле: сервер mp.space всегда получает .100
+dhcp-range=192.168.${N}.100,192.168.${N}.100,255.255.255.0,12h
+dhcp-option=3,192.168.${N}.1
+dhcp-option=6,192.168.${N}.1
+dhcp-authoritative
+dhcp-leasefile=${VMODEM_LIB}/dnsmasq.leases
+pid-file=${VMODEM_RUN}/dnsmasq.pid
+log-facility=${VMODEM_LOG_DIR}/dnsmasq.log
+EOF
+}
+
+singbox_conf() {
+    install -d -m 700 "$VMODEM_ETC"
+    local host port
+    host="${PROXY%%:*}"; port="${PROXY##*:}"
+    # Конфиг пишет python: пароль и логин уходят через окружение, а не
+    # подстановкой в строку — кавычки и спецсимволы не ломают JSON.
+    SB_HOST="$host" SB_PORT="$port" SB_USER="$PROXY_USER" SB_PASS="$PROXY_PASS" \
+    SB_TUN="$TUN_IF" SB_ADDR="$TUN_ADDR" SB_LOG="${VMODEM_LOG_DIR}/singbox.log" \
+    python3 -c '
+import json, os
+conf = {
+    "log": {"level": "warn", "output": os.environ["SB_LOG"], "timestamp": True},
+    "inbounds": [{
+        "type": "tun", "tag": "tun-in",
+        "interface_name": os.environ["SB_TUN"],
+        "address": [os.environ["SB_ADDR"] + "/30"],
+        "mtu": 1400,
+        "auto_route": False, "strict_route": False,
+        "stack": "system",
+        # Ничего не вынюхиваем: адреса приходят готовыми, а подмена адреса на
+        # домен в UDP ломается о прокси, которые домен в датаграмме не ждут.
+        "sniff": False,
+    }],
+    "outbounds": [{
+        "type": "socks", "tag": "proxy", "version": "5",
+        "server": os.environ["SB_HOST"], "server_port": int(os.environ["SB_PORT"]),
+    }],
+    "route": {"final": "proxy", "auto_detect_interface": False},
+}
+if os.environ.get("SB_USER"):
+    conf["outbounds"][0]["username"] = os.environ["SB_USER"]
+    conf["outbounds"][0]["password"] = os.environ.get("SB_PASS", "")
+print(json.dumps(conf, indent=2, ensure_ascii=False))
+' >"${VMODEM_ETC}/singbox.json" || return 1
+    chmod 600 "${VMODEM_ETC}/singbox.json"
+}
+
+tunnel_up() {
+    step "туннель в прокси (sing-box)"
+    singbox_conf || { bad "не собрался конфиг sing-box"; return 1; }
+    spawn singbox "$SINGBOX_BIN" run -c "${VMODEM_ETC}/singbox.json"
+    if [[ -z "$DRY" ]]; then
+        local i
+        for i in $(seq 1 50); do
+            ip -4 addr show "$TUN_IF" 2>/dev/null | grep -q "$TUN_ADDR" && break
+            sleep 0.4
+        done
+        ip -4 addr show "$TUN_IF" 2>/dev/null | grep -q "$TUN_ADDR" \
+            || { bad "${TUN_IF} не поднялся — ${VMODEM_LOG_DIR}/singbox.log"; return 1; }
+    fi
+    ok "${TUN_IF} поднят"
+}
+
+routing_up() {
+    local ifn; ifn="$(gadget_ifname)"
+    step "маршруты и NAT"
+    run sysctl -qw net.ipv4.ip_forward=1
+    run sysctl -qw net.ipv4.conf.all.rp_filter=0
+    # Весь трафик сервера и наши собственные проверки — в туннель.
+    run ip route replace default dev "$TUN_IF" table "$RT_TABLE"
+    run ip rule add from "192.168.${N}.0/24" lookup "$RT_TABLE"
+    run ip rule add from "$TUN_ADDR" lookup "$RT_TABLE"
+    # DNS настоящего модема доступен только через туннель.
+    run ip route replace "192.168.${REAL}.1/32" dev "$TUN_IF"
+    run iptables -t nat -A POSTROUTING -o "$TUN_IF" -j MASQUERADE
+    run iptables -A FORWARD -i "$ifn" -o "$TUN_IF" -j ACCEPT
+    run iptables -A FORWARD -i "$TUN_IF" -o "$ifn" -j ACCEPT
+    # Через туннель крупные пакеты иначе теряются молча.
+    run iptables -A FORWARD -o "$TUN_IF" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    ok "трафик с 192.168.${N}.0/24 уходит в прокси"
+}
+
+routing_down() {
+    local ifn; ifn="$(gadget_ifname)"
+    if [[ -n "$DRY" ]]; then
+        printf '  + ip rule del from 192.168.%s.0/24 lookup %s  (пока есть)\n' "$N" "$RT_TABLE"
+        printf '  + ip rule del from %s lookup %s  (пока есть)\n' "$TUN_ADDR" "$RT_TABLE"
+    else
+        while ip rule del from "192.168.${N}.0/24" lookup "$RT_TABLE" 2>/dev/null; do :; done
+        while ip rule del from "$TUN_ADDR" lookup "$RT_TABLE" 2>/dev/null; do :; done
+    fi
+    run ip route flush table "$RT_TABLE"
+    run ip route del "192.168.${REAL}.1/32" dev "$TUN_IF"
+    run iptables -t nat -D POSTROUTING -o "$TUN_IF" -j MASQUERADE
+    run iptables -D FORWARD -i "$ifn" -o "$TUN_IF" -j ACCEPT
+    run iptables -D FORWARD -i "$TUN_IF" -o "$ifn" -j ACCEPT
+    run iptables -D FORWARD -o "$TUN_IF" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    return 0
+}
+
+usbip_up() {
+    step "отдаём USB по сети"
+    if [[ -n "$USBIP_ALLOW" ]]; then
+        run iptables -D INPUT -p tcp --dport 3240 ! -s "$USBIP_ALLOW" -j DROP
+        run iptables -I INPUT -p tcp --dport 3240 ! -s "$USBIP_ALLOW" -j DROP
+    fi
+    spawn usbipd usbipd --device
+    ok "usbipd: устройство $(udc_name) ждёт ${USBIP_ALLOW:-кого угодно}"
+}
+
+usbip_down() {
+    kill_named usbipd
+    [[ -n "$USBIP_ALLOW" ]] && run iptables -D INPUT -p tcp --dport 3240 ! -s "$USBIP_ALLOW" -j DROP
+    return 0
+}
+
+# Пароль прокси лежит в файле 600, а не в окружении и не в аргументах:
+# из окружения его видно в /proc/<pid>/environ, из аргументов — в `ps`.
+pass_file_write() {
+    if [[ -n "$DRY" ]]; then
+        printf '  + пароль прокси → %s (права 600)\n' "$PASS_FILE"
+        return 0
+    fi
+    install -d -m 700 "$VMODEM_ETC"
+    ( umask 077; printf '%s\n' "$PROXY_PASS" >"$PASS_FILE" )
+}
+
+api_up() {
+    step "веб-морда модема на 192.168.${N}.1:80"
+    install -d -m 700 "$VMODEM_RUN"
+    pass_file_write
+    spawn api "$API_BIN" --virt "$N" --real "$REAL" --socks "$PROXY" \
+        ${PROXY_USER:+--socks-user "$PROXY_USER"} --socks-pass-file "$PASS_FILE"
+    ok "vmodem-api запущен"
+}
+
+dns_up() {
+    step "DHCP и DNS для сервера"
+    dnsmasq_conf
+    spawn dnsmasq dnsmasq --keep-in-foreground --conf-file="${VMODEM_ETC}/dnsmasq.conf"
+    ok "dnsmasq: .100 по DHCP, DNS на 192.168.${N}.1"
+}
+
+# ── Команды ────────────────────────────────────────────────────────────────
+cmd_up() {
+    conf_load
+    conf_check || die "поправь конфиг: vmodem config set ..."
+    install -d -m 700 "$VMODEM_RUN"
+    install -d -m 755 "$VMODEM_LOG_DIR" "$VMODEM_LIB"
+    [[ -n "$DRY" ]] && echo "  (--dry-run: ничего не делаю, только показываю)"
+    gadget_up   || return 1
+    lan_up      || return 1
+    dns_up      || return 1
+    tunnel_up   || return 1
+    routing_up  || return 1
+    api_up      || return 1
+    usbip_up    || return 1
+    echo
+    ok "модем ${N} поднят: 192.168.${N}.1 ← сервер 192.168.${N}.100, прокси ${PROXY}"
+}
+
+cmd_down() {
+    conf_load
+    step "снимаю модем ${N:-?}"
+    usbip_down
+    kill_named api
+    routing_down
+    kill_named singbox
+    kill_named dnsmasq
+    lan_down
+    gadget_down
+    ok "снято"
+}
+
+cmd_status() {
+    conf_load
+    local ifn; ifn="$(gadget_ifname)"
+    printf '  модем:    N=%s real=%s прокси=%s\n' "${N:-?}" "${REAL:-?}" "${PROXY:-?}"
+    if [[ -d "$GADGET" ]]; then
+        printf '  гаджет:   %s:%s UDC=%s\n' \
+            "$(cat "${GADGET}/idVendor" 2>/dev/null)" "$(cat "${GADGET}/idProduct" 2>/dev/null)" \
+            "$(cat "${GADGET}/UDC" 2>/dev/null)"
+    else
+        printf '  гаджет:   нет\n'
+    fi
+    printf '  %-9s %s\n' "${ifn}:" "$(ip -4 -o addr show "$ifn" 2>/dev/null | awk '{print $4}' | paste -sd' ' -)"
+    printf '  %-9s %s\n' "${TUN_IF}:" "$(ip -4 -o addr show "$TUN_IF" 2>/dev/null | awk '{print $4}' | paste -sd' ' -)"
+    local p
+    for p in dnsmasq singbox api usbipd; do
+        printf '  %-9s %s\n' "${p}:" "$(pid_of "$p" >/dev/null && echo "pid $(pid_of "$p")" || echo "нет")"
+    done
+}
+
+cmd_check() {
+    conf_load
+    conf_check || return 1
+    local rc=0 ifn; ifn="$(gadget_ifname)"
+
+    [[ -d "$GADGET" && -s "${GADGET}/UDC" ]] && ok "USB-гаджет привязан к $(cat "${GADGET}/UDC")" \
+        || { bad "USB-гаджет не привязан"; rc=1; }
+    ip -4 addr show "$ifn" 2>/dev/null | grep -q "192.168.${N}.1" \
+        && ok "${ifn}: 192.168.${N}.1" || { bad "${ifn} без адреса"; rc=1; }
+    ip -4 addr show "$TUN_IF" 2>/dev/null | grep -q "$TUN_ADDR" \
+        && ok "туннель ${TUN_IF} поднят" || { bad "туннель ${TUN_IF} не поднят"; rc=1; }
+    pid_of dnsmasq >/dev/null && ok "dnsmasq живой" || { bad "dnsmasq не запущен"; rc=1; }
+    pid_of api >/dev/null && ok "vmodem-api живой" || { bad "vmodem-api не запущен"; rc=1; }
+    pid_of usbipd >/dev/null && ok "usbipd живой" || { bad "usbipd не запущен"; rc=1; }
+
+    step "модем через прокси"
+    pass_file_write
+    "$API_BIN" --virt "$N" --real "$REAL" --socks "$PROXY" \
+        ${PROXY_USER:+--socks-user "$PROXY_USER"} --socks-pass-file "$PASS_FILE" --probe || rc=1
+
+    step "веб-морда на виртуальном адресе"
+    if curl -s -m 10 -o /dev/null -w '%{http_code}' "http://192.168.${N}.1/api/webserver/SesTokInfo" 2>/dev/null | grep -q 200; then
+        ok "192.168.${N}.1 отвечает как модем"
+    else
+        bad "192.168.${N}.1 не отвечает"; rc=1
+    fi
+
+    step "выход в интернет через прокси"
+    local wan
+    wan="$(curl -s -m 15 --interface "$TUN_ADDR" 'http://ip-api.com/line/?fields=query' 2>/dev/null | head -1)"
+    if [[ "$wan" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ok "внешний IP: ${wan}"
+    else
+        bad "внешний IP не получен"; rc=1
+    fi
+    return $rc
+}
+
+cmd_install_service() {
+    local unit=/etc/systemd/system/vmodem.service
+    cat >"$unit" <<EOF
+[Unit]
+Description=vmodem — виртуальный модем
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vmodem up
+ExecStop=/usr/local/sbin/vmodem down
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable vmodem.service >/dev/null 2>&1
+    ok "автозапуск включён: systemctl start vmodem"
+}
+
+# ── Разбор аргументов ──────────────────────────────────────────────────────
+ACTION="${1:-}"; shift 2>/dev/null || true
+_args=()
+for a in "$@"; do
+    if [[ "$a" == "--dry-run" ]]; then DRY=1; else _args+=("$a"); fi
+done
+set -- "${_args[@]+"${_args[@]}"}"
+
+case "$ACTION" in
+    config)          cmd_config "$@" ;;
+    up)              cmd_up ;;
+    down)            cmd_down ;;
+    restart)         cmd_down; cmd_up ;;
+    status)          cmd_status ;;
+    check)           cmd_check ;;
+    install-service) cmd_install_service ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 1 ;;
+esac
