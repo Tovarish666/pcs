@@ -2,7 +2,7 @@
 
 Управление сервером mobileproxy.space на хосте Proxmox: ВМ Ubuntu 24.04 с софтом mp.space, а дальше — виртуальные модемы, которые превращают готовые SOCKS5-прокси в USB-модемы Huawei для этой ВМ.
 
-Каждое действие — отдельный маленький скрипт в `cmd/`. Меню `pcs` их только вызывает; любую команду можно запустить напрямую.
+Каждое действие — отдельный маленький скрипт. Меню `pcs` их только вызывает, и любую команду можно выполнить руками.
 
 ## Установка на хост Proxmox
 
@@ -10,54 +10,169 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 ```
 
-Ставит репозиторий в `/opt/pcs` и команду `pcs`. Обновление — `pcs update`.
+Репозиторий уезжает в `/opt/pcs`, появляется команда `pcs`. Обновление — `pcs update`.
 
-## Быстрый старт
+---
+
+# Команды на хосте
+
+Общее для всех: запускать от root на хосте Proxmox; чего не передали флагом — команда спросит; `--help` показывает параметры; лог в `/var/log/pcs/pcs-ГГГГММДД.log`.
+
+## pcs vm-create — ВМ Ubuntu 24.04
+
+Создаёт ВМ из облачного образа: root по паролю через SSH, qemu-guest-agent, предсказуемый DNS.
 
 ```bash
-pcs vm-create        # ВМ Ubuntu 24.04 (спросит ID, сеть, пароль root)
-pcs mp-install       # софт mobileproxy.space + перезагрузка + проверка
-pcs mp-auth set      # ключ сервера из ЛК, если не задали при установке
+pcs vm-create
 ```
 
-После `mp-install` в конце печатается сводка для ЛК mobileproxy.space.
+```bash
+pcs vm-create --id 200 --name mpspace --cores 8 --ram 8192 --disk 50 \
+              --storage local-lvm --bridge vmbr0 \
+              --ip 10.0.0.50/24 --gw 10.0.0.1 --dns "1.1.1.1 8.8.8.8"
+```
 
-## Команды
+- `--dhcp` вместо `--ip/--gw` — адрес возьмётся у DHCP, PCS узнает его через guest agent.
+- `--replace` — снести существующую ВМ с этим ID и создать заново (спросит подтверждение).
+- Пароль root спрашивается вводом или берётся из `PCS_VM_PASSWORD`: в аргументах он был бы виден в `ps`.
+- Созданная ВМ становится активной для остальных команд.
 
-| Команда | Что делает |
-|---|---|
-| `pcs vm-create` | ВМ Ubuntu 24.04 из cloud image: root по паролю, guest agent, DNS |
-| `pcs mp-install` | install.sh и setup-modem-management.sh от mp.space, auth.mp, проверка служб |
-| `pcs mp-auth show \| set \| check` | ключ сервера (auth.mp): показать, сменить, проверить |
-| `pcs vm-use [id]` | список ВМ, выбор активной |
-| `pcs vm-fix-dns` | привести DNS на ВМ в порядок |
-| `pcs update` | обновить PCS |
+## pcs mp-install — софт mobileproxy.space
 
-`pcs <команда> --help` — параметры. Всё, что не передано флагом, команда спросит.
+```bash
+pcs mp-install
+```
 
-## Устройство
+```bash
+pcs mp-install --vm 200 --auth-file ~/auth.json
+```
+
+Шесть шагов: утилиты PCS на ВМ → выключение авто-обновлений apt и модули ядра для USB-модемов → `install.sh` от mp.space → `auth.mp` → `setup-modem-management.sh` от mp.space → перезагрузка, DNS и проверка служб. В конце печатается сводка для ЛК.
+
+- `--skip-modems` — без `setup-modem-management.sh`.
+- `--no-reboot` — без перезагрузки (настройки GRUB и initramfs применятся при следующей).
+- Скрипты mp.space скачиваются и выполняются на самой ВМ в фоне: они трогают сеть, и обрыв SSH установку не прерывает. Их логи на ВМ в `/root/pcs-run/`.
+- Повторный запуск безопасен: `install.sh` не трогает уже заданный `auth.mp`.
+
+## pcs mp-auth — ключ mobileproxy.space
+
+```bash
+pcs mp-auth show
+```
+
+```bash
+pcs mp-auth set '{"auth":"KEY:KEY","port":1800}'
+```
+
+```bash
+pcs mp-auth check
+```
+
+- `set --file auth.json` — взять из файла, `set --key KEY:KEY --port 1800` — без JSON.
+- `show --full` покажет ключ целиком (по умолчанию замаскирован).
+- Перезапускается только `nodejs-server`: `auth.mp` читает лишь он, и соединения клиентов mproxy не рвутся.
+
+## pcs vm-use — какая ВМ активна
+
+```bash
+pcs vm-use
+```
+
+```bash
+pcs vm-use 200
+```
+
+Без аргументов — список: сверху ВМ, про которые PCS знает, ниже остальные ВМ Proxmox. `--forget <id>` убирает ВМ из списка PCS, саму ВМ не трогает.
+
+## pcs vm-fix-dns — DNS на ВМ
+
+```bash
+pcs vm-fix-dns
+```
+
+```bash
+pcs vm-fix-dns --dns "1.1.1.1 8.8.8.8"
+```
+
+Нужна, если софт агрегатора или модем переписали `/etc/resolv.conf`.
+
+## pcs update — обновить PCS
+
+```bash
+pcs update
+```
+
+---
+
+# Утилиты на самих машинах
+
+PCS кладёт их в `/usr/local/sbin` и вызывает по SSH, но на машине они работают и сами по себе.
+
+## mp-auth — ключ mp.space на ВМ Ubuntu
+
+```bash
+mp-auth show
+```
+
+```bash
+mp-auth set '{"auth":"KEY:KEY","port":1800}'
+```
+
+```bash
+mp-auth check
+```
+
+Проверяет JSON и порт, пишет файл атомарно, хранит пять прошлых версий рядом (`auth.mp.bak.*`), после записи перезапускает `nodejs-server` и ждёт, пока тот ответит.
+
+## pcs-fix-dns — DNS на ВМ Ubuntu
+
+```bash
+pcs-fix-dns
+```
+
+Серверы берёт из `/etc/default/pcs-dns`. Идемпотентна: systemd-resolved остаётся, DNS от DHCP выключается в netplan, в конце проверяется разрешение имён.
+
+## vmodem-api — веб-морда модема на виртуальном адресе
+
+Живёт на виртуальном модеме. Слушает `192.168.<N>.1:80` и пересылает запросы настоящему модему `192.168.<real>.1` через SOCKS5, подменяя адреса в обе стороны. Опасные записи к модему не пропускает.
+
+```bash
+vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --socks-user user
+```
+
+```bash
+vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --socks-user user --probe
+```
+
+- Пароль прокси — в переменной `VMODEM_SOCKS_PASS` или в файле через `--socks-pass-file`: в аргументах он виден в `ps`.
+- `--probe` — разовая проверка: дойти до модема через прокси и показать его серийный номер.
+- Подробности — `vmodem-api --help`.
+
+---
+
+# Устройство
 
 ```
 pcs                 точка входа: меню и вызов команд
 cmd/<команда>.sh    одно действие — один скрипт
 lib/                общее: вывод и ввод, состояние, SSH, Proxmox
-guest/              утилиты, которые PCS кладёт на ВМ (/usr/local/sbin)
-  mp-auth           ключ mp.space на самой ВМ
-  pcs-fix-dns       DNS на самой ВМ
+guest/              то, что кладётся на машины (/usr/local/sbin)
+  mp-auth           ключ mp.space на ВМ Ubuntu
+  pcs-fix-dns       DNS на ВМ Ubuntu
+  vmodem-api        посредник HiLink API на виртуальном модеме
 tests/              проверки без ВМ и без root
 ```
 
 - Состояние: `/etc/pcs/mp/<vmid>.conf` (права 600), активная ВМ — `/etc/pcs/mp/active`.
-- Логи: `/var/log/pcs/pcs-ГГГГММДД.log`.
 - SSH к ВМ по паролю через `SSH_ASKPASS` (OpenSSH ≥ 8.4), без ключей и лишних пакетов.
-- Долгие установки идут на ВМ в фоне (`/root/pcs-run/`), PCS читает их лог. Обрыв SSH установку не прерывает.
+- Долгие установки идут на ВМ в фоне, PCS читает их лог.
 
-## Разработка
+# Разработка
 
 ```bash
-bash tests/test-mp-auth.sh
+bash tests/run-all.sh
 ```
 
-## Дальше
+# Дальше
 
-Виртуальные модемы: отдельная маленькая ВМ на каждую прокси, которая подключается к Ubuntu как USB-модем Huawei E3372h (тип 3 в mp.space).
+Виртуальные модемы: отдельная маленькая ВМ на каждую прокси. Внутри USB-устройство Huawei E3372h, которое отдаётся ВМ Ubuntu по USB/IP, DHCP и DNS для неё, туннель трафика в SOCKS5 и `vmodem-api` поверх. Для mp.space это модем типа 3.

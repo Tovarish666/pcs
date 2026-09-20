@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""vmodem-api — веб-морда настоящего модема на адресе виртуального.
+
+    vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --socks-user user
+    vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --probe
+
+Слушает 192.168.<virt>.1:80 и пересылает запросы настоящему модему
+192.168.<real>.1:80 через SOCKS5. Пароль прокси — в VMODEM_SOCKS_PASS или
+в файле (--socks-pass-file): в аргументах его видно в `ps`.
+
+Почему не хватает NAT. Прошивка E3372 сверяет заголовок Host со своим
+адресом и на чужой отвечает 307 Temporary Redirect, не отдавая сессию.
+Заголовок — содержимое потока, пакетным NAT его не переписать. Поэтому
+виртуальный адрес занимает этот посредник: правит Host в запросе.
+
+Обратное направление. Модем светит свой настоящий адрес в Location
+(на `GET /` отвечает `Location: http://192.168.<real>.1/html/index.html`)
+и в теле ответов (`/api/dhcp/settings`). Всё это меняется на виртуальный
+адрес, иначе mp.space и браузер уедут на адрес, которого у них нет.
+
+Опасные записи к модему не пропускаются — см. BLOCKED_POST и control_ok().
+"""
+
+import argparse
+import asyncio
+import logging
+import os
+import re
+import socket
+import struct
+import sys
+import time
+
+HDR_END = re.compile(rb"\r?\n\r?\n")
+ABS_URI = re.compile(rb"^(\S+)\s+https?://[^/\s]+(\S*)\s+(HTTP/\d\.\d)$", re.I)
+CONTROL_RE = re.compile(rb"<Control>\s*(\d+)\s*</Control>", re.I)
+
+MAX_HDR = 32 * 1024            # заголовки длиннее — это не модем
+MAX_BODY_IN = 256 * 1024       # тело запроса, которое читаем целиком
+MAX_BODY_REWRITE = 1024 * 1024 # ответ длиннее правим только в заголовках
+CONNECT_TIMEOUT = 10
+IO_TIMEOUT = 30
+
+# POST по этим путям к модему не уходит.
+BLOCKED_POST = (
+    b"/api/dhcp/settings",        # сменит подсеть модема: отвалится и API, и прокси
+    b"/api/user/password",        # пароль веб-морды
+    b"/api/user/modify-password",
+    b"/api/online-update",        # прошивка
+    b"/api/device/reset",         # сброс настроек
+)
+
+# Ответ на заблокированный запрос — в формате ошибок Huawei: клиент их понимает.
+BLOCKED_BODY = (b'<?xml version="1.0" encoding="UTF-8"?>\r\n'
+                b"<error><code>100003</code><message>No rights</message></error>\r\n")
+
+log = logging.getLogger("vmodem-api")
+
+
+# ── SOCKS5 ─────────────────────────────────────────────────────────────────
+class SocksError(Exception):
+    pass
+
+
+async def socks5_connect(proxy, dst_ip, dst_port, user=None, password=None):
+    """TCP до dst через SOCKS5. Возвращает (reader, writer)."""
+    host, port = proxy
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=CONNECT_TIMEOUT)
+    except (OSError, asyncio.TimeoutError) as e:
+        raise SocksError("прокси %s:%s недоступен: %s" % (host, port, e))
+
+    try:
+        methods = b"\x00\x02" if user else b"\x00"
+        writer.write(b"\x05" + bytes([len(methods)]) + methods)
+        await writer.drain()
+        ver, method = await asyncio.wait_for(reader.readexactly(2), timeout=IO_TIMEOUT)
+        if ver != 5:
+            raise SocksError("это не SOCKS5 (версия %d)" % ver)
+        if method == 2:
+            if not user:
+                raise SocksError("прокси требует логин, а его не дали")
+            u = user.encode()
+            p = (password or "").encode()
+            writer.write(b"\x01" + bytes([len(u)]) + u + bytes([len(p)]) + p)
+            await writer.drain()
+            _, status = await asyncio.wait_for(reader.readexactly(2), timeout=IO_TIMEOUT)
+            if status != 0:
+                raise SocksError("прокси не принял логин/пароль")
+        elif method == 0:
+            if user:
+                log.debug("прокси не спросил логин")
+        else:
+            raise SocksError("прокси предлагает метод авторизации %d, он не поддержан" % method)
+
+        writer.write(b"\x05\x01\x00\x01" + socket.inet_aton(dst_ip) + struct.pack(">H", dst_port))
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.readexactly(4), timeout=IO_TIMEOUT)
+        if resp[1] != 0:
+            raise SocksError("прокси не дал соединение с %s:%d (код %d)" % (dst_ip, dst_port, resp[1]))
+        atyp = resp[3]
+        if atyp == 1:
+            await reader.readexactly(4 + 2)
+        elif atyp == 3:
+            ln = (await reader.readexactly(1))[0]
+            await reader.readexactly(ln + 2)
+        elif atyp == 4:
+            await reader.readexactly(16 + 2)
+        else:
+            raise SocksError("непонятный тип адреса в ответе прокси: %d" % atyp)
+        return reader, writer
+    except asyncio.IncompleteReadError:
+        writer.close()
+        raise SocksError("прокси оборвал соединение на рукопожатии")
+    except (OSError, asyncio.TimeoutError) as e:
+        writer.close()
+        raise SocksError("ошибка обмена с прокси: %s" % e)
+    except SocksError:
+        writer.close()
+        raise
+
+
+# ── HTTP: разбор и правка ──────────────────────────────────────────────────
+async def read_head(reader):
+    """Заголовки целиком плюс хвост тела, который приехал вместе с ними."""
+    buf = b""
+    while True:
+        chunk = await asyncio.wait_for(reader.read(8192), timeout=IO_TIMEOUT)
+        if not chunk:
+            return (buf, b"") if buf else (b"", b"")
+        buf += chunk
+        m = HDR_END.search(buf)
+        if m:
+            return buf[:m.start()], buf[m.end():]
+        if len(buf) > MAX_HDR:
+            raise ValueError("заголовки длиннее %d байт" % MAX_HDR)
+
+
+def headers_dict(head):
+    out = {}
+    for line in head.split(b"\r\n")[1:]:
+        if b":" in line:
+            k, v = line.split(b":", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+
+def rewrite_request(head, host):
+    """Host на настоящий адрес, keep-alive выключить, request-line в origin-form."""
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    out, seen_host = [], False
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if i == 0:
+            # HTTP-клиенты и прокси присылают absolute-form (GET http://host/path).
+            # Веб-сервер модема такого не понимает и молча ждёт, пока клиент отвалится.
+            m = ABS_URI.match(line)
+            if m:
+                line = m.group(1) + b" " + (m.group(2) or b"/") + b" " + m.group(3)
+            out.append(line)
+        elif low.startswith(b"host:"):
+            out.append(b"Host: " + host.encode())
+            seen_host = True
+        elif low.startswith(b"connection:") or low.startswith(b"proxy-connection:"):
+            continue
+        elif low.startswith(b"accept-encoding:"):
+            # Пусть отвечает без сжатия: иначе адреса в теле не поправить.
+            continue
+        else:
+            out.append(line)
+    if not seen_host:
+        out.insert(1, b"Host: " + host.encode())
+    out.append(b"Connection: close")
+    return b"\r\n".join(out)
+
+
+def rewrite_response_head(head, real_prefix, virt_prefix):
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    out = []
+    for i, line in enumerate(lines):
+        if i == 0:
+            out.append(line)
+            continue
+        low = line.lower()
+        if low.startswith(b"connection:") or low.startswith(b"keep-alive:"):
+            continue
+        out.append(line.replace(real_prefix, virt_prefix))
+    out.append(b"Connection: close")
+    return b"\r\n".join(out)
+
+
+def set_content_length(head, length):
+    lines = head.split(b"\r\n")
+    out = [l for l in lines if not l.lower().startswith(b"content-length:")]
+    out.append(b"Content-Length: %d" % length)
+    return b"\r\n".join(out)
+
+
+def is_texty(headers):
+    ct = headers.get(b"content-type", b"").lower()
+    return (ct.startswith(b"text/") or b"xml" in ct or b"json" in ct
+            or b"javascript" in ct or not ct)
+
+
+def control_ok(body):
+    """Из /api/device/control пропускаем только перезагрузку (Control=1)."""
+    m = CONTROL_RE.search(body or b"")
+    if not m:
+        return False
+    return m.group(1) == b"1"
+
+
+def blocked_reason(method, path, body):
+    if method != b"POST":
+        return None
+    low = path.lower()
+    for p in BLOCKED_POST:
+        if low.startswith(p):
+            return "запись по %s" % p.decode()
+    if low.startswith(b"/api/device/control") and not control_ok(body):
+        m = CONTROL_RE.search(body or b"")
+        return "device/control=%s (пропускаем только 1 — перезагрузку)" % (
+            m.group(1).decode() if m else "?")
+    return None
+
+
+# ── Сервер ─────────────────────────────────────────────────────────────────
+class Proxy:
+    def __init__(self, args):
+        self.virt_ip = "192.168.%d.1" % args.virt
+        self.real_ip = "192.168.%d.1" % args.real
+        self.virt_prefix = ("192.168.%d." % args.virt).encode()
+        self.real_prefix = ("192.168.%d." % args.real).encode()
+        self.proxy = args.socks
+        self.user = args.socks_user
+        self.password = args.socks_pass
+        self.requests = 0
+        self.blocked = 0
+        self.errors = 0
+
+    async def handle(self, creader, cwriter):
+        started = time.monotonic()
+        rwriter = None
+        method = path = b"?"
+        try:
+            head, rest = await read_head(creader)
+            if not head:
+                return
+            first = head.split(b"\r\n", 1)[0].split()
+            method = first[0] if first else b"?"
+            path = first[1] if len(first) > 1 else b"/"
+            headers = headers_dict(head)
+            body = await self.read_body(creader, headers, rest)
+
+            reason = blocked_reason(method, path, body)
+            if reason:
+                self.blocked += 1
+                log.warning("НЕ ПРОПУЩЕНО %s %s — %s", method.decode(), path.decode(), reason)
+                await self.reply(cwriter, b"HTTP/1.1 200 OK", BLOCKED_BODY, b"text/html")
+                return
+
+            self.requests += 1
+            rreader, rwriter = await socks5_connect(
+                self.proxy, self.real_ip, 80, self.user, self.password)
+            rwriter.write(rewrite_request(head, self.real_ip) + b"\r\n\r\n" + body)
+            await rwriter.drain()
+            status = await self.relay_response(rreader, cwriter)
+            log.info("%s %s → %s (%d мс)", method.decode(), path.decode(),
+                     status, int((time.monotonic() - started) * 1000))
+        except SocksError as e:
+            self.errors += 1
+            log.error("%s %s — %s", method.decode("latin1"), path.decode("latin1"), e)
+            await self.reply(cwriter, b"HTTP/1.1 502 Bad Gateway",
+                             b"vmodem-api: %s\r\n" % str(e).encode(), b"text/plain")
+        except (asyncio.TimeoutError, ValueError) as e:
+            self.errors += 1
+            log.error("%s %s — %s", method.decode("latin1"), path.decode("latin1"), e)
+            await self.reply(cwriter, b"HTTP/1.1 504 Gateway Timeout",
+                             b"vmodem-api: %s\r\n" % str(e).encode(), b"text/plain")
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            for w in (cwriter, rwriter):
+                if w is not None:
+                    try:
+                        w.close()
+                    except OSError:
+                        pass
+
+    async def read_body(self, reader, headers, rest):
+        """Тело запроса целиком: его надо посмотреть до отправки модему."""
+        if headers.get(b"transfer-encoding", b"").lower() == b"chunked":
+            return rest                      # HiLink так не присылает
+        try:
+            need = int(headers.get(b"content-length", b"0") or 0)
+        except ValueError:
+            need = 0
+        need = min(need, MAX_BODY_IN)
+        body = rest
+        while len(body) < need:
+            chunk = await asyncio.wait_for(reader.read(need - len(body)), timeout=IO_TIMEOUT)
+            if not chunk:
+                break
+            body += chunk
+        return body
+
+    async def relay_response(self, rreader, cwriter):
+        head, rest = await read_head(rreader)
+        if not head:
+            raise ValueError("модем ничего не ответил")
+        status = head.split(b"\r\n", 1)[0].split(b" ")[1:2]
+        status = status[0].decode() if status else "?"
+        headers = headers_dict(head)
+        head = rewrite_response_head(head, self.real_prefix, self.virt_prefix)
+
+        chunked = headers.get(b"transfer-encoding", b"").lower() == b"chunked"
+        try:
+            length = int(headers.get(b"content-length", b"")) if headers.get(b"content-length") else None
+        except ValueError:
+            length = None
+
+        # Тело правим, только когда знаем длину, оно текстовое и небольшое —
+        # иначе просто переливаем как есть (двоичное, chunked, большое).
+        if not chunked and length is not None and length <= MAX_BODY_REWRITE and is_texty(headers):
+            body = rest
+            while len(body) < length:
+                chunk = await asyncio.wait_for(rreader.read(length - len(body)), timeout=IO_TIMEOUT)
+                if not chunk:
+                    break
+                body += chunk
+            body = body.replace(self.real_prefix, self.virt_prefix)
+            head = set_content_length(head, len(body))
+            cwriter.write(head + b"\r\n\r\n" + body)
+            await cwriter.drain()
+            return status
+
+        cwriter.write(head + b"\r\n\r\n" + rest)
+        await cwriter.drain()
+        while True:
+            chunk = await asyncio.wait_for(rreader.read(65536), timeout=IO_TIMEOUT)
+            if not chunk:
+                break
+            cwriter.write(chunk)
+            await cwriter.drain()
+        return status
+
+    @staticmethod
+    async def reply(writer, status_line, body, ctype):
+        try:
+            writer.write(status_line + b"\r\n"
+                         + b"Content-Type: " + ctype + b"\r\n"
+                         + b"Content-Length: %d\r\n" % len(body)
+                         + b"Connection: close\r\n\r\n" + body)
+            await writer.drain()
+        except (ConnectionError, OSError):
+            pass
+
+
+# ── Разовая проверка ───────────────────────────────────────────────────────
+async def probe(args):
+    """Дойти до модема через прокси и показать, кто там отвечает."""
+    p = Proxy(args)
+    for path, what in (("/api/webserver/SesTokInfo", "сессия"),
+                       ("/api/device/information", "устройство")):
+        try:
+            rreader, rwriter = await socks5_connect(
+                p.proxy, p.real_ip, 80, p.user, p.password)
+        except SocksError as e:
+            print("  ✗ %s" % e)
+            return 1
+        try:
+            rwriter.write(("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n"
+                           % (path, p.real_ip)).encode())
+            await rwriter.drain()
+            head, rest = await read_head(rreader)
+            body = rest
+            while True:
+                chunk = await asyncio.wait_for(rreader.read(65536), timeout=IO_TIMEOUT)
+                if not chunk:
+                    break
+                body += chunk
+        except (asyncio.TimeoutError, OSError, ValueError) as e:
+            print("  ✗ %s: %s" % (path, e))
+            return 1
+        finally:
+            rwriter.close()
+
+        status = head.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        if b"200" not in status.encode():
+            print("  ✗ %s: %s" % (path, status))
+            return 1
+        serial = re.search(rb"<SerialNumber>([^<]+)</SerialNumber>", body)
+        imei = re.search(rb"<Imei>([^<]+)</Imei>", body)
+        extra = ""
+        if serial:
+            extra = " SerialNumber=%s" % serial.group(1).decode()
+        elif imei:
+            extra = " IMEI=%s" % imei.group(1).decode()
+        print("  ✓ %s: %s%s" % (what, status.split(" ", 1)[-1], extra))
+    print("  ✓ модем 192.168.%d.1 доступен через прокси" % args.real)
+    return 0
+
+
+# ── Запуск ─────────────────────────────────────────────────────────────────
+def parse_hostport(s, what):
+    if ":" not in s:
+        raise argparse.ArgumentTypeError("%s: нужно host:port, а не «%s»" % (what, s))
+    host, port = s.rsplit(":", 1)
+    try:
+        return host, int(port)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%s: порт не число в «%s»" % (what, s))
+
+
+def octet(v):
+    n = int(v)
+    if not 1 <= n <= 254:
+        raise argparse.ArgumentTypeError("октет вне 1..254: %s" % v)
+    return n
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="vmodem-api",
+        description="Веб-морда настоящего модема на адресе виртуального.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Пароль прокси: VMODEM_SOCKS_PASS или --socks-pass-file.")
+    ap.add_argument("--virt", type=octet, required=True, help="октет виртуального модема (адрес 192.168.<virt>.1)")
+    ap.add_argument("--real", type=octet, required=True, help="октет настоящего модема за прокси")
+    ap.add_argument("--socks", required=True, help="SOCKS5 host:port")
+    ap.add_argument("--socks-user", default=os.environ.get("VMODEM_SOCKS_USER") or None)
+    ap.add_argument("--socks-pass-file", help="файл с паролем прокси")
+    ap.add_argument("--listen", help="что слушать (по умолчанию 192.168.<virt>.1:80)")
+    ap.add_argument("--probe", action="store_true", help="разовая проверка и выход")
+    ap.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"))
+    args = ap.parse_args(argv)
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper()),
+                        format="%(asctime)s [vmodem-api] %(levelname)s %(message)s",
+                        datefmt="%F %T")
+
+    args.socks = parse_hostport(args.socks, "--socks")
+    args.socks_pass = os.environ.get("VMODEM_SOCKS_PASS")
+    if args.socks_pass_file:
+        try:
+            with open(args.socks_pass_file) as f:
+                args.socks_pass = f.read().strip()
+        except OSError as e:
+            log.error("не прочитать %s: %s", args.socks_pass_file, e)
+            return 1
+    if args.socks_user and not args.socks_pass:
+        log.warning("логин прокси задан, пароль — нет")
+
+    if args.probe:
+        return asyncio.run(probe(args))
+
+    listen = parse_hostport(args.listen, "--listen") if args.listen else ("192.168.%d.1" % args.virt, 80)
+    proxy = Proxy(args)
+
+    async def run():
+        server = await asyncio.start_server(proxy.handle, listen[0], listen[1])
+        addr = server.sockets[0].getsockname()
+        log.info("слушаю %s:%d → модем %s через SOCKS5 %s:%d",
+                 addr[0], addr[1], proxy.real_ip, proxy.proxy[0], proxy.proxy[1])
+        # Порт пишем в stdout: тестам и vmodem он нужен, когда просили 0.
+        print("listening %s:%d" % (addr[0], addr[1]), flush=True)
+        async with server:
+            await server.serve_forever()
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+    except OSError as e:
+        log.error("не могу слушать %s:%d — %s", listen[0], listen[1], e)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
