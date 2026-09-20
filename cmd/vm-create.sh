@@ -125,7 +125,7 @@ password_entry() {
 
 build_user_data() {                # build_user_data <файл>
     local fixdns_b64
-    fixdns_b64="$(base64 -w0 "$PCS_ROOT/guest/pcs-fix-dns")"
+    fixdns_b64="$(b64_file "$PCS_ROOT/guest/pcs-fix-dns")"
     {
         cat <<YAML
 #cloud-config

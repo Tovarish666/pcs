@@ -22,6 +22,7 @@ COMMANDS=(
     "mp-auth set|Задать/сменить ключ mobileproxy.space (auth.mp)"
     "mp-auth show|Показать auth.mp"
     "mp-auth check|Проверить auth.mp и nodejs-server"
+    "modem-template|Собрать шаблон ВМ виртуального модема"
     "vm-use|Список ВМ, выбор активной"
     "vm-fix-dns|Починить DNS на ВМ"
     "update|Обновить PCS"
@@ -33,7 +34,7 @@ usage() {
     for f in "$PCS_ROOT"/cmd/*.sh; do
         name="${f##*/}"; name="${name%.sh}"
         desc="$(sed -n '3s/^#  pcs [a-z-]* — //p' "$f")"
-        printf '  pcs %-12s %s\n' "$name" "$desc" >&2
+        printf '  pcs %-15s %s\n' "$name" "$desc" >&2
     done
     printf '\n  pcs <команда> --help — параметры команды\n\n' >&2
 }

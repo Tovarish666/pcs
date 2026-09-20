@@ -72,6 +72,29 @@ pcs mp-auth check
 - `show --full` покажет ключ целиком (по умолчанию замаскирован).
 - Перезапускается только `nodejs-server`: `auth.mp` читает лишь он, и соединения клиентов mproxy не рвутся.
 
+## pcs modem-template — шаблон ВМ виртуального модема
+
+Собирается один раз, потом каждый модем будет его связанным клоном.
+
+```bash
+pcs modem-template
+```
+
+```bash
+pcs modem-template --id 9000 --storage local-lvm --bridge vmbr0 \
+                   --ram 256 --cores 1 --disk 4 --singbox 1.10.0
+```
+
+```bash
+PCS_MODEM_PASSWORD=секрет pcs modem-template --print-user-data
+```
+
+Что внутри шаблона: Debian 13 из облачного образа, пакеты `usbip`, `dnsmasq-base`, `python3`, `iptables`, модули ядра для USB-устройства, `sing-box` и наши утилиты `vmodem`, `vmodem-api`, `vmodem-setup`. В конце ВМ чистится от следов первой загрузки, выключается и превращается в шаблон Proxmox.
+
+- Пароль root один на все модемы: спрашивается или берётся из `PCS_MODEM_PASSWORD`, хранится в `/etc/pcs/modem/template.conf` с правами 600.
+- `--print-user-data` печатает cloud-init и выходит: посмотреть глазами или собрать ВМ руками, без Proxmox и без root.
+- `--replace` пересобирает шаблон с нуля.
+
 ## pcs vm-use — какая ВМ активна
 
 ```bash
@@ -177,6 +200,22 @@ vmodem install-service
 
 Что делает `up`, по порядку: гаджет Huawei `12d1:14dc` с функцией ECM в configfs → адрес `192.168.N.1` на `usb0` → dnsmasq (DHCP ровно на `.100`, DNS с переадресацией на DNS настоящего модема) → sing-box (весь TCP и UDP в SOCKS5) → маршруты, NAT и MSS → `vmodem-api` → `usbipd`.
 
+## vmodem-setup — подготовить машину к роли модема
+
+```bash
+vmodem-setup
+```
+
+```bash
+vmodem-setup --check
+```
+
+```bash
+vmodem-setup --dry-run --singbox-version 1.10.0
+```
+
+Загружает модули `configfs`, `libcomposite`, `usbip-vudc` и прописывает их на будущие загрузки, ставит `sing-box` нужной версии и проверяет, что на месте `usbipd`, `dnsmasq`, `python3`, `iptables`, сами `vmodem` и `vmodem-api` и виртуальный USB-контроллер. Вызывается при сборке шаблона и потом руками.
+
 ## vmodem-api — веб-морда модема на виртуальном адресе
 
 Живёт на виртуальном модеме. Слушает `192.168.<N>.1:80` и пересылает запросы настоящему модему `192.168.<real>.1` через SOCKS5, подменяя адреса в обе стороны. Опасные записи к модему не пропускает.
@@ -204,11 +243,13 @@ lib/                общее: вывод и ввод, состояние, SSH,
 guest/              то, что кладётся на машины (/usr/local/sbin)
   mp-auth           ключ mp.space на ВМ Ubuntu
   pcs-fix-dns       DNS на ВМ Ubuntu
+  vmodem            виртуальный модем целиком: up/down/status/check
   vmodem-api        посредник HiLink API на виртуальном модеме
+  vmodem-setup      подготовка ВМ к роли модема
 tests/              проверки без ВМ и без root
 ```
 
-- Состояние: `/etc/pcs/mp/<vmid>.conf` (права 600), активная ВМ — `/etc/pcs/mp/active`.
+- Состояние: `/etc/pcs/mp/<vmid>.conf` (права 600), активная ВМ — `/etc/pcs/mp/active`; шаблон модемов — `/etc/pcs/modem/template.conf`.
 - SSH к ВМ по паролю через `SSH_ASKPASS` (OpenSSH ≥ 8.4), без ключей и лишних пакетов.
 - Долгие установки идут на ВМ в фоне, PCS читает их лог.
 
@@ -230,7 +271,7 @@ bash tests/run-all.sh
                                           sing-box: весь TCP и UDP → SOCKS5 → интернет
 ```
 
-Что нужно на ВМ модема: ядро с `libcomposite`, `usbip-vudc` и configfs, пакеты `usbip`, `dnsmasq`, `python3`, `curl`, `iptables`, бинарник `sing-box` в `/usr/local/bin`. Базовый образ — облачный Debian, памяти около 128 МБ.
+Базовый образ — Debian 13 (`pcs modem-template` собирает шаблон сам): ядро с `libcomposite`, `usbip-vudc` и configfs, пакеты `usbip`, `dnsmasq-base`, `python3`, `curl`, `iptables`, `sing-box` в `/usr/local/bin`. ВМ модема — 256 МБ памяти, одно ядро, 4 ГБ диска.
 
 Со стороны Ubuntu устройство забирается так (пока вручную, потом это возьмёт на себя PCS):
 
@@ -238,8 +279,8 @@ bash tests/run-all.sh
 modprobe vhci-hcd && usbip attach -r <IP ВМ модема> -d usbip-vudc.0
 ```
 
-**Что уже проверено, а что нет.** `vmodem-api` проверен по-настоящему: на заглушках модема и SOCKS5 гоняются 20 проверок. У `vmodem` проверены конфиг и режим показа — 47 проверок. Сам запуск в ядре (гаджет, USB/IP, sing-box) на живой ВМ ещё не гонялся.
+**Что уже проверено, а что нет.** `vmodem-api` проверен по-настоящему: на заглушках модема и SOCKS5 гоняются 20 проверок. У `vmodem` проверены конфиг и режим показа (47), у шаблона — cloud-init и `vmodem-setup` (22). Сам запуск в ядре (гаджет, USB/IP, sing-box) и сборка шаблона на живом Proxmox ещё не гонялись.
 
 # Дальше
 
-Команды PCS на хосте: собрать шаблон ВМ модема, разложить прокси из таблицы по модемам, подключить их в Ubuntu и следить, что всё живо.
+`pcs modem-add` — клонировать шаблон под конкретную проксю, `pcs modem-attach` — подключить модем в Ubuntu, список, проверка и разбор таблицы с проксями.

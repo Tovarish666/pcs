@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  vmodem-setup — подготовить эту машину к роли виртуального модема.
+#
+#    vmodem-setup                     поставить недостающее и проверить
+#    vmodem-setup --check             только проверить, ничего не ставить
+#    vmodem-setup --dry-run           показать, что было бы сделано
+#    vmodem-setup --singbox-version 1.10.0
+#
+#  Делает три вещи:
+#    1. модули ядра libcomposite и usbip-vudc (сейчас и после перезагрузки)
+#       плюс configfs, через который собирается USB-устройство;
+#    2. sing-box нужной версии в /usr/local/bin;
+#    3. проверку, что на месте usbipd, dnsmasq, python3, iptables, curl
+#       и сами утилиты vmodem и vmodem-api.
+#
+#  Зовётся при сборке шаблона ВМ модема и потом руками, когда что-то менялось.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+SINGBOX_VERSION="${SINGBOX_VERSION:-1.10.0}"
+SINGBOX_BIN="${SINGBOX_BIN:-/usr/local/bin/sing-box}"
+SINGBOX_URL_TPL="${SINGBOX_URL_TPL:-https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-linux-amd64.tar.gz}"
+MODULES=(configfs libcomposite usbip-vudc)
+MODULES_FILE="${MODULES_FILE:-/etc/modules-load.d/vmodem.conf}"
+CONFIGFS_MNT="${CONFIGFS_MNT:-/sys/kernel/config}"
+
+CHECK_ONLY=""; DRY=""
+while (( $# )); do
+    case "$1" in
+        --check)           CHECK_ONLY=1; shift ;;
+        --dry-run)         DRY=1; shift ;;
+        --singbox-version) SINGBOX_VERSION="$2"; shift 2 ;;
+        -h|--help)
+            awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, ""); print }' "$0"
+            exit 0 ;;
+        *) echo "  ✗ неизвестный аргумент: $1" >&2; exit 1 ;;
+    esac
+done
+
+ok()   { echo "  ✓ $*"; }
+bad()  { echo "  ✗ $*" >&2; }
+warn() { echo "  ⚠ $*" >&2; }
+step() { echo "  → $*"; }
+
+run() {
+    if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*"; return 0; fi
+    "$@"
+}
+
+rc=0
+
+# ── 1. Модули ядра ─────────────────────────────────────────────────────────
+if [[ -z "$CHECK_ONLY" ]]; then
+    step "модули ядра"
+    if [[ -n "$DRY" ]]; then
+        printf '  + %s\n' "mount -t configfs none ${CONFIGFS_MNT} (если не смонтирован)"
+    elif ! mountpoint -q "$CONFIGFS_MNT" 2>/dev/null; then
+        mkdir -p "$CONFIGFS_MNT"
+        mount -t configfs none "$CONFIGFS_MNT" 2>/dev/null \
+            || warn "configfs не смонтировался — гаджет не соберётся"
+    fi
+    for m in "${MODULES[@]}"; do
+        run modprobe "$m" 2>/dev/null || warn "модуль ${m} не загрузился"
+    done
+    if [[ -n "$DRY" ]]; then
+        printf '  + %s → %s\n' "${MODULES[*]}" "$MODULES_FILE"
+    else
+        mkdir -p "$(dirname "$MODULES_FILE")"
+        printf '# vmodem: нужны для USB-устройства модема\n%s\n' "$(printf '%s\n' "${MODULES[@]}")" >"$MODULES_FILE"
+    fi
+fi
+
+# ── 2. sing-box ────────────────────────────────────────────────────────────
+singbox_installed_version() {
+    [[ -x "$SINGBOX_BIN" ]] || return 1
+    "$SINGBOX_BIN" version 2>/dev/null | awk '/^sing-box version/{print $3; exit}'
+}
+
+if [[ -z "$CHECK_ONLY" ]]; then
+    have="$(singbox_installed_version || true)"
+    if [[ "$have" == "$SINGBOX_VERSION" ]]; then
+        ok "sing-box ${have} уже стоит"
+    else
+        step "sing-box ${SINGBOX_VERSION}${have:+ (сейчас ${have})}"
+        # shellcheck disable=SC2059
+        url="$(printf "$SINGBOX_URL_TPL" "$SINGBOX_VERSION" "$SINGBOX_VERSION")"
+        if [[ -n "$DRY" ]]; then
+            printf '  + curl -fsSL %s | tar -xz → %s\n' "$url" "$SINGBOX_BIN"
+        else
+            tmp="$(mktemp -d)"
+            if curl -fsSL --retry 3 --connect-timeout 20 "$url" -o "$tmp/sb.tgz" \
+               && tar -xzf "$tmp/sb.tgz" -C "$tmp"; then
+                bin="$(find "$tmp" -type f -name sing-box -perm -u+x | head -1)"
+                if [[ -n "$bin" ]]; then
+                    install -m 0755 "$bin" "$SINGBOX_BIN"
+                    have="$(singbox_installed_version || true)"
+                    [[ "$have" == "$SINGBOX_VERSION" ]] && ok "sing-box ${have} поставлен" \
+                        || { bad "поставился sing-box ${have:-?}, а не ${SINGBOX_VERSION}"; rc=1; }
+                else
+                    bad "в архиве нет бинарника sing-box"; rc=1
+                fi
+            else
+                bad "sing-box не скачался: ${url}"; rc=1
+            fi
+            rm -rf "$tmp"
+        fi
+    fi
+fi
+
+# ── 3. Проверка ────────────────────────────────────────────────────────────
+[[ -n "$DRY" ]] && { echo; echo "  (--dry-run: ничего не делал)"; exit 0; }
+
+step "проверка"
+need_bin() {                       # need_bin <что> <пакет-подсказка>
+    if command -v "$1" >/dev/null 2>&1; then ok "$1"
+    else bad "нет $1 (apt-get install -y $2)"; rc=1; fi
+}
+need_bin usbipd usbip
+need_bin usbip usbip
+need_bin dnsmasq dnsmasq-base
+need_bin python3 python3
+need_bin iptables iptables
+need_bin curl curl
+need_bin ip iproute2
+
+for f in /usr/local/sbin/vmodem /usr/local/sbin/vmodem-api; do
+    [[ -x "$f" ]] && ok "${f##*/}" || { bad "нет ${f}"; rc=1; }
+done
+
+mountpoint -q "$CONFIGFS_MNT" 2>/dev/null && ok "configfs смонтирован" \
+    || { bad "configfs не смонтирован (${CONFIGFS_MNT})"; rc=1; }
+
+udc="$(ls /sys/class/udc 2>/dev/null | grep -m1 usbip-vudc || true)"
+[[ -n "$udc" ]] && ok "виртуальный USB-контроллер: ${udc}" \
+    || { bad "нет usbip-vudc в /sys/class/udc — модуль не загружен?"; rc=1; }
+
+ver="$(singbox_installed_version || true)"
+[[ -n "$ver" ]] && ok "sing-box ${ver}" || { bad "нет ${SINGBOX_BIN}"; rc=1; }
+
+echo
+(( rc == 0 )) && ok "машина готова быть виртуальным модемом" \
+    || bad "чего-то не хватает — см. выше"
+exit $rc
