@@ -55,6 +55,20 @@ sys.exit(0 if have == want else 2)
     fi
 done
 
+# ── cloud-init клона: то, что получит каждый модем ─────────────────────────
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export PCS_ETC="$tmp/etc" PCS_LOG_DIR="$tmp/log" PCS_LOG="$tmp/log/pcs.log"; mkdir -p "$tmp/log"
+bash -c 'source lib/common.sh; source lib/modem.sh; modem_clone_user_data "$1" vmodem-201 "clone-pass"' \
+    _ "$tmp/clone.yaml" 2>/dev/null
+cud="$(cat "$tmp/clone.yaml" 2>/dev/null)"
+has "у клона своё имя"          "$cud" "hostname: vmodem-201"
+has "клон не переставляет пакеты" "$cud" "package_update: false"
+hasnt "клон не тащит утилиты заново" "$cud" "encoding: b64"
+case "$cud" in
+    *"type: hash"*|*"type: text"*) ok_ "пароль у клона задан" ;;
+    *) bad_ "пароль у клона задан" ;;
+esac
+
 echo
 echo "vmodem-setup:"
 out="$(bash guest/vmodem-setup --dry-run 2>&1)"

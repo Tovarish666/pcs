@@ -11,13 +11,14 @@ _PCS_MODEM_LOADED=1
 PCS_MODEM_DIR="${PCS_ETC}/modem"
 TPL_FILE="${PCS_MODEM_DIR}/template.conf"
 
-TPL_KEYS=(TPL_ID TPL_NAME TPL_PASSWORD TPL_STORAGE TPL_BRIDGE TPL_RAM TPL_CORES TPL_DISK TPL_SINGBOX)
+TPL_KEYS=(TPL_ID TPL_NAME TPL_PASSWORD TPL_STORAGE TPL_BRIDGE TPL_RAM TPL_CORES TPL_DISK TPL_SINGBOX TPL_VMID_BASE)
 MDM_KEYS=(MDM_N MDM_REAL MDM_VMID MDM_IP MDM_PROXY MDM_PROXY_USER MDM_PROXY_PASS MDM_NAME)
 
 tpl_reset() {
     TPL_ID=""; TPL_NAME="vmodem-template"; TPL_PASSWORD=""
     TPL_STORAGE="local-lvm"; TPL_BRIDGE="vmbr0"
     TPL_RAM="256"; TPL_CORES="1"; TPL_DISK="4"; TPL_SINGBOX="1.10.0"
+    TPL_VMID_BASE="1000"          # ВМ модема n = TPL_VMID_BASE + n
 }
 tpl_reset
 
@@ -85,3 +86,53 @@ mdm_list() {
 }
 
 mdm_forget() { rm -f "$(mdm_file "$1")"; }
+
+# ── cloud-init для клона ───────────────────────────────────────────────────
+# Шаблон уже несёт пакеты и утилиты, клону нужно немного: своё имя и пароль.
+# Ключи SSH cloud-init пересоздаст сам — в шаблоне они стёрты.
+modem_yaml_sq() { printf "'%s'" "${1//\'/\'\'}"; }
+
+modem_password_entry() {           # modem_password_entry <пароль>
+    local h
+    if h="$(printf '%s' "$1" | openssl passwd -6 -stdin 2>/dev/null)" && [[ -n "$h" ]]; then
+        printf '      password: %s\n      type: hash\n' "$(modem_yaml_sq "$h")"
+    else
+        warn "openssl не дал хэш — пароль уйдёт в cloud-init текстом"
+        printf '      password: %s\n      type: text\n' "$(modem_yaml_sq "$1")"
+    fi
+}
+
+modem_clone_user_data() {          # modem_clone_user_data <файл> <имя> <пароль>
+    {
+        cat <<YAML
+#cloud-config
+# сгенерировано pcs ${PCS_VERSION} — виртуальный модем
+hostname: ${2}
+manage_etc_hosts: true
+preserve_hostname: false
+disable_root: false
+ssh_pwauth: true
+
+users:
+  - name: root
+    lock_passwd: false
+
+chpasswd:
+  expire: false
+  users:
+    - name: root
+YAML
+        modem_password_entry "$3"
+        cat <<'YAML'
+
+package_update: false
+package_upgrade: false
+
+runcmd:
+  - [ systemctl, enable, --now, qemu-guest-agent ]
+  - [ systemctl, restart, ssh ]
+YAML
+    } >"$1"
+    [[ -f "$1" ]] && chmod 600 "$1"
+    return 0
+}

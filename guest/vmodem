@@ -4,6 +4,7 @@
 #
 #    vmodem config show                    что настроено (пароль скрыт)
 #    vmodem config set N=64 REAL=101 ...   задать параметры
+#    vmodem config set -                   то же, КЛЮЧ=значение со stdin
 #    vmodem up [--dry-run]                 поднять (--dry-run: только показать)
 #    vmodem down                           снять
 #    vmodem restart
@@ -182,6 +183,16 @@ cmd_config() {
             conf_load
             (( $# )) || die "что задать? vmodem config set N=64 REAL=101 PROXY=1.2.3.4:15000"
             local kv k v
+            # «-» — параметры со stdin: пароль прокси не светится в ps.
+            if [[ "$1" == "-" ]]; then
+                local line
+                set --
+                while IFS= read -r line; do
+                    [[ -z "$line" || "$line" == \#* ]] && continue
+                    set -- "$@" "$line"
+                done
+                (( $# )) || die "на stdin пусто"
+            fi
             for kv in "$@"; do
                 [[ "$kv" == *=* ]] || die "нужно КЛЮЧ=значение, а не «${kv}»"
                 k="${kv%%=*}"; v="${kv#*=}"

@@ -52,6 +52,17 @@ rc_is "мусор в PROXY отбит"                      1 bash "$VM" config 
 conf2="$(cat "$TMP/etc/vmodem.conf")"
 [[ "$conf" == "$conf2" ]] && ok_ "после ошибок конфиг не тронут" || bad_ "после ошибок конфиг не тронут"
 
+# ── Параметры со stdin (так их шлёт PCS: пароль не виден в ps) ─────────────
+rc_is "config set - читает stdin" 0 bash -c \
+    "printf 'N=65\nREAL=102\nPROXY=5.6.7.8:1080:lg:%s\n' \"\$1\" | bash \"\$2\" config set -" _ "$PASSWORD" "$VM"
+conf3="$(cat "$TMP/etc/vmodem.conf")"
+has "N со stdin"      "$conf3" "N=65"
+has "real со stdin"   "$conf3" "REAL=102"
+saved2="$(bash -c 'source "$1"; printf %s "$PROXY_PASS"' _ "$TMP/etc/vmodem.conf")"
+[[ "$saved2" == "$PASSWORD" ]] && ok_ "пароль со stdin не искажён" || bad_ "пароль со stdin не искажён" "       было: $saved2"
+# вернуть прежние значения для остальных проверок
+bash "$VM" config set N=64 REAL=101 "PROXY=1.2.3.4:15000:login1:${PASSWORD}" >/dev/null 2>&1
+
 # ── Что сделает up ─────────────────────────────────────────────────────────
 out="$(bash "$VM" up --dry-run 2>&1)"
 
