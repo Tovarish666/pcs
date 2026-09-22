@@ -26,6 +26,7 @@ COMMANDS=(
     "modem-list|Модемы: таблица и что уже создано"
     "modem-template|Собрать шаблон ВМ виртуального модема"
     "modem-add|Сделать модем из строки таблицы"
+    "modem-attach|Воткнуть модем в ВМ mobileproxy.space"
     "vm-use|Список ВМ, выбор активной"
     "vm-fix-dns|Починить DNS на ВМ"
     "update|Обновить PCS"

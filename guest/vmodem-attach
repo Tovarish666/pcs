@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  vmodem-attach — воткнуть виртуальный модем в эту машину по USB/IP.
+#
+#    vmodem-attach add 111 192.168.88.3   запомнить модем и подключить
+#    vmodem-attach up 111                 подключить (этим живёт служба)
+#    vmodem-attach watch 111              держать подключённым (служба)
+#    vmodem-attach down 111               отключить
+#    vmodem-attach remove 111             отключить и забыть
+#    vmodem-attach list                   что воткнуто сейчас
+#    vmodem-attach check [N]              всё ли на месте
+#
+#  Живёт на ВМ mobileproxy.space. Устройство отдаёт ВМ модема (usbipd на
+#  её стороне), здесь оно подхватывается vhci-hcd и появляется как обычный
+#  USB-модем Huawei: дальше им занимаются скрипты mp.space — DHCP, адрес
+#  192.168.<N>.100 и маршрутизация.
+#
+#  Конфиг: /etc/vmodem-attach/<N>.conf (IP ВМ модема).
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+ATTACH_ETC="${ATTACH_ETC:-/etc/vmodem-attach}"
+UDC="${VMODEM_UDC:-usbip-vudc.0}"
+WATCH_INTERVAL="${WATCH_INTERVAL:-15}"
+DRY=""
+
+ok()   { echo "  ✓ $*"; }
+bad()  { echo "  ✗ $*" >&2; }
+warn() { echo "  ⚠ $*" >&2; }
+step() { echo "  → $*"; }
+die()  { bad "$*"; exit 1; }
+usage() { awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, ""); print }' "$0"; }
+
+run() {
+    if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*"; return 0; fi
+    "$@"
+}
+
+# В Ubuntu usbip приезжает то пакетом usbip, то в linux-tools рядом с ядром.
+usbip_bin() {
+    local b
+    command -v usbip >/dev/null 2>&1 && { printf 'usbip'; return 0; }
+    b="$(ls -1 "/usr/lib/linux-tools/$(uname -r)/usbip" 2>/dev/null | head -1)"
+    [[ -n "$b" ]] && { printf '%s' "$b"; return 0; }
+    b="$(ls -1 /usr/lib/linux-tools/*/usbip 2>/dev/null | tail -1)"
+    [[ -n "$b" ]] && { printf '%s' "$b"; return 0; }
+    return 1
+}
+
+USBIP=""
+need_usbip() {
+    USBIP="$(usbip_bin)" || die "нет usbip (apt-get install -y usbip || apt-get install -y linux-tools-generic)"
+    if [[ -z "$DRY" ]] && ! lsmod | grep -q '^vhci_hcd'; then
+        modprobe vhci-hcd 2>/dev/null || die "не загружается vhci-hcd (нужен linux-modules-extra для этого ядра)"
+    fi
+}
+
+conf_file() { printf '%s/%s.conf' "$ATTACH_ETC" "$1"; }
+
+modem_ip() {                       # modem_ip <N>
+    local f; f="$(conf_file "$1")"
+    [[ -f "$f" ]] || return 1
+    # shellcheck disable=SC1090
+    ( source "$f"; printf '%s' "${IP:-}" )
+}
+
+# Порт vhci, на котором висит модем с этого адреса (или пусто).
+attached_port() {                  # attached_port <ip>
+    local ip="$1"
+    "$USBIP" port 2>/dev/null | awk -v ip="$ip" '
+        /^Port/ { port = $0; sub(/^Port /, "", port); sub(/:.*/, "", port) }
+        $0 ~ ip { print port; exit }'
+}
+
+is_attached() { [[ -n "$(attached_port "$1")" ]]; }
+
+cmd_add() {
+    local n="${1:-}" ip="${2:-}"
+    [[ "$n" =~ ^[0-9]+$ ]] || die "номер модема: vmodem-attach add 111 192.168.88.3"
+    [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || die "нужен адрес ВМ модема"
+    install -d -m 755 "$ATTACH_ETC"
+    printf '# vmodem-attach: модем %s\nIP=%s\n' "$n" "$ip" >"$(conf_file "$n")"
+    ok "модем ${n} → ${ip} записан"
+    cmd_up "$n"
+}
+
+cmd_up() {
+    local n="${1:-}" ip
+    ip="$(modem_ip "$n")" || die "модем ${n} не заведён: vmodem-attach add ${n} <ip>"
+    need_usbip
+    if is_attached "$ip"; then
+        ok "модем ${n} уже воткнут"
+        return 0
+    fi
+    step "втыкаю модем ${n} (${ip})"
+    run "$USBIP" attach -r "$ip" -d "$UDC" || die "usbip attach не прошёл (модем поднят? vmodem status на ${ip})"
+    [[ -n "$DRY" ]] && return 0
+    local i
+    for i in $(seq 1 20); do
+        is_attached "$ip" && { ok "модем ${n} воткнут"; return 0; }
+        sleep 0.5
+    done
+    bad "usbip attach прошёл, но устройства не видно"
+    return 1
+}
+
+cmd_down() {
+    local n="${1:-}" ip port
+    ip="$(modem_ip "$n")" || die "модем ${n} не заведён"
+    need_usbip
+    port="$(attached_port "$ip")"
+    if [[ -z "$port" ]]; then ok "модем ${n} и так не воткнут"; return 0; fi
+    run "$USBIP" detach -p "$port" && ok "модем ${n} вынут (порт ${port})"
+}
+
+cmd_remove() {
+    local n="${1:-}"
+    systemctl disable --now "vmodem-attach@${n}.service" >/dev/null 2>&1
+    cmd_down "$n" 2>/dev/null
+    rm -f "$(conf_file "$n")"
+    ok "модем ${n} забыт"
+}
+
+# Держать воткнутым: ВМ модема могла перезагрузиться, сеть моргнуть.
+cmd_watch() {
+    local n="${1:-}" ip
+    ip="$(modem_ip "$n")" || die "модем ${n} не заведён"
+    need_usbip
+    while true; do
+        if ! is_attached "$ip"; then
+            "$USBIP" attach -r "$ip" -d "$UDC" >/dev/null 2>&1 \
+                && echo "[$(date '+%F %T')] модем ${n} воткнут" \
+                || echo "[$(date '+%F %T')] модем ${n} (${ip}) не отзывается"
+        fi
+        sleep "$WATCH_INTERVAL"
+    done
+}
+
+cmd_list() {
+    need_usbip
+    local n ip mark
+    printf '  %-5s %-16s %-10s %s\n' "модем" "ВМ модема" "USB" "интерфейс"
+    for f in "$ATTACH_ETC"/*.conf; do
+        [[ -f "$f" ]] || continue
+        n="${f##*/}"; n="${n%.conf}"
+        ip="$(modem_ip "$n")"
+        mark="нет"; is_attached "$ip" && mark="воткнут"
+        printf '  %-5s %-16s %-10s %s\n' "$n" "$ip" "$mark" "$(iface_of "$n")"
+    done
+}
+
+# Интерфейс, который скрипты mp.space подняли под этот модем.
+iface_of() {                       # iface_of <N>
+    ip -4 -o addr show 2>/dev/null | awk -v p="192.168.$1.100" '$4 ~ "^"p"/" {print $2; exit}'
+}
+
+cmd_status() { cmd_list; }
+
+cmd_check() {
+    local rc=0 n ip
+    need_usbip
+    for f in "$ATTACH_ETC"/*.conf; do
+        [[ -f "$f" ]] || continue
+        n="${f##*/}"; n="${n%.conf}"
+        ip="$(modem_ip "$n")"
+        [[ -n "${1:-}" && "$1" != "$n" ]] && continue
+        if is_attached "$ip"; then ok "модем ${n}: USB воткнут"; else bad "модем ${n}: USB не воткнут"; rc=1; fi
+        local ifn; ifn="$(iface_of "$n")"
+        if [[ -n "$ifn" ]]; then ok "модем ${n}: ${ifn} = 192.168.${n}.100"
+        else bad "модем ${n}: адреса 192.168.${n}.100 нет (скрипты mp.space ещё не настроили?)"; rc=1; fi
+        if curl -s -m 8 -o /dev/null -w '%{http_code}' "http://192.168.${n}.1/api/webserver/SesTokInfo" 2>/dev/null | grep -q 200; then
+            ok "модем ${n}: веб-морда 192.168.${n}.1 отвечает"
+        else
+            bad "модем ${n}: веб-морда 192.168.${n}.1 молчит"; rc=1
+        fi
+    done
+    return $rc
+}
+
+cmd_install_service() {
+    local unit=/etc/systemd/system/vmodem-attach@.service
+    cat >"$unit" <<'EOF'
+[Unit]
+Description=vmodem-attach: держать модем %i воткнутым по USB/IP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/vmodem-attach watch %i
+ExecStop=/usr/local/sbin/vmodem-attach down %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    ok "служба vmodem-attach@ установлена"
+}
+
+ACTION="${1:-}"; shift 2>/dev/null || true
+for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY=1; done
+_args=(); for a in "$@"; do [[ "$a" == "--dry-run" ]] || _args+=("$a"); done
+set -- "${_args[@]+"${_args[@]}"}"
+
+case "$ACTION" in
+    add)             cmd_add "$@" ;;
+    up|attach)       cmd_up "$@" ;;
+    down|detach)     cmd_down "$@" ;;
+    remove)          cmd_remove "$@" ;;
+    watch)           cmd_watch "$@" ;;
+    list)            cmd_list ;;
+    status)          cmd_status ;;
+    check)           cmd_check "$@" ;;
+    install-service) cmd_install_service ;;
+    -h|--help|help|"") usage ;;
+    *) usage; exit 1 ;;
+esac
