@@ -131,13 +131,8 @@ VM_SSH_PORT=22
 VM_PASSWORD="$TPL_PASSWORD"
 VM_IP="$MDM_IP"
 if [[ -z "$VM_IP" ]]; then
-    step "Жду адрес от guest agent..."
-    t=0
-    while (( t < 300 )); do
-        VM_IP="$(qm_agent_ip "$VMID")" && break
-        VM_IP=""; sleep 5; t=$((t + 5))
-    done
-    [[ -n "$VM_IP" ]] || die "адрес ВМ ${VMID} неизвестен (qm terminal ${VMID})"
+    VM_IP="$(vm_wait_ip "$VMID" "${PCS_WAIT_IP:-900}")" \
+        || die "адрес ВМ ${VMID} неизвестен (qm terminal ${VMID})"
 fi
 ok "Адрес модема: ${VM_IP}"
 wait_ssh 300 || die "SSH на ${VM_IP} не поднялся (qm terminal ${VMID})"

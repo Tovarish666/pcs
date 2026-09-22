@@ -264,13 +264,8 @@ qm start "$TPL_ID" >>"$PCS_LOG" 2>&1 || vm_running "$TPL_ID" || fail_hint "ВМ 
 VM_SSH_PORT=22
 VM_PASSWORD="$TPL_PASSWORD"
 if [[ -z "$VM_IP" ]]; then
-    step "Жду IP от QEMU guest agent..."
-    t=0
-    while (( t < 300 )); do
-        VM_IP="$(qm_agent_ip "$TPL_ID")" && break
-        VM_IP=""; sleep 5; t=$((t + 5))
-    done
-    [[ -n "$VM_IP" ]] || { ask VM_IP "guest agent молчит — IP ВМ (qm terminal ${TPL_ID})"; }
+    VM_IP="$(vm_wait_ip "$TPL_ID" "${PCS_WAIT_IP:-900}")" || VM_IP=""
+    [[ -n "$VM_IP" ]] || { ask VM_IP "адрес не определился — впиши вручную (qm terminal ${TPL_ID})"; }
     [[ -n "$VM_IP" ]] || fail_hint "IP ВМ неизвестен"
 fi
 ok "IP: ${VM_IP}"

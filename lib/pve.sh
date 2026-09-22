@@ -62,7 +62,10 @@ cloud_image_ensure() {
     fi
     mkdir -p "$(dirname "$path")"
     step "Качаю ${what}..."
-    wget -q --show-progress --timeout=60 -O "${path}.part" "$url" \
+    # --show-progress только в терминале: в лог он сыплет километры точек.
+    local wget_opts=(-q --timeout=60)
+    [[ -t 2 ]] && wget_opts+=(--show-progress)
+    wget "${wget_opts[@]}" -O "${path}.part" "$url" \
         || { rm -f "${path}.part"; bad "${what}: не скачался"; return 1; }
     actual="$($sumcmd "${path}.part" | awk '{print $1}')"
     [[ "$actual" == "$expected" ]] || { rm -f "${path}.part"; bad "${what}: сумма не совпала"; return 1; }
@@ -99,6 +102,45 @@ snippets_ensure() {
 qm_import_disk() {                 # qm_import_disk <vmid> <образ> <хранилище>
     qm importdisk "$1" "$2" "$3" >>"$PCS_LOG" 2>&1 && return 0
     qm disk import "$1" "$2" "$3" >>"$PCS_LOG" 2>&1
+}
+
+# MAC первой сетевой карты ВМ — по нему ищем адрес, когда агент молчит.
+qm_net0_mac() {                    # qm_net0_mac <vmid>
+    qm config "$1" 2>/dev/null | sed -n 's/^net0:.*[= ]\([0-9A-Fa-f:]\{17\}\).*/\1/p' | head -1
+}
+
+# Адрес ВМ по MAC в таблице соседей хоста. Работает, если между хостом и ВМ
+# уже был трафик, — как запасной путь, когда guest agent не поднялся.
+qm_ip_by_neigh() {                 # qm_ip_by_neigh <vmid>
+    local mac ip
+    mac="$(qm_net0_mac "$1")"
+    [[ -n "$mac" ]] || return 1
+    ip="$(ip -4 neigh show 2>/dev/null | awk -v m="${mac,,}" 'tolower($0) ~ m {print $1; exit}')"
+    [[ -n "$ip" ]] || return 1
+    printf '%s' "$ip"
+}
+
+# Ждём адрес ВМ: сперва guest agent, потом таблица соседей.
+# Время считаем по часам: qm guest cmd на неживом агенте сам висит секундами,
+# и счёт «по паузам» раньше давал совсем не тот таймаут, что написан.
+vm_wait_ip() {                     # vm_wait_ip <vmid> [секунд] → IP в stdout
+    local id="$1" limit="${2:-900}" ip="" start now elapsed said=0
+    start="$(date +%s)"
+    step "Жду адрес ВМ ${id} (облачный образ ставит пакеты — это небыстро)..."
+    while :; do
+        if ip="$(qm_agent_ip "$id")"; then
+            printf '%s' "$ip"; return 0
+        fi
+        if ip="$(qm_ip_by_neigh "$id")"; then
+            warn "guest agent молчит, но ВМ видна в сети как ${ip}"
+            printf '%s' "$ip"; return 0
+        fi
+        now="$(date +%s)"; elapsed=$(( now - start ))
+        (( elapsed >= limit )) && break
+        if (( elapsed / 60 > said )); then said=$(( elapsed / 60 )); step "…${said} мин"; fi
+        sleep 5
+    done
+    return 1
 }
 
 # IPv4 гостя через QEMU guest agent (для DHCP).
