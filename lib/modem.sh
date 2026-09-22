@@ -83,7 +83,8 @@ mdm_list() {
     for f in "$PCS_MODEM_DIR"/*.conf; do
         [[ -f "$f" ]] || continue
         f="${f##*/}"; f="${f%.conf}"
-        [[ "$f" == "template" ]] && continue
+        # рядом лежат служебные файлы, а не модемы
+        [[ "$f" == "template" || "$f" == "source" ]] && continue
         printf '%s\n' "$f"
     done
 }
