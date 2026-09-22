@@ -82,6 +82,7 @@ has "маршрут по умолчанию в туннель" "$out" "ip route 
 has "DNS модема только через туннель" "$out" "ip route replace 192.168.101.1/32 dev vmtun0"
 has "NAT в туннель"                "$out" "iptables -t nat -A POSTROUTING -o vmtun0 -j MASQUERADE"
 has "MSS clamp"                    "$out" "TCPMSS --clamp-mss-to-pmtu"
+has "резолвер ВМ не цепляется за туннель" "$out" "resolvectl dns vmtun0"
 has "usbipd отдаёт устройство"     "$out" "usbipd --device"
 has "usbip закрыт для чужих"       "$out" "--dport 3240 ! -s 10.0.0.50 -j DROP"
 has "sing-box запускается"         "$out" "sing-box run -c"

@@ -373,6 +373,19 @@ tunnel_up() {
         ip -4 addr show "$TUN_IF" 2>/dev/null | grep -q "$TUN_ADDR" \
             || { bad "${TUN_IF} не поднялся — ${VMODEM_LOG_DIR}/singbox.log"; return 1; }
     fi
+    # systemd-resolved цепляет новый интерфейс и начинает спрашивать DNS у
+    # второго конца /30 (172.20.0.2), где никого нет: DNS в самой ВМ умирает,
+    # а sing-box сыплет «request rejected» на эти запросы. Отбираем у него
+    # туннель и LAN модема — резолвер ВМ должен жить только на eth0.
+    if command -v resolvectl >/dev/null 2>&1 && [[ -z "$DRY" ]]; then
+        local ifn; ifn="$(gadget_ifname)"
+        resolvectl dns "$TUN_IF" "" >/dev/null 2>&1
+        resolvectl default-route "$TUN_IF" false >/dev/null 2>&1
+        resolvectl dns "$ifn" "" >/dev/null 2>&1
+        resolvectl default-route "$ifn" false >/dev/null 2>&1
+    elif [[ -n "$DRY" ]]; then
+        printf '  + resolvectl dns %s "" ; resolvectl default-route %s false\n' "$TUN_IF" "$TUN_IF"
+    fi
     ok "${TUN_IF} поднят"
 }
 
