@@ -82,6 +82,19 @@ hasnt "ничего не ставится"    "$out" "поставлен"
 out2="$(bash guest/vmodem-setup --dry-run --singbox-version 1.11.1 2>&1)"
 has "версия sing-box меняется флагом" "$out2" "sing-box-1.11.1-linux-amd64.tar.gz"
 
+# Облачное ядро Debian: USB в нём вырезан, надо поставить обычное и
+# попросить перезагрузку (код 2). Подменяем uname, modprobe и apt-get.
+stub="$tmp/stub"; mkdir -p "$stub"
+printf '#!/bin/sh\n[ "$1" = "-r" ] && echo "6.12.0-cloud-amd64" || exec /usr/bin/uname "$@"\n' >"$stub/uname"
+printf '#!/bin/sh\nexit 1\n' >"$stub/modprobe"
+printf '#!/bin/sh\necho "apt-get $*"\nexit 0\n' >"$stub/apt-get"
+printf '#!/bin/sh\nexit 0\n' >"$stub/mountpoint"
+chmod +x "$stub"/*
+out4="$(PATH="$stub:$PATH" MODULES_FILE="$tmp/modules.conf" bash guest/vmodem-setup 2>&1)"; rc4=$?
+[[ $rc4 -eq 2 ]] && ok_ "облачное ядро: просит перезагрузку (код 2)" \
+    || bad_ "облачное ядро: просит перезагрузку (код 2)" "       код $rc4"
+has "ставит обычное ядро" "$out4" "linux-image-amd64"
+
 # Эта машина — не модем: проверка должна честно упасть и сказать, чего нет.
 out3="$(bash guest/vmodem-setup --check 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok_ "--check падает там, где модема нет" \

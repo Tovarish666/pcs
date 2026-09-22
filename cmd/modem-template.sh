@@ -280,7 +280,16 @@ vm_push_tool vmodem       || fail_hint "не доставлен vmodem"
 vm_push_tool vmodem-api   || fail_hint "не доставлен vmodem-api"
 vm_push_tool vmodem-setup || fail_hint "не доставлен vmodem-setup"
 vm_ssh "vmodem-setup --singbox-version ${TPL_SINGBOX}" 2>&1 | relay
-[[ ${PIPESTATUS[0]} -eq 0 ]] || fail_hint "машина не готова быть модемом — см. выше"
+rc=${PIPESTATUS[0]}
+if (( rc == 2 )); then
+    # Было облачное ядро без USB: vmodem-setup поставил обычное.
+    step "Перезагружаю ВМ на новое ядро..."
+    vm_ssh "(sleep 1; systemctl reboot) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
+    wait_reboot 300 || fail_hint "ВМ не поднялась после перезагрузки"
+    vm_ssh "vmodem-setup --singbox-version ${TPL_SINGBOX}" 2>&1 | relay
+    rc=${PIPESTATUS[0]}
+fi
+(( rc == 0 )) || fail_hint "машина не готова быть модемом — см. выше"
 
 hdr "Проверка"
 vm_ssh "vmodem-setup --check" 2>&1 | relay

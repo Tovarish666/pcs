@@ -10,10 +10,12 @@ UBUNTU_IMG_URL="${UBUNTU_IMG_URL:-https://cloud-images.ubuntu.com/noble/current/
 UBUNTU_SUMS_URL="${UBUNTU_SUMS_URL:-https://cloud-images.ubuntu.com/noble/current/SHA256SUMS}"
 UBUNTU_IMG_PATH="${UBUNTU_IMG_PATH:-/var/lib/vz/template/iso/ubuntu-24.04-noble.img}"
 
-# Debian 13 — под виртуальные модемы: меньше, и в ядре есть usbip-vudc
-DEBIAN_IMG_URL="${DEBIAN_IMG_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2}"
+# Debian 13 под виртуальные модемы. Именно generic, а не genericcloud:
+# у облачного ядра (-cloud-amd64) вырезана вся USB-подсистема, и ни
+# libcomposite, ни usbip-vudc там просто нет.
+DEBIAN_IMG_URL="${DEBIAN_IMG_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2}"
 DEBIAN_SUMS_URL="${DEBIAN_SUMS_URL:-https://cloud.debian.org/images/cloud/trixie/latest/SHA512SUMS}"
-DEBIAN_IMG_PATH="${DEBIAN_IMG_PATH:-/var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2}"
+DEBIAN_IMG_PATH="${DEBIAN_IMG_PATH:-/var/lib/vz/template/iso/debian-13-generic-amd64.qcow2}"
 
 SNIP_STORE="${SNIP_STORE:-local}"
 SNIP_DIR="${SNIP_DIR:-/var/lib/vz/snippets}"

@@ -14,6 +14,10 @@
 #    3. проверку, что на месте usbipd, dnsmasq, python3, iptables, curl
 #       и сами утилиты vmodem и vmodem-api.
 #
+#  Если ядро облачное (-cloud-amd64), USB-подсистемы в нём нет вообще:
+#  ставится обычное linux-image-amd64 и возвращается код 2 — «нужна
+#  перезагрузка». Тот, кто звал, перезагружает ВМ и зовёт снова.
+#
 #  Зовётся при сборке шаблона ВМ модема и потом руками, когда что-то менялось.
 # ═══════════════════════════════════════════════════════════════════════════
 set -uo pipefail
@@ -60,9 +64,24 @@ if [[ -z "$CHECK_ONLY" ]]; then
         mount -t configfs none "$CONFIGFS_MNT" 2>/dev/null \
             || warn "configfs не смонтировался — гаджет не соберётся"
     fi
+    missing=()
     for m in "${MODULES[@]}"; do
-        run modprobe "$m" 2>/dev/null || warn "модуль ${m} не загрузился"
+        run modprobe "$m" 2>/dev/null || missing+=("$m")
     done
+    if (( ${#missing[@]} )) && [[ -z "$DRY" ]]; then
+        if [[ "$(uname -r)" == *cloud* ]]; then
+            warn "ядро $(uname -r) облачное — USB в нём вырезан целиком"
+            step "ставлю обычное ядро linux-image-amd64"
+            export DEBIAN_FRONTEND=noninteractive
+            if apt-get -o DPkg::Lock::Timeout=300 install -y -qq linux-image-amd64; then
+                ok "ядро поставлено — нужна перезагрузка, потом vmodem-setup ещё раз"
+                exit 2
+            fi
+            bad "linux-image-amd64 не поставился"
+            exit 1
+        fi
+        warn "не загрузились модули: ${missing[*]}"
+    fi
     if [[ -n "$DRY" ]]; then
         printf '  + %s → %s\n' "${MODULES[*]}" "$MODULES_FILE"
     else
