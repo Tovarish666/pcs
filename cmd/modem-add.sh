@@ -107,6 +107,9 @@ if ! qm clone "$TPL_ID" "$VMID" --name "$NAME" --full 0 >>"$PCS_LOG" 2>&1; then
 fi
 ok "ВМ ${VMID} создана"
 
+# Клон не всегда берёт память и ядра из шаблона — задаём явно.
+qm set "$VMID" --memory "${TPL_RAM:-384}" --cores "${TPL_CORES:-1}" >>"$PCS_LOG" 2>&1
+
 snippets_ensure || die "нет хранилища под сниппеты"
 snip="${SNIP_DIR}/pcs-modem-${O_N}.yaml"
 modem_clone_user_data "$snip" "$NAME" "$TPL_PASSWORD"
