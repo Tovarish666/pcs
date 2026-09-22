@@ -20,6 +20,11 @@ has() {                            # has "название" <текст> <под
 hasnt() {
     case "$2" in *"$3"*) bad_ "$1" "       нашлось: $3" ;; *) ok_ "$1" ;; esac
 }
+# Права файла: у GNU это -c, у BSD -f. Порядок важен: на Linux `stat -f`
+# не падает, а печатает сведения о файловой системе, и «запасной» вариант
+# уже не сработал бы.
+perm_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+
 rc_is() {                          # rc_is "название" <ожидаемый код> команда...
     local name="$1" want="$2"; shift 2
     local out; out="$("$@" 2>&1)"; local rc=$?
@@ -39,7 +44,7 @@ saved="$(bash -c 'source "$1"; printf %s "$PROXY_PASS"' _ "$TMP/etc/vmodem.conf"
 [[ "$saved" == "$PASSWORD" ]] && ok_ "пароль читается обратно как есть" \
     || bad_ "пароль читается обратно как есть" "       было: $saved"
 has "серийник придуман"    "$conf" "SERIAL=VMODEM00000064"
-perm="$(stat -f %Lp "$TMP/etc/vmodem.conf" 2>/dev/null || stat -c %a "$TMP/etc/vmodem.conf")"
+perm="$(perm_of "$TMP/etc/vmodem.conf")"
 [[ "$perm" == "600" ]] && ok_ "конфиг 600" || bad_ "конфиг 600" "       права $perm"
 
 show="$(bash "$VM" config show 2>&1)"
@@ -112,7 +117,7 @@ print(cur)' "$sb" "$1" 2>/dev/null; }
 [[ "$(field inbounds.0.address.0)" == "172.20.0.1/30" ]] && ok_ "адрес туннеля" || bad_ "адрес туннеля"
 [[ "$(field inbounds.0.sniff)" == "False" ]] && ok_ "подмена адреса на домен выключена" || bad_ "подмена адреса на домен выключена"
 [[ "$(field route.final)" == "proxy" ]] && ok_ "весь трафик уходит в прокси" || bad_ "весь трафик уходит в прокси"
-perm="$(stat -f %Lp "$sb" 2>/dev/null || stat -c %a "$sb")"
+perm="$(perm_of "$sb")"
 [[ "$perm" == "600" ]] && ok_ "singbox.json 600" || bad_ "singbox.json 600" "       права $perm"
 
 # ── Снятие ─────────────────────────────────────────────────────────────────

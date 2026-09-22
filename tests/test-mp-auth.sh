@@ -22,6 +22,11 @@ eq() {                             # eq "название" <факт> <ожид�
     if [[ "$2" == "$3" ]]; then pass=$((pass + 1)); printf '  ok   %s\n' "$1"
     else fail=$((fail + 1)); printf '  FAIL %s\n       было:  %s\n       ждали: %s\n' "$1" "$2" "$3"; fi
 }
+# Права файла: у GNU это -c, у BSD -f. Порядок важен: на Linux `stat -f`
+# не падает, а печатает сведения о файловой системе, и «запасной» вариант
+# уже не сработал бы.
+perm_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+
 field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$F" "$1"; }
 
 echo "mp-auth:"
@@ -31,7 +36,7 @@ eq "файл не создан"                     "$([[ -f $F ]] && echo yes |
 t "JSON из ЛК"                          0 bash "$MPA" set '{"auth":"ABCD1234:EFGH5678","port":1800}'
 eq "auth записан"                       "$(field auth)" "ABCD1234:EFGH5678"
 eq "port записан числом"                "$(field port)" "1800"
-eq "права 600"                          "$(stat -f %Lp "$F" 2>/dev/null || stat -c %a "$F")" "600"
+eq "права 600"                          "$(perm_of "$F")" "600"
 
 t "порт строкой → число"                0 bash "$MPA" set '{"auth":"K1K1K1K1:K2K2K2K2","port":"1900"}'
 eq "port 1900"                          "$(field port)" "1900"
