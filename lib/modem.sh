@@ -11,13 +11,16 @@ _PCS_MODEM_LOADED=1
 PCS_MODEM_DIR="${PCS_ETC}/modem"
 TPL_FILE="${PCS_MODEM_DIR}/template.conf"
 
-TPL_KEYS=(TPL_ID TPL_NAME TPL_PASSWORD TPL_STORAGE TPL_BRIDGE TPL_RAM TPL_CORES TPL_DISK TPL_SINGBOX TPL_VMID_BASE)
+TPL_KEYS=(TPL_ID TPL_NAME TPL_PASSWORD TPL_STORAGE TPL_BRIDGE TPL_RAM TPL_BUILD_RAM TPL_CORES TPL_DISK TPL_SINGBOX TPL_VMID_BASE)
 MDM_KEYS=(MDM_N MDM_REAL MDM_VMID MDM_IP MDM_PROXY MDM_PROXY_USER MDM_PROXY_PASS MDM_NAME)
 
 tpl_reset() {
     TPL_ID=""; TPL_NAME="vmodem-template"; TPL_PASSWORD=""
     TPL_STORAGE="local-lvm"; TPL_BRIDGE="vmbr0"
-    TPL_RAM="256"; TPL_CORES="1"; TPL_DISK="4"; TPL_SINGBOX="1.10.0"
+    TPL_RAM="384"; TPL_CORES="1"; TPL_DISK="4"; TPL_SINGBOX="1.10.0"
+    # На сборке apt ставит десяток пакетов и в 256 МБ задыхается: строим
+    # с запасом, а перед превращением в шаблон память ужимаем до рабочей.
+    TPL_BUILD_RAM="1024"
     TPL_VMID_BASE="1000"          # ВМ модема n = TPL_VMID_BASE + n
 }
 tpl_reset

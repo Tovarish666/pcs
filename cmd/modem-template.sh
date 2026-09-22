@@ -3,7 +3,7 @@
 #  pcs modem-template — шаблон ВМ виртуального модема.
 #
 #    pcs modem-template [--id 9000] [--storage local-lvm] [--bridge vmbr0]
-#                       [--ram 256] [--cores 1] [--disk 4]
+#                       [--ram 384] [--build-ram 1024] [--cores 1] [--disk 4]
 #                       [--singbox 1.10.0] [--vmid-base 1000]
 #                       [--ip 10.0.0.60/24 --gw 10.0.0.1]
 #                       [--replace] [--yes] [--print-user-data]
@@ -30,13 +30,14 @@ source "$PCS_ROOT/lib/modem.sh"
 usage() { pcs_usage "$0"; }
 
 O_ID=""; O_STORAGE=""; O_BRIDGE=""; O_RAM=""; O_CORES=""; O_DISK=""
-O_SINGBOX=""; O_CIDR=""; O_GW=""; O_REPLACE=""; O_PRINT=""; O_BASE=""
+O_SINGBOX=""; O_CIDR=""; O_GW=""; O_REPLACE=""; O_PRINT=""; O_BASE=""; O_BUILD_RAM=""
 while (( $# )); do
     case "$1" in
         --id)      O_ID="$2"; shift 2 ;;
         --storage) O_STORAGE="$2"; shift 2 ;;
         --bridge)  O_BRIDGE="$2"; shift 2 ;;
         --ram)     O_RAM="$2"; shift 2 ;;
+        --build-ram) O_BUILD_RAM="$2"; shift 2 ;;
         --cores)   O_CORES="$2"; shift 2 ;;
         --disk)    O_DISK="$2"; shift 2 ;;
         --singbox) O_SINGBOX="$2"; shift 2 ;;
@@ -66,6 +67,7 @@ if [[ -n "$O_PRINT" ]]; then
     TPL_RAM="${O_RAM:-$TPL_RAM}"; TPL_CORES="${O_CORES:-$TPL_CORES}"
     TPL_DISK="${O_DISK:-$TPL_DISK}"; TPL_STORAGE="${O_STORAGE:-$TPL_STORAGE}"
     TPL_BRIDGE="${O_BRIDGE:-$TPL_BRIDGE}"; TPL_SINGBOX="${O_SINGBOX:-$TPL_SINGBOX}"
+    TPL_BUILD_RAM="${O_BUILD_RAM:-$TPL_BUILD_RAM}"
     TPL_PASSWORD="${PCS_MODEM_PASSWORD:-${TPL_PASSWORD:-}}"
     [[ -n "$TPL_PASSWORD" ]] || die "задай пароль: PCS_MODEM_PASSWORD=... pcs modem-template --print-user-data"
 fi
@@ -76,7 +78,8 @@ hdr "Шаблон ВМ виртуального модема"
 # Прежние значения из шаблона — как умолчания при пересборке.
 ask O_ID      "VM ID шаблона" "${TPL_ID:-9000}"
 [[ "$O_ID" =~ ^[0-9]+$ ]] || die "VM ID должен быть числом"
-ask O_RAM     "RAM, МБ"   "${TPL_RAM:-256}"
+ask O_RAM     "RAM модема, МБ" "${TPL_RAM:-384}"
+ask O_BUILD_RAM "RAM на время сборки, МБ" "${TPL_BUILD_RAM:-1024}"
 ask O_CORES   "CPU, ядер" "${TPL_CORES:-1}"
 ask O_DISK    "Диск, ГБ"  "${TPL_DISK:-4}"
 info "Хранилища: $(pve_storages | paste -sd' ')"
@@ -105,7 +108,7 @@ fi
 
 TPL_ID="$O_ID"; TPL_STORAGE="$O_STORAGE"; TPL_BRIDGE="$O_BRIDGE"
 TPL_RAM="$O_RAM"; TPL_CORES="$O_CORES"; TPL_DISK="$O_DISK"; TPL_SINGBOX="$O_SINGBOX"
-TPL_VMID_BASE="$O_BASE"
+TPL_VMID_BASE="$O_BASE"; TPL_BUILD_RAM="$O_BUILD_RAM"
 TPL_NAME="vmodem-template"
 info "Лог: ${PCS_LOG}"
 fi
@@ -217,7 +220,7 @@ debian_image_ensure || die "без образа дальше нельзя"
 
 hdr "Создание ВМ ${TPL_ID}"
 qm create "$TPL_ID" \
-    --name "$TPL_NAME" --memory "$TPL_RAM" --cores "$TPL_CORES" \
+    --name "$TPL_NAME" --memory "$TPL_BUILD_RAM" --cores "$TPL_CORES" \
     --balloon 0 --cpu host --numa 0 \
     --net0 "virtio,bridge=${TPL_BRIDGE}" \
     --ostype l26 --machine q35 --scsihw virtio-scsi-single \
@@ -303,6 +306,10 @@ vm_ssh "cloud-init clean --logs >/dev/null 2>&1; \
         rm -f /etc/ssh/ssh_host_*; \
         rm -rf /var/lib/vmodem /etc/vmodem /var/log/vmodem; \
         history -c 2>/dev/null; sync" 2>&1 | relay
+# Память на сборку была с запасом — шаблону оставляем рабочую.
+qm set "$TPL_ID" --memory "$TPL_RAM" >>"$PCS_LOG" 2>&1
+ok "Память шаблона: ${TPL_RAM} МБ (на сборке было ${TPL_BUILD_RAM})"
+
 step "Выключаю ВМ..."
 vm_ssh "(sleep 1; systemctl poweroff) >/dev/null 2>&1 &" >/dev/null 2>&1 || true
 t=0
