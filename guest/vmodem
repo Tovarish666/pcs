@@ -396,6 +396,10 @@ routing_up() {
     run sysctl -qw net.ipv4.conf.all.rp_filter=0
     # Весь трафик сервера и наши собственные проверки — в туннель.
     run ip route replace default dev "$TUN_IF" table "$RT_TABLE"
+    # ...кроме своей же сети: правило «from 192.168.N.0/24» ловит и ответы
+    # самого модема серверу (веб-морда, DNS), и без этой строки они уходили
+    # бы в туннель вместо USB — снаружи это выглядело как молчащий модем.
+    run ip route replace "192.168.${N}.0/24" dev "$ifn" table "$RT_TABLE"
     run ip rule add from "192.168.${N}.0/24" lookup "$RT_TABLE"
     run ip rule add from "$TUN_ADDR" lookup "$RT_TABLE"
     # DNS настоящего модема доступен только через туннель.
