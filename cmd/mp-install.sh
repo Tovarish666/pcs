@@ -23,7 +23,10 @@ source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
 source "$PCS_ROOT/lib/state.sh"
 source "$PCS_ROOT/lib/ssh.sh"
 
-MP_DOWNLOADS="${MP_DOWNLOADS:-https://mobileproxy.space/downloads/sp}"
+# Зеркала те же, по которым ходит их собственный server.js: один домен может
+# не отвечать (у нас mobileproxy.space рвал TLS, а mobileproxy.rent отдавал).
+MP_HOSTS="${MP_HOSTS:-mobileproxy.rent mobileproxy.space proxeon.net}"
+MP_PATH="${MP_PATH:-/downloads/sp}"
 
 usage() { pcs_usage "$0"; }
 
@@ -53,17 +56,25 @@ if [[ -z "$O_AUTH" ]] && has_tty; then
     ask_opt O_AUTH "Содержимое auth.mp"
 fi
 
-# Скрипт для запуска на ВМ: качает URL и выполняет. Скачавшийся HTML
-# вместо скрипта (404, заглушка провайдера) не исполняется.
-remote_fetch_run() {               # remote_fetch_run <url> <файл-результат>
+# Скрипт для запуска на ВМ: качает файл с первого живого зеркала и выполняет.
+# Скачавшийся HTML вместо скрипта (404, заглушка провайдера) не исполняется.
+remote_fetch_run() {               # remote_fetch_run <имя файла> <файл-результат>
     cat >"$2" <<EOF
 set -u
 export DEBIAN_FRONTEND=noninteractive
 cd /root/pcs-run
-f="\$(basename "$1")"
-echo "качаю $1"
-wget -q --timeout=60 --tries=3 -O "\$f" "$1" || { echo "не скачался $1"; exit 10; }
-head -1 "\$f" | grep -q '^#!' || { echo "скачалось не то:"; head -3 "\$f"; exit 11; }
+f="$1"
+got=""
+for h in ${MP_HOSTS}; do
+    url="https://\${h}${MP_PATH}/\${f}"
+    echo "качаю \${url}"
+    if wget -q --timeout=30 --tries=2 -O "\$f" "\$url" && head -1 "\$f" | grep -q '^#!'; then
+        got="\$url"; break
+    fi
+    echo "  не вышло: \${url}"
+done
+[ -n "\$got" ] || { echo "ни одно зеркало не отдало \$f"; exit 10; }
+echo "взято с \$got"
 bash "\$f"
 EOF
 }
@@ -103,7 +114,7 @@ vm_run_detached kernel "$PCS_TMP/kernel.sh" 900 || warn "модули ядра �
 
 # ── 3. install.sh ──────────────────────────────────────────────────────────
 hdr "3/6 install.sh (mp.space)"
-remote_fetch_run "${MP_DOWNLOADS}/install.sh" "$PCS_TMP/mp-install.sh"
+remote_fetch_run "install.sh" "$PCS_TMP/mp-install.sh"
 vm_run_detached mp-install "$PCS_TMP/mp-install.sh" 2400 \
     || die "install.sh завершился с ошибкой (лог на ВМ: /root/pcs-run/mp-install.log)"
 ok "install.sh отработал"
@@ -123,7 +134,7 @@ hdr "5/6 setup-modem-management.sh (mp.space)"
 if [[ -n "$O_SKIP_MODEMS" ]]; then
     warn "пропущено (--skip-modems)"
 else
-    remote_fetch_run "${MP_DOWNLOADS}/setup-modem-management.sh" "$PCS_TMP/mp-modems.sh"
+    remote_fetch_run "setup-modem-management.sh" "$PCS_TMP/mp-modems.sh"
     vm_run_detached mp-modems "$PCS_TMP/mp-modems.sh" 1200 \
         || die "setup-modem-management.sh завершился с ошибкой (лог на ВМ: /root/pcs-run/mp-modems.log)"
     ok "setup-modem-management.sh отработал"
