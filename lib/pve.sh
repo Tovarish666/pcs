@@ -41,15 +41,18 @@ pve_nextid()   { pvesh get /cluster/nextid 2>/dev/null || echo 200; }
 # Все занятые номера разом. Спрашивать про каждый отдельно нельзя: один
 # запуск qm — это полсекунды перла, и проверка одной тысячи занимала минуты.
 pve_used_ids() {
-    local f
-    {
-        for f in "$PVE_CONF_DIR"/nodes/*/qemu-server/*.conf "$PVE_CONF_DIR"/nodes/*/lxc/*.conf; do
-            [[ -e "$f" ]] || continue
-            f="${f##*/}"; printf '%s\n' "${f%.conf}"
-        done
-        qm  list 2>/dev/null | awk 'NR > 1 {print $1}'
-        pct list 2>/dev/null | awk 'NR > 1 {print $1}'
-    } | grep -E '^[0-9]+$' | sort -un
+    local f out=""
+    for f in "$PVE_CONF_DIR"/nodes/*/qemu-server/*.conf "$PVE_CONF_DIR"/nodes/*/lxc/*.conf; do
+        [[ -e "$f" ]] || continue
+        f="${f##*/}"; out+="${f%.conf}"$'\n'
+    done
+    # Конфиги на месте — этого достаточно. qm list и pct list спрашиваем,
+    # только если каталог пуст или его нет: каждый запуск — секунда перла.
+    if [[ -z "$out" ]]; then
+        out="$(qm list 2>/dev/null | awk 'NR > 1 {print $1}')"$'\n'
+        out+="$(pct list 2>/dev/null | awk 'NR > 1 {print $1}')"$'\n'
+    fi
+    printf '%s' "$out" | grep -E '^[0-9]+$' | sort -un
 }
 
 # ВМ mobileproxy.space нумеруются тысячами: 1000, 2000, 3000… Модемы такой
