@@ -23,11 +23,12 @@ source "$PCS_ROOT/lib/modem.sh"
 
 usage() { pcs_usage "$0"; }
 
-O_N=""; O_ALL=""; O_RESTART=""
+O_N=""; O_ALL=""; O_RESTART=""; O_VM=""
 while (( $# )); do
     case "$1" in
         --n)       O_N="${O_N:+${O_N},}$2"; shift 2 ;;
         --all)     O_ALL=1; shift ;;
+        --vm)      O_VM="$2"; shift 2 ;;
         --restart) O_RESTART=1; shift ;;
         --yes|-y)  export PCS_YES=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -38,6 +39,7 @@ done
 pcs_begin modem-update
 pcs_tmpdir
 ssh_setup
+mdm_server_need "$O_VM"
 tpl_load
 [[ -n "${TPL_PASSWORD:-}" ]] || die "пароля ВМ модемов нет: /etc/pcs/modem/template.conf (pcs modem-template)"
 

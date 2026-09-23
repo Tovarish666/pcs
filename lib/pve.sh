@@ -36,6 +36,21 @@ pve_storages() { pvesm status 2>/dev/null | awk 'NR>1{print $1}'; }
 pve_bridges()  { ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^vmbr/{sub(/@.*/,"",$2); print $2}'; }
 pve_nextid()   { pvesh get /cluster/nextid 2>/dev/null || echo 200; }
 
+# ВМ mobileproxy.space нумеруются тысячами: 1000, 2000, 3000… Модемы такой
+# ВМ живут в её тысяче (3001, 3002…), поэтому тысяча должна быть свободна
+# целиком — иначе следующая.
+pve_next_server_id() {
+    local base=1000 n
+    while (( base <= 100000 )); do
+        for (( n = 0; n <= 254; n++ )); do
+            vm_exists "$(( base + n ))" && break
+        done
+        (( n > 254 )) && { printf '%s' "$base"; return 0; }
+        base=$(( base + 1000 ))
+    done
+    pve_nextid
+}
+
 vm_exists()  { qm status "$1" >/dev/null 2>&1; }
 vm_running() { qm status "$1" 2>/dev/null | grep -q running; }
 

@@ -2,9 +2,9 @@
 # ═══════════════════════════════════════════════════════════════════════════
 #  pcs modem-template — шаблон ВМ виртуального модема.
 #
-#    pcs modem-template [--id 9000] [--storage local-lvm] [--bridge vmbr0]
+#    pcs modem-template [--id 9999] [--storage local-lvm] [--bridge vmbr0]
 #                       [--ram 384] [--build-ram 1024] [--cores 1] [--disk 4]
-#                       [--singbox 1.10.0] [--vmid-base 1000]
+#                       [--singbox 1.10.0]
 #                       [--ip 10.0.0.60/24 --gw 10.0.0.1]
 #                       [--replace] [--yes] [--print-user-data]
 #
@@ -30,7 +30,7 @@ source "$PCS_ROOT/lib/modem.sh"
 usage() { pcs_usage "$0"; }
 
 O_ID=""; O_STORAGE=""; O_BRIDGE=""; O_RAM=""; O_CORES=""; O_DISK=""
-O_SINGBOX=""; O_CIDR=""; O_GW=""; O_REPLACE=""; O_PRINT=""; O_BASE=""; O_BUILD_RAM=""
+O_SINGBOX=""; O_CIDR=""; O_GW=""; O_REPLACE=""; O_PRINT=""; O_BUILD_RAM=""
 while (( $# )); do
     case "$1" in
         --id)      O_ID="$2"; shift 2 ;;
@@ -41,7 +41,6 @@ while (( $# )); do
         --cores)   O_CORES="$2"; shift 2 ;;
         --disk)    O_DISK="$2"; shift 2 ;;
         --singbox) O_SINGBOX="$2"; shift 2 ;;
-        --vmid-base) O_BASE="$2"; shift 2 ;;
         --ip)      O_CIDR="$2"; shift 2 ;;
         --gw)      O_GW="$2"; shift 2 ;;
         --replace) O_REPLACE=1; shift ;;
@@ -63,7 +62,7 @@ tpl_load
 
 if [[ -n "$O_PRINT" ]]; then
     # Показать cloud-init и выйти: ни Proxmox, ни root не нужны.
-    TPL_ID="${O_ID:-${TPL_ID:-9000}}"
+    TPL_ID="${O_ID:-${TPL_ID:-9999}}"
     TPL_RAM="${O_RAM:-$TPL_RAM}"; TPL_CORES="${O_CORES:-$TPL_CORES}"
     TPL_DISK="${O_DISK:-$TPL_DISK}"; TPL_STORAGE="${O_STORAGE:-$TPL_STORAGE}"
     TPL_BRIDGE="${O_BRIDGE:-$TPL_BRIDGE}"; TPL_SINGBOX="${O_SINGBOX:-$TPL_SINGBOX}"
@@ -76,7 +75,7 @@ if [[ -z "$O_PRINT" ]]; then
 hdr "Шаблон ВМ виртуального модема"
 
 # Прежние значения из шаблона — как умолчания при пересборке.
-ask O_ID      "VM ID шаблона" "${TPL_ID:-9000}"
+ask O_ID      "VM ID шаблона" "${TPL_ID:-9999}"
 [[ "$O_ID" =~ ^[0-9]+$ ]] || die "VM ID должен быть числом"
 ask O_RAM     "RAM модема, МБ" "${TPL_RAM:-384}"
 ask O_BUILD_RAM "RAM на время сборки, МБ" "${TPL_BUILD_RAM:-1024}"
@@ -87,8 +86,6 @@ ask O_STORAGE "Хранилище" "${TPL_STORAGE:-local-lvm}"
 info "Мосты: $(pve_bridges | paste -sd' ')"
 ask O_BRIDGE  "Мост (та же сеть, где прокси и ВМ mobileproxy.space)" "${TPL_BRIDGE:-vmbr0}"
 ask O_SINGBOX "Версия sing-box" "${TPL_SINGBOX:-1.10.0}"
-ask O_BASE    "Номер ВМ модема = это число + n" "${TPL_VMID_BASE:-1000}"
-[[ "$O_BASE" =~ ^[0-9]+$ ]] || die "--vmid-base: нужно число"
 
 TPL_PASSWORD="${PCS_MODEM_PASSWORD:-${TPL_PASSWORD:-}}"
 if [[ -z "$TPL_PASSWORD" ]]; then
@@ -108,7 +105,7 @@ fi
 
 TPL_ID="$O_ID"; TPL_STORAGE="$O_STORAGE"; TPL_BRIDGE="$O_BRIDGE"
 TPL_RAM="$O_RAM"; TPL_CORES="$O_CORES"; TPL_DISK="$O_DISK"; TPL_SINGBOX="$O_SINGBOX"
-TPL_VMID_BASE="$O_BASE"; TPL_BUILD_RAM="$O_BUILD_RAM"
+TPL_BUILD_RAM="$O_BUILD_RAM"
 TPL_NAME="vmodem-template"
 info "Лог: ${PCS_LOG}"
 fi

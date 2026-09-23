@@ -10,11 +10,13 @@
 #  шаблона (pcs modem-template), внутри поднимается vmodem: USB-устройство
 #  Huawei, DHCP с DNS, туннель в прокси и веб-морда модема.
 #
-#  Номер ВМ по умолчанию — 1000 + n, адрес — по DHCP (узнаём через guest
-#  agent). Для постоянного адреса: --ip и --gw.
+#  Номер ВМ модема — номер ВМ mobileproxy.space плюс n: сервер 3000 → модем
+#  3001, 3002, 3003… Адрес — по DHCP (узнаём через guest agent), для
+#  постоянного: --ip и --gw.
 #
-#    --server-ip IP  чей usbip: адрес ВМ mobileproxy.space (по умолчанию
-#                    берётся активная ВМ PCS)
+#    --vm ID         чей это модем: ВМ mobileproxy.space (по умолчанию
+#                    активная). Её номер задаёт и номер ВМ модема
+#    --server-ip IP  адрес той же ВМ, если он не записан в состоянии
 #    --no-up         только создать и настроить, не поднимать
 #    --replace       снести ВМ с этим номером и сделать заново
 # ═══════════════════════════════════════════════════════════════════════════
@@ -30,7 +32,7 @@ source "$PCS_ROOT/lib/sheet.sh"
 usage() { pcs_usage "$0"; }
 
 O_N=""; O_REAL=""; O_PROXY=""; O_ID=""; O_CIDR=""; O_GW=""
-O_SERVER_IP=""; O_NO_UP=""; O_REPLACE=""; O_SOURCE=""
+O_SERVER_IP=""; O_NO_UP=""; O_REPLACE=""; O_SOURCE=""; O_SERVER_VM=""
 while (( $# )); do
     case "$1" in
         --n)         O_N="$2"; shift 2 ;;
@@ -40,6 +42,7 @@ while (( $# )); do
         --ip)        O_CIDR="$2"; shift 2 ;;
         --gw)        O_GW="$2"; shift 2 ;;
         --server-ip) O_SERVER_IP="$2"; shift 2 ;;
+        --vm)        O_SERVER_VM="$2"; shift 2 ;;
         --source)    O_SOURCE="$2"; shift 2 ;;
         --no-up)     O_NO_UP=1; shift ;;
         --replace)   O_REPLACE=1; shift ;;
@@ -53,6 +56,7 @@ pcs_begin modem-add
 need_pve
 pcs_tmpdir
 ssh_setup
+mdm_server_need "$O_SERVER_VM"
 tpl_need
 host_net_defaults
 
@@ -78,18 +82,15 @@ fi
 
 # ── Адрес сервера mobileproxy.space ────────────────────────────────────────
 if [[ -z "$O_SERVER_IP" ]]; then
-    active="$(state_active_id)"
-    if [[ -n "$active" ]]; then
-        state_load "$active"
-        O_SERVER_IP="${VM_IP:-}"
-        [[ -n "$O_SERVER_IP" ]] && info "USB заберёт ВМ ${active} (${O_SERVER_IP})"
-    fi
+    state_load "$PCS_SERVER_ID"
+    O_SERVER_IP="${VM_IP:-}"
+    [[ -n "$O_SERVER_IP" ]] && info "USB заберёт ВМ ${PCS_SERVER_ID} (${O_SERVER_IP})"
 fi
 [[ -n "$O_SERVER_IP" ]] || warn "адрес ВМ mobileproxy.space неизвестен — USB сможет забрать кто угодно (--server-ip)"
 
 # ── ВМ ─────────────────────────────────────────────────────────────────────
 mdm_load "$O_N"
-VMID="${O_ID:-${MDM_VMID:-$(( ${TPL_VMID_BASE:-1000} + O_N ))}}"
+VMID="${O_ID:-${MDM_VMID:-$(mdm_vmid "$O_N")}}"
 NAME="vmodem-${O_N}"
 
 if vm_exists "$VMID"; then
@@ -170,6 +171,6 @@ MDM_PROXY_PASS="$(cut -d: -f4- <<<"$O_PROXY")"
 mdm_save
 
 echo >&2
-ok "Модем ${O_N} готов: ВМ ${VMID} @ ${VM_IP}, для сервера это 192.168.${O_N}.100"
+ok "Модем ${O_N} готов: ВМ ${VMID} @ ${VM_IP}, для ВМ ${PCS_SERVER_ID} это 192.168.${O_N}.100"
 info "Подключить на ВМ mobileproxy.space: pcs modem-attach --n ${O_N}"
 info "Что внутри: ssh root@${VM_IP} vmodem status"

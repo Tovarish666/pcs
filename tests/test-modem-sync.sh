@@ -22,12 +22,12 @@ hasnt() {
 STUB="$TMP/stub"; mkdir -p "$STUB" "$TMP/log"
 cat >"$STUB/qm" <<'EOF'
 #!/bin/sh
-# 1111 крутится, 1112 и 1117 выключены, остальных нет
+# сервер 1000: 1111 крутится, 1112 и 1117 выключены, остальных нет
 [ "$1" = "status" ] || exit 0
 case "$2" in
     1111) echo "status: running"; exit 0 ;;
     1112|1117) echo "status: stopped"; exit 0 ;;
-    9000) echo "status: stopped"; exit 0 ;;
+    1000|9999) echo "status: running"; exit 0 ;;
     *) exit 1 ;;
 esac
 EOF
@@ -36,12 +36,14 @@ printf '#!/bin/sh\nexit 0\n' >"$STUB/pvesh"
 chmod +x "$STUB"/*
 
 # ── Состояние хоста ────────────────────────────────────────────────────────
-etc="$TMP/etc/modem"; mkdir -p "$etc"
-printf 'TPL_ID=9000\nTPL_VMID_BASE=1000\n' >"$etc/template.conf"
-printf 'SHEET_URL=%s\n' "$TMP/table.csv" >"$etc/source.conf"
+# Модемы принадлежат ВМ 1000, и номера их ВМ считаются от неё: 1000 + n.
+etc="$TMP/etc/modem"; mkdir -p "$etc/1000" "$TMP/etc/mp"
+printf '1000\n' >"$TMP/etc/mp/active"
+printf 'TPL_ID=9999\n' >"$etc/template.conf"
+printf 'SHEET_URL=%s\n' "$TMP/table.csv" >"$etc/1000/source.conf"
 for pair in "111:1111" "112:1112" "117:1117" "120:1120"; do
     n="${pair%%:*}"; v="${pair##*:}"
-    printf 'MDM_N=%s\nMDM_VMID=%s\nMDM_IP=192.168.88.%s\nMDM_PROXY=1.2.3.4:1080\n' "$n" "$v" "$n" >"$etc/${n}.conf"
+    printf 'MDM_N=%s\nMDM_VMID=%s\nMDM_IP=192.168.88.%s\nMDM_PROXY=1.2.3.4:1080\n' "$n" "$v" "$n" >"$etc/1000/${n}.conf"
 done
 
 cat >"$TMP/table.csv" <<'EOF'
@@ -93,6 +95,19 @@ out4="$(plan --dry-run --only 200)"
 has "нечего делать — сказано прямо"  "$out4" "нечего делать"
 
 # --help разбирается до всего остального: ни root, ни Proxmox не нужны.
+# Номера ВМ модемов считаются от сервера, даже когда состояния ещё нет.
+rm -f "$etc/1000/113.conf"
+out6="$(plan --dry-run --only 113)"
+has "модем 113 сервера 1000 — это ВМ 1113" "$out6" "создать: 113"
+
+# Старый плоский каталог должен переехать под свою ВМ.
+printf 'MDM_N=121\nMDM_VMID=1121\n' >"$etc/121.conf"
+out7="$(plan --dry-run --only 121)"
+[[ -f "$etc/1000/121.conf" && ! -f "$etc/121.conf" ]] \
+    && ok_ "состояние старой раскладки переехало под ВМ" \
+    || bad_ "состояние старой раскладки переехало под ВМ"
+has "переезд не молчит" "$out7" "переехало"
+
 out5="$(bash cmd/modem-sync.sh --help 2>&1)"
 has "--help показывает команду"      "$out5" "pcs modem-sync --prune"
 hasnt "--help не читает таблицу"     "$out5" "Читаю таблицу"

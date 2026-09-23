@@ -42,6 +42,7 @@ pcs_begin modem-attach
 pcs_tmpdir
 ssh_setup
 state_need_vm "$O_VM"
+mdm_server_need "$VM_ID"
 vm_alive || die "ВМ ${VM_ID} (${VM_IP}) недоступна по SSH"
 
 vm_push_tool vmodem-attach || die "не доставлен vmodem-attach"

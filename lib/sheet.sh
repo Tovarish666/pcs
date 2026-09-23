@@ -9,7 +9,8 @@
 [[ -n "${_PCS_SHEET_LOADED:-}" ]] && return 0
 _PCS_SHEET_LOADED=1
 
-SHEET_CONF="${PCS_MODEM_DIR:-${PCS_ETC}/modem}/source.conf"
+# Таблица своя у каждой ВМ mobileproxy.space: каталог задаёт lib/modem.sh.
+sheet_conf() { printf '%s/source.conf' "${PCS_MODEM_STATE_DIR:-${PCS_ETC}/modem}"; }
 SHEET_URL=""
 
 # Ссылку можно давать любую: из адресной строки, «Опубликовать в интернете»
@@ -35,20 +36,22 @@ sheet_url_normalize() {
 
 sheet_url_load() {
     SHEET_URL=""
+    local f; f="$(sheet_conf)"
     # shellcheck disable=SC1090
-    [[ -f "$SHEET_CONF" ]] && source "$SHEET_CONF"
+    [[ -f "$f" ]] && source "$f"
     return 0
 }
 
 sheet_url_save() {                 # sheet_url_save <url>
-    install -d -m 700 "$(dirname "$SHEET_CONF")"
-    local t="${SHEET_CONF}.tmp"
+    local f; f="$(sheet_conf)"
+    install -d -m 700 "$(dirname "$f")"
+    local t="${f}.tmp"
     {
         echo "# pcs ${PCS_VERSION}: откуда берём таблицу модемов"
         printf 'SHEET_URL=%q\n' "$1"
     } >"$t"
     chmod 600 "$t"
-    mv -f "$t" "$SHEET_CONF"
+    mv -f "$t" "$f"
     SHEET_URL="$1"
 }
 

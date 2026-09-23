@@ -45,6 +45,7 @@ pcs_tmpdir
 ssh_setup
 tpl_load
 state_need_vm "$O_VM"
+mdm_server_need "$VM_ID"
 
 SRV_IP="$VM_IP"; SRV_PORT="${VM_SSH_PORT:-22}"; SRV_PASS="$VM_PASSWORD"; SRV_ID="$VM_ID"
 use_server() { VM_IP="$SRV_IP"; VM_SSH_PORT="$SRV_PORT"; VM_PASSWORD="$SRV_PASS"; }

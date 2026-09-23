@@ -20,6 +20,7 @@
 set -uo pipefail
 # shellcheck source=../lib/common.sh
 source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+source "$PCS_ROOT/lib/state.sh"
 source "$PCS_ROOT/lib/pve.sh"
 source "$PCS_ROOT/lib/modem.sh"
 source "$PCS_ROOT/lib/sheet.sh"
@@ -44,6 +45,7 @@ done
 pcs_begin modem-sync
 need_pve
 pcs_tmpdir
+mdm_server_need "$O_VM"
 tpl_load
 
 # ── Таблица ────────────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ while IFS=$'\t' read -r n real host port login _pass enabled; do
     seen+="${n} "
     want "$n" || continue
     mdm_load "$n"
-    vmid="${MDM_VMID:-$(( ${TPL_VMID_BASE:-1000} + n ))}"
+    vmid="${MDM_VMID:-$(mdm_vmid "$n")}"
     if [[ "$enabled" != "1" ]]; then
         vm_exists "$vmid" && stop+=("${n}:${vmid}")
         continue
@@ -148,7 +150,7 @@ for pair in "${ready[@]+"${ready[@]}"}"; do live+=("${pair%%:*}"); done
 
 for n in "${create[@]+"${create[@]}"}"; do
     hdr "Модем ${n}: создаю"
-    if sub modem-add --n "$n" --yes ${O_SOURCE:+--source "$O_SOURCE"}; then
+    if sub modem-add --n "$n" --yes --vm "$PCS_SERVER_ID" ${O_SOURCE:+--source "$O_SOURCE"}; then
         live+=("$n")
     else
         oops "модем ${n} не создался"
@@ -194,7 +196,7 @@ fi
 
 echo >&2
 if (( problems == 0 )); then
-    ok "хост сходится с таблицей: модемов в работе — ${#live[@]}"
+    ok "ВМ ${PCS_SERVER_ID} сходится с таблицей: модемов в работе — ${#live[@]}"
     info "Что где: pcs modem-list"
 else
     bad "с частью модемов не сложилось: ${problems} — см. выше"

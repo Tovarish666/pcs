@@ -12,16 +12,18 @@
 set -uo pipefail
 # shellcheck source=../lib/common.sh
 source "$(dirname "$(readlink -f "$0")")/../lib/common.sh"
+source "$PCS_ROOT/lib/state.sh"
 source "$PCS_ROOT/lib/pve.sh"
 source "$PCS_ROOT/lib/modem.sh"
 source "$PCS_ROOT/lib/sheet.sh"
 
 usage() { pcs_usage "$0"; }
 
-O_SOURCE=""; O_LOCAL=""
+O_SOURCE=""; O_LOCAL=""; O_VM=""
 while (( $# )); do
     case "$1" in
         --source) O_SOURCE="$2"; shift 2 ;;
+        --vm)     O_VM="$2"; shift 2 ;;
         --local)  O_LOCAL=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "неизвестный аргумент: $1" ;;
@@ -30,6 +32,7 @@ done
 
 pcs_begin modem-list
 pcs_tmpdir
+mdm_server_need "$O_VM"
 
 vm_state() {                       # vm_state <vmid> → строка состояния
     local id="${1:-}"
