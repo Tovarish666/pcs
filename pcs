@@ -28,6 +28,7 @@ COMMANDS=(
     "modem-add|Сделать модем из строки таблицы"
     "modem-attach|Воткнуть модем в ВМ mobileproxy.space"
     "modem-sync|Привести хост в соответствие с таблицей"
+    "modem-check|Проверить модемы: ВМ, USB, веб-морда, внешний адрес"
     "vm-use|Список ВМ, выбор активной"
     "vm-fix-dns|Починить DNS на ВМ"
     "update|Обновить PCS"

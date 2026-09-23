@@ -9,6 +9,8 @@
 #    vmodem-attach remove 111             отключить и забыть
 #    vmodem-attach list                   что воткнуто сейчас
 #    vmodem-attach check [N]              всё ли на месте
+#    vmodem-attach ip [N]                 внешний адрес через модем
+#    vmodem-attach rotate <N>             сменить IP и дождаться смены
 #
 #  Живёт на ВМ mobileproxy.space. Устройство отдаёт ВМ модема (usbipd на
 #  её стороне), здесь оно подхватывается vhci-hcd и появляется как обычный
@@ -22,6 +24,8 @@ set -uo pipefail
 ATTACH_ETC="${ATTACH_ETC:-/etc/vmodem-attach}"
 UDC="${VMODEM_UDC:-usbip-vudc.0}"
 WATCH_INTERVAL="${WATCH_INTERVAL:-15}"
+IP_URL="${VMODEM_IP_URL:-https://api.ipify.org}"
+ROTATE_WAIT="${VMODEM_ROTATE_WAIT:-120}"
 DRY=""
 
 ok()   { echo "  ✓ $*"; }
@@ -33,6 +37,10 @@ usage() { awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, "
 
 run() {
     if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*"; return 0; fi
+    "$@"
+}
+run_out() {
+    if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*" >&2; return 0; fi
     "$@"
 }
 
@@ -177,6 +185,89 @@ cmd_check() {
     return $rc
 }
 
+# Номера модемов: аргументом или все заведённые.
+each_modem() {                     # each_modem [N]
+    local f n
+    if [[ -n "${1:-}" ]]; then printf '%s\n' "$1"; return 0; fi
+    for f in "$ATTACH_ETC"/*.conf; do
+        [[ -f "$f" ]] || continue
+        n="${f##*/}"; printf '%s\n' "${n%.conf}"
+    done
+}
+
+# Адрес, который видит сайт, если выйти через этот модем. Это и есть то,
+# ради чего всё затевалось: у каждого модема он должен быть свой.
+cmd_ip() {                         # cmd_ip [N]
+    local rc=0 n ifn ip
+    for n in $(each_modem "${1:-}"); do
+        ifn="$(iface_of "$n")"
+        if [[ -z "$ifn" ]]; then
+            bad "модем ${n}: интерфейса с адресом 192.168.${n}.100 нет"; rc=1; continue
+        fi
+        ip="$(run_out curl -s -m 20 --interface "$ifn" "$IP_URL")"
+        if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            ok "модем ${n} (${ifn}): ${ip}"
+        else
+            bad "модем ${n} (${ifn}): внешний адрес не получен"; rc=1
+        fi
+    done
+    return $rc
+}
+
+# ── Веб-морда модема ───────────────────────────────────────────────────────
+# HiLink отдаёт сессию не в Set-Cookie, а телом в <SesInfo>: cookie-jar здесь
+# бесполезен, пару «сессия + токен» берём из одного ответа и шлём руками.
+hilink_post() {                    # hilink_post <N> <путь> <xml>
+    local api="http://192.168.$1.1" r ses tok
+    r="$(curl -s -m 15 "${api}/api/webserver/SesTokInfo")" || return 1
+    ses="$(printf '%s' "$r" | sed -n 's:.*<SesInfo>\(.*\)</SesInfo>.*:\1:p')"
+    tok="$(printf '%s' "$r" | sed -n 's:.*<TokInfo>\(.*\)</TokInfo>.*:\1:p')"
+    [[ -n "$ses" && -n "$tok" ]] || return 1
+    curl -s -m 25 -X POST "${api}/$2" \
+        -H "Cookie: ${ses}" -H "__RequestVerificationToken: ${tok}" \
+        -H "Content-Type: application/x-www-form-urlencoded; charset=UTF-8" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        --data "<?xml version=\"1.0\" encoding=\"UTF-8\"?><request>$3</request>"
+}
+
+# Смена IP ровно той последовательностью, какой это делает mp.space для
+# модема типа 3: выключить передачу данных, переставить режим сети на
+# 02 и обратно на 03 (только LTE), включить данные.
+cmd_rotate() {                     # cmd_rotate <N>
+    local n="${1:-}" ifn before after i bands
+    [[ "$n" =~ ^[0-9]+$ ]] || die "номер модема: vmodem-attach rotate 111"
+    ifn="$(iface_of "$n")"
+    [[ -n "$ifn" ]] || die "модем ${n}: интерфейса с адресом 192.168.${n}.100 нет"
+    bands="<NetworkBand>3FFFFFFF</NetworkBand><LTEBand>7FFFFFFFFFFFFFFF</LTEBand>"
+    if [[ -n "$DRY" ]]; then
+        printf '  + POST api/dialup/mobile-dataswitch <dataswitch>0</dataswitch>\n'
+        printf '  + POST api/net/net-mode <NetworkMode>02</NetworkMode>\n'
+        printf '  + POST api/net/net-mode <NetworkMode>03</NetworkMode>\n'
+        printf '  + POST api/dialup/mobile-dataswitch <dataswitch>1</dataswitch>\n'
+        return 0
+    fi
+    before="$(curl -s -m 20 --interface "$ifn" "$IP_URL")"
+    step "модем ${n} (${ifn}): было ${before:-?}"
+    hilink_post "$n" api/dialup/mobile-dataswitch "<dataswitch>0</dataswitch>" >/dev/null || { bad "модем ${n}: веб-морда не ответила"; return 1; }
+    sleep 3
+    hilink_post "$n" api/net/net-mode "<NetworkMode>02</NetworkMode>${bands}" >/dev/null
+    sleep 3
+    hilink_post "$n" api/net/net-mode "<NetworkMode>03</NetworkMode>${bands}" >/dev/null
+    sleep 3
+    hilink_post "$n" api/dialup/mobile-dataswitch "<dataswitch>1</dataswitch>" >/dev/null
+    i=0
+    while (( i < ROTATE_WAIT )); do
+        sleep 5; i=$((i + 5))
+        after="$(curl -s -m 20 --interface "$ifn" "$IP_URL")"
+        if [[ -n "$after" && "$after" != "$before" ]]; then
+            ok "модем ${n}: IP сменился ${before} → ${after} (${i}с)"
+            return 0
+        fi
+    done
+    bad "модем ${n}: IP не сменился за ${ROTATE_WAIT}с (${before})"
+    return 1
+}
+
 cmd_install_service() {
     local unit=/etc/systemd/system/vmodem-attach@.service
     cat >"$unit" <<'EOF'
@@ -213,6 +304,8 @@ case "$ACTION" in
     list)            cmd_list ;;
     status)          cmd_status ;;
     check)           cmd_check "$@" ;;
+    ip)              cmd_ip "$@" ;;
+    rotate)          cmd_rotate "$@" ;;
     install-service) cmd_install_service ;;
     -h|--help|help|"") usage ;;
     *) usage; exit 1 ;;

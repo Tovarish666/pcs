@@ -32,9 +32,20 @@ cat > "$stub/modprobe" <<'EOS'
 #!/bin/sh
 exit 0
 EOS
+# Интерфейс модема и внешний адрес — тоже подставные.
+cat > "$stub/ip" <<'EOS'
+#!/bin/sh
+echo "1: eth1    inet 192.168.111.100/24 brd 192.168.111.255 scope global eth1"
+EOS
+cat > "$stub/curl" <<'EOS'
+#!/bin/sh
+echo "$*" >> "$CURL_CALLS"
+cat "$CURL_OUT" 2>/dev/null
+EOS
 chmod +x "$stub"/*
 export PATH="$stub:$PATH" USBIP_CALLS="$TMP/calls" USBIP_PORT_OUT="$TMP/port.out"
-: > "$USBIP_CALLS"; : > "$USBIP_PORT_OUT"
+export CURL_CALLS="$TMP/curl.calls" CURL_OUT="$TMP/curl.out"
+: > "$USBIP_CALLS"; : > "$USBIP_PORT_OUT"; : > "$CURL_CALLS"; : > "$CURL_OUT"
 
 echo "vmodem-attach:"
 
@@ -68,6 +79,26 @@ out="$(bash "$VA" add 111 не-адрес 2>&1)"; rc=$?
 out="$(bash "$VA" up 999 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] && ok_ "незаведённый модем отбит" || bad_ "незаведённый модем отбит"
 has "подсказка, как завести" "$out" "vmodem-attach add"
+
+# ── внешний адрес ──────────────────────────────────────────────────────────
+echo "203.0.113.7" > "$CURL_OUT"
+out="$(bash "$VA" ip 111 2>&1)"
+has "внешний адрес показан"        "$out" "модем 111 (eth1): 203.0.113.7"
+has "адрес спрошен через интерфейс" "$(cat "$CURL_CALLS")" "--interface eth1"
+
+: > "$CURL_OUT"
+out="$(bash "$VA" ip 111 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok_ "молчащий адрес — это провал" || bad_ "молчащий адрес — это провал"
+
+# ── смена IP ───────────────────────────────────────────────────────────────
+out="$(bash "$VA" rotate 111 --dry-run 2>&1)"
+has "смена: выключить данные" "$out" "<dataswitch>0</dataswitch>"
+has "смена: режим 02"         "$out" "<NetworkMode>02</NetworkMode>"
+has "смена: режим 03"         "$out" "<NetworkMode>03</NetworkMode>"
+has "смена: включить данные"  "$out" "<dataswitch>1</dataswitch>"
+
+out="$(bash "$VA" rotate 999 --dry-run 2>&1)"; rc=$?
+[[ $rc -ne 0 ]] && ok_ "смена без интерфейса отбита" || bad_ "смена без интерфейса отбита"
 
 echo
 echo "итого: ok ${pass}, fail ${fail}"
