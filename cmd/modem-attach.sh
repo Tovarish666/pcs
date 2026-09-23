@@ -3,6 +3,7 @@
 #  pcs modem-attach — воткнуть модем в ВМ mobileproxy.space.
 #
 #    pcs modem-attach --n 111        воткнуть один
+#    pcs modem-attach --n 111,112    воткнуть несколько
 #    pcs modem-attach --all          воткнуть все созданные
 #    pcs modem-attach --status       что воткнуто сейчас
 #    pcs modem-attach --n 111 --detach   вынуть и забыть
@@ -27,7 +28,7 @@ usage() { pcs_usage "$0"; }
 O_N=""; O_ALL=""; O_VM=""; O_DETACH=""; O_STATUS=""
 while (( $# )); do
     case "$1" in
-        --n)      O_N="$2"; shift 2 ;;
+        --n)      O_N="${O_N:+${O_N},}$2"; shift 2 ;;
         --all)    O_ALL=1; shift ;;
         --vm)     O_VM="$2"; shift 2 ;;
         --detach) O_DETACH=1; shift ;;
@@ -56,8 +57,12 @@ if [[ -n "$O_ALL" ]]; then
     while read -r n; do [[ -n "$n" ]] && targets+=("$n"); done < <(mdm_list)
     (( ${#targets[@]} )) || die "созданных модемов нет (pcs modem-add)"
 else
-    ask O_N "Номер модема"
-    targets=("$O_N")
+    ask O_N "Номер модема (можно списком через запятую)"
+    for n in ${O_N//,/ }; do
+        [[ "$n" =~ ^[0-9]+$ ]] || die "номер модема: ${n}"
+        targets+=("$n")
+    done
+    (( ${#targets[@]} )) || die "номер модема не задан"
 fi
 
 if [[ -n "$O_DETACH" ]]; then

@@ -29,6 +29,10 @@ echo "── шаблон модема ──"
 bash tests/test-modem-template.sh || rc=1
 
 echo
+echo "── modem-sync ──"
+bash tests/test-modem-sync.sh || rc=1
+
+echo
 echo "── vmodem-attach ──"
 bash tests/test-vmodem-attach.sh || rc=1
 
