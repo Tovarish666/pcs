@@ -91,14 +91,39 @@ spawn() {                          # spawn <имя> <команда...>
         return 0
     fi
     mkdir -p "$VMODEM_RUN"
+    # Повторный up не должен плодить двойников: адреса и порты уже заняты
+    # прежним процессом, новый тут же умирает — и pid-файл начинает врать,
+    # хотя модем на самом деле работает. Сначала снимаем прежний.
+    kill_named "$name"
     setsid "$@" >>"${VMODEM_LOG_DIR}/${name}.log" 2>&1 </dev/null &
     echo $! >"$pidf"
 }
 
+# Как найти процесс в ps, если pid-файл соврал. Модем на ВМ один, так что
+# строки однозначные.
+proc_pattern() {                   # proc_pattern <имя>
+    case "$1" in
+        dnsmasq) printf 'dnsmasq .*%s/dnsmasq\.conf' "$VMODEM_ETC" ;;
+        singbox) printf 'sing-box run -c %s/singbox\.json' "$VMODEM_ETC" ;;
+        api)     printf 'vmodem-api --virt %s ' "${N:-[0-9]*}" ;;
+        usbipd)  printf 'usbipd --device' ;;
+        *)       return 1 ;;
+    esac
+}
+
 pid_of() {                         # pid_of <имя> → живой pid или пусто
-    local pidf="${VMODEM_RUN}/$1.pid" pid
-    pid="$(cat "$pidf" 2>/dev/null)" || return 0
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && printf '%s' "$pid"
+    local pidf="${VMODEM_RUN}/$1.pid" pid pat
+    pid="$(cat "$pidf" 2>/dev/null)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        printf '%s' "$pid"; return 0
+    fi
+    # pid-файла нет или он от покойника — спрашиваем у системы.
+    pat="$(proc_pattern "$1")" || return 1
+    pid="$(pgrep -f "$pat" 2>/dev/null | head -1)"
+    [[ -n "$pid" ]] || return 1
+    mkdir -p "$VMODEM_RUN" 2>/dev/null
+    printf '%s\n' "$pid" >"$pidf" 2>/dev/null
+    printf '%s' "$pid"
 }
 
 kill_named() {                     # kill_named <имя>

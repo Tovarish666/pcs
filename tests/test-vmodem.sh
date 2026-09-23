@@ -122,6 +122,22 @@ print(cur)' "$sb" "$1" 2>/dev/null; }
 perm="$(perm_of "$sb")"
 [[ "$perm" == "600" ]] && ok_ "singbox.json 600" || bad_ "singbox.json 600" "       права $perm"
 
+# ── Стухший pid-файл ───────────────────────────────────────────────────────
+# Повторный up на живом модеме раньше переписывал pid-файлы номерами
+# процессов, которые тут же умирали: модем работал, а status говорил «нет».
+mkdir -p "$TMP/run"
+( exec -a "usbipd --device" sleep 20 ) & fake=$!
+printf '999999\n' >"$TMP/run/usbipd.pid"
+sleep 1
+out="$(bash "$VM" status 2>&1)"
+has "стухший pid-файл не обманывает" "$out" "usbipd:   pid ${fake}"
+kill "$fake" 2>/dev/null
+wait "$fake" 2>/dev/null
+
+rm -f "$TMP/run/usbipd.pid"
+out="$(bash "$VM" status 2>&1)"
+has "мёртвый процесс так и назван"   "$out" "usbipd:   нет"
+
 # ── Снятие ─────────────────────────────────────────────────────────────────
 out="$(bash "$VM" down --dry-run 2>&1)"
 has "снимается правило подсети"  "$out" "ip rule del from 192.168.64.0/24"
