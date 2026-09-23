@@ -19,6 +19,8 @@ DEBIAN_IMG_PATH="${DEBIAN_IMG_PATH:-/var/lib/vz/template/iso/debian-13-generic-a
 
 SNIP_STORE="${SNIP_STORE:-local}"
 SNIP_DIR="${SNIP_DIR:-/var/lib/vz/snippets}"
+# Каталог конфигов Proxmox — отдельной переменной, чтобы проверять без него.
+PVE_CONF_DIR="${PVE_CONF_DIR:-/etc/pve}"
 
 # Сеть хоста: шлюз, интерфейс, адрес, маска — подсказки для статики ВМ.
 host_net_defaults() {
@@ -36,17 +38,32 @@ pve_storages() { pvesm status 2>/dev/null | awk 'NR>1{print $1}'; }
 pve_bridges()  { ip -o link show 2>/dev/null | awk -F': ' '$2 ~ /^vmbr/{sub(/@.*/,"",$2); print $2}'; }
 pve_nextid()   { pvesh get /cluster/nextid 2>/dev/null || echo 200; }
 
+# Все занятые номера разом. Спрашивать про каждый отдельно нельзя: один
+# запуск qm — это полсекунды перла, и проверка одной тысячи занимала минуты.
+pve_used_ids() {
+    local f
+    {
+        for f in "$PVE_CONF_DIR"/nodes/*/qemu-server/*.conf "$PVE_CONF_DIR"/nodes/*/lxc/*.conf; do
+            [[ -e "$f" ]] || continue
+            f="${f##*/}"; printf '%s\n' "${f%.conf}"
+        done
+        qm  list 2>/dev/null | awk 'NR > 1 {print $1}'
+        pct list 2>/dev/null | awk 'NR > 1 {print $1}'
+    } | grep -E '^[0-9]+$' | sort -un
+}
+
 # ВМ mobileproxy.space нумеруются тысячами: 1000, 2000, 3000… Модемы такой
 # ВМ живут в её тысяче (3001, 3002…), поэтому тысяча должна быть свободна
 # целиком — иначе следующая.
 pve_next_server_id() {
-    local base=1000 n
-    while (( base <= 100000 )); do
-        for (( n = 0; n <= 254; n++ )); do
-            vm_exists "$(( base + n ))" && break
+    local used base n free
+    used="$(pve_used_ids | tr '\n' ' ')"
+    for (( base = 1000; base <= 100000; base += 1000 )); do
+        free=1
+        for n in $used; do
+            (( n >= base && n <= base + 254 )) && { free=0; break; }
         done
-        (( n > 254 )) && { printf '%s' "$base"; return 0; }
-        base=$(( base + 1000 ))
+        (( free )) && { printf '%s' "$base"; return 0; }
     done
     pve_nextid
 }

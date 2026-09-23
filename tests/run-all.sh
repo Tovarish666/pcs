@@ -13,6 +13,10 @@ python3 -c 'import ast,sys; ast.parse(open("guest/vmodem-api", encoding="utf-8")
 [[ $rc -eq 0 ]] && echo "  ok   все скрипты разбираются"
 
 echo
+echo "── номера ВМ ──"
+bash tests/test-pve-ids.sh || rc=1
+
+echo
 echo "── mp-auth ──"
 bash tests/test-mp-auth.sh || rc=1
 
