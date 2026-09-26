@@ -28,6 +28,7 @@ COMMANDS=(
     "modem-add|Сделать один модем из строки таблицы"
     "modem-attach|Воткнуть модем в ВМ mobileproxy.space"
     "modem-update|Обновить утилиты на ВМ модемов"
+    "vm-usb-ports|Сколько модемов принимает ВМ по USB"
     "modem-template|Пересобрать шаблон ВМ модема"
     "mp-auth check|Проверить auth.mp и nodejs-server"
     "vm-use|Список ВМ, выбор активной"

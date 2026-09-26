@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════
+#  vhci-ports — сколько модемов эта машина принимает по USB/IP.
+#
+#    vhci-ports status                сколько портов есть сейчас
+#    vhci-ports need 40               код 0, если хватает на 40 модемов
+#    vhci-ports set                   пересобрать под 120 модемов
+#    vhci-ports set --ports 15 --controllers 8
+#    vhci-ports reload                перезагрузить модуль
+#
+#  В ядре Ubuntu CONFIG_USBIP_VHCI_HC_PORTS=8 и CONFIG_USBIP_VHCI_NR_HCS=1 —
+#  ровно восемь модемов на машину, девятый отбивается, а в dmesg появляется
+#  «port N already used». Это константы времени сборки: параметра модуля для
+#  них нет, поэтому vhci-hcd приходится пересобирать.
+#
+#  Умолчания — 15 портов на 8 контроллеров (120 устройств). Это ровно те
+#  значения, с которыми ядро собирает Debian, то есть сочетание рабочее.
+#  Свои числа задавать можно, но осторожно: на 32 контроллерах ядро падает
+#  в status_show, а ядерный Kconfig ограничивает порты числом 31.
+#
+#  Собранные модули кладутся в /lib/modules/<ядро>/updates и отдаются dkms,
+#  так что переживают и перезагрузку, и смену ядра.
+# ═══════════════════════════════════════════════════════════════════════════
+set -uo pipefail
+
+PKG="vhci-many"
+DEF_PORTS="${VHCI_PORTS:-15}"
+DEF_HCS="${VHCI_HCS:-8}"
+DRY=""
+
+ok()   { echo "  ✓ $*"; }
+bad()  { echo "  ✗ $*" >&2; }
+warn() { echo "  ⚠ $*" >&2; }
+step() { echo "  → $*"; }
+die()  { bad "$*"; exit 1; }
+usage() { awk 'NR > 2 && /^# ═/ { exit } NR > 2 { sub(/^# ?/, ""); sub(/^ /, ""); print }' "$0"; }
+run()  { if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*"; return 0; fi; "$@"; }
+
+kver() { uname -r; }
+
+# nports у vhci — это все порты всех контроллеров, половина из них USB3.
+# Модемы у нас High Speed, поэтому делим пополам.
+capacity() {
+    local f v
+    for f in /sys/devices/platform/vhci_hcd.*/nports; do
+        [[ -r "$f" ]] || continue
+        v="$(cat "$f" 2>/dev/null)"
+        [[ "$v" =~ ^[0-9]+$ ]] && { printf '%s' "$(( v / 2 ))"; return 0; }
+    done
+    printf '0'
+}
+
+controllers() {
+    local n=0 d
+    for d in /sys/devices/platform/vhci_hcd.*; do [[ -d "$d" ]] && n=$((n + 1)); done
+    printf '%s' "$n"
+}
+
+busy() { usbip port 2>/dev/null | grep -c '^Port' || true; }
+ours() { [[ "$(modinfo -n vhci-hcd 2>/dev/null)" == */updates/* ]]; }
+
+cmd_status() {
+    if (( $(controllers) == 0 )); then
+        warn "vhci-hcd не загружен (modprobe vhci-hcd)"
+        return 1
+    fi
+    echo "  модемов влезает: $(capacity)   (контроллеров $(controllers))"
+    echo "  занято:          $(busy)"
+    echo "  модуль:          $(modinfo -n vhci-hcd 2>/dev/null || echo '?')"
+    ours && echo "  собран нами:     да" || echo "  собран нами:     нет, стоковый"
+    return 0
+}
+
+cmd_need() {                       # cmd_need <сколько модемов>
+    local want="${1:-}" have
+    [[ "$want" =~ ^[0-9]+$ ]] || die "сколько модемов? vhci-ports need 40"
+    have="$(capacity)"
+    if (( have >= want )); then ok "портов ${have}, нужно ${want} — хватает"; return 0; fi
+    bad "портов ${have}, а модемов ${want} — нужен vhci-ports set"
+    return 1
+}
+
+# Исходники usbip от этого же ядра плюс всё, чем их собирать.
+fetch_src() {                      # fetch_src <куда>
+    local dst="$1" k pkg tar
+    k="$(kver)"
+    pkg="linux-source-$(cut -d- -f1 <<<"$k")"
+    export DEBIAN_FRONTEND=noninteractive
+    step "ставлю сборочное окружение"
+    run apt-get -o DPkg::Lock::Timeout=600 -y -qq install build-essential "linux-headers-${k}" dkms \
+        || die "не поставились build-essential / linux-headers-${k} / dkms"
+    step "беру исходники ядра (${pkg})"
+    run apt-get -o DPkg::Lock::Timeout=600 -y -qq install "$pkg" \
+        || run apt-get -o DPkg::Lock::Timeout=600 -y -qq install linux-source \
+        || die "не нашлись исходники ядра (${pkg})"
+    [[ -n "$DRY" ]] && return 0
+    tar="$(ls -1 /usr/src/${pkg}*.tar.* /usr/src/linux-source-*.tar.* 2>/dev/null | head -1)"
+    [[ -n "$tar" ]] || die "архив с исходниками не найден в /usr/src"
+    rm -rf "$dst"; mkdir -p "$dst"
+    tar xf "$tar" -C "$dst" --strip-components=1 --wildcards '*/drivers/usb/usbip/*' \
+        || die "не распаковались исходники usbip"
+    [[ -f "${dst}/drivers/usb/usbip/vhci_hcd.c" ]] || die "в архиве нет drivers/usb/usbip"
+}
+
+cmd_set() {
+    local ports="$DEF_PORTS" hcs="$DEF_HCS" k ver dir want
+    while (( $# )); do
+        case "$1" in
+            --ports)       ports="$2"; shift 2 ;;
+            --controllers) hcs="$2"; shift 2 ;;
+            *) die "неизвестный аргумент: $1" ;;
+        esac
+    done
+    [[ "$ports" =~ ^[0-9]+$ ]] && (( ports >= 1 && ports <= 31 )) || die "портов на контроллер: 1..31"
+    [[ "$hcs" =~ ^[0-9]+$ ]] && (( hcs >= 1 && hcs <= 16 )) || die "контроллеров: 1..16 (на 32 ядро падает)"
+    [[ $EUID -eq 0 || -n "$DRY" ]] || die "нужен root"
+
+    want=$(( ports * hcs ))
+    if (( $(capacity) >= want )) && ! ours; then
+        ok "ядро и так держит $(capacity) модемов — пересобирать нечего"
+        return 0
+    fi
+
+    k="$(kver)"
+    ver="$(cut -d- -f1 <<<"$k")-p${ports}c${hcs}"
+    dir="/usr/src/${PKG}-${ver}"
+    step "цель: ${ports} портов × ${hcs} контроллеров = ${want} модемов"
+
+    fetch_src "${dir}.src"
+    if [[ -z "$DRY" ]]; then
+        rm -rf "$dir"; mkdir -p "$dir"
+        cp "${dir}.src"/drivers/usb/usbip/* "$dir/" || die "не скопировались исходники"
+        rm -rf "${dir}.src"
+        # Оба числа — константы в заголовке. Меняем ровно их.
+        sed -i -e "s/^#define VHCI_HC_PORTS.*/#define VHCI_HC_PORTS ${ports}/" \
+               -e "s/^#define VHCI_NR_HCS.*/#define VHCI_NR_HCS ${hcs}/" "${dir}/vhci.h"
+        grep -q "define VHCI_HC_PORTS ${ports}" "${dir}/vhci.h" || die "не подменилось VHCI_HC_PORTS"
+        grep -q "define VHCI_NR_HCS ${hcs}"     "${dir}/vhci.h" || die "не подменилось VHCI_NR_HCS"
+        cat > "${dir}/Makefile" <<'MK'
+obj-m += usbip-core.o
+usbip-core-y := usbip_common.o usbip_event.o
+obj-m += vhci-hcd.o
+vhci-hcd-y := vhci_sysfs.o vhci_tx.o vhci_rx.o vhci_hcd.o
+MK
+        cat > "${dir}/dkms.conf" <<EOF
+PACKAGE_NAME="${PKG}"
+PACKAGE_VERSION="${ver}"
+MAKE[0]="make -C \${kernel_source_dir} M=\${dkms_tree}/${PKG}/${ver}/build modules"
+CLEAN="make -C \${kernel_source_dir} M=\${dkms_tree}/${PKG}/${ver}/build clean"
+BUILT_MODULE_NAME[0]="usbip-core"
+DEST_MODULE_LOCATION[0]="/updates"
+BUILT_MODULE_NAME[1]="vhci-hcd"
+DEST_MODULE_LOCATION[1]="/updates"
+AUTOINSTALL="yes"
+EOF
+    fi
+
+    step "собираю через dkms (переживёт и смену ядра)"
+    if run dkms install --force "${PKG}/${ver}"; then
+        ok "dkms: ${PKG}/${ver}"
+    else
+        warn "dkms не справился — собираю напрямую, после смены ядра повторить"
+        run make -C "/lib/modules/${k}/build" "M=${dir}" modules || die "сборка не прошла"
+        run install -d "/lib/modules/${k}/updates"
+        run install -m 644 "${dir}/usbip-core.ko" "${dir}/vhci-hcd.ko" "/lib/modules/${k}/updates/" \
+            || die "модули не установились"
+        run depmod -a
+    fi
+    cmd_reload
+}
+
+# Перезагрузка снимает воткнутые модемы: службы vmodem-attach@ вернут их сами.
+cmd_reload() {
+    local p
+    step "снимаю воткнутые модемы (вернутся сами)"
+    run systemctl stop 'vmodem-attach@*' 2>/dev/null
+    if [[ -z "$DRY" ]]; then
+        for p in $(usbip port 2>/dev/null | sed -n 's/^Port \([0-9]*\):.*/\1/p'); do
+            usbip detach -p "$p" >/dev/null 2>&1
+        done
+        sleep 2
+    fi
+    run modprobe -r vhci-hcd || die "vhci-hcd занят: сними модемы вручную (usbip detach -p N)"
+    run modprobe -r usbip-core 2>/dev/null
+    run modprobe vhci-hcd || die "новый vhci-hcd не загрузился"
+    [[ -n "$DRY" ]] && return 0
+
+    # На этом месте ядро и падало, когда чисел было слишком много: читаем
+    # sysfs сразу, пока никто не воткнут, — чтобы поломка вылезла здесь.
+    local f
+    for f in /sys/devices/platform/vhci_hcd.*/status*; do
+        [[ -r "$f" ]] || continue
+        cat "$f" >/dev/null 2>&1 || die "новый модуль не отдаёт ${f} — верни стоковый: vhci-ports revert"
+    done
+    usbip port >/dev/null 2>&1 || die "usbip не читает порты нового модуля — vhci-ports revert"
+
+    printf 'vhci-hcd\n' > /etc/modules-load.d/vmodem-attach.conf
+    ok "модемов влезает: $(capacity)"
+    run systemctl start 'vmodem-attach@*' 2>/dev/null
+    return 0
+}
+
+cmd_revert() {
+    local k; k="$(kver)"
+    step "убираю свою сборку"
+    local v
+    for v in $(dkms status 2>/dev/null | sed -n "s/^${PKG}[,/]\\s*\\([^,:]*\\).*/\\1/p" | sort -u); do
+        run dkms remove --all -m "$PKG" -v "$v" >/dev/null 2>&1
+    done
+    run rm -f "/lib/modules/${k}/updates/vhci-hcd.ko" "/lib/modules/${k}/updates/usbip-core.ko"
+    run rm -rf /usr/src/${PKG}-*
+    run depmod -a
+    cmd_reload
+}
+
+ACTION="${1:-status}"; shift 2>/dev/null || true
+for a in "$@"; do [[ "$a" == "--dry-run" ]] && DRY=1; done
+_args=(); for a in "$@"; do [[ "$a" == "--dry-run" ]] || _args+=("$a"); done
+set -- "${_args[@]+"${_args[@]}"}"
+
+case "$ACTION" in
+    status)          cmd_status ;;
+    need)            cmd_need "$@" ;;
+    set)             cmd_set "$@" ;;
+    reload)          cmd_reload ;;
+    revert)          cmd_revert ;;
+    -h|--help|help)  usage ;;
+    *) usage; exit 1 ;;
+esac

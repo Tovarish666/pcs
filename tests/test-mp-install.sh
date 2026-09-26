@@ -50,9 +50,23 @@ has "справка про --proxy"      "$help" "--proxy"
 has "справка про зеркала"      "$help" "зеркал"
 has "шагов теперь семь"        "$help" "7. перезагрузка"
 
-# Модемы без софта mp.space разворачивать нельзя — об этом должно быть сказано.
+# ВМ с модемами не обязана быть сервером mp.space: зависимости быть не должно.
 ath="$(bash cmd/modem-attach.sh --help 2>&1)"
-has "modem-attach знает про --force" "$ath" "--force"
+hasnt "modem-attach не требует mp.space" "$ath" "--force"
+dep="$(bash cmd/modem-deploy.sh --help 2>&1)"
+has "modem-deploy честно про это говорит" "$dep" "не обязана быть сервером"
+has "modem-deploy поднимает потолок USB"  "$dep" "потолок USB"
+
+# Потолок USB: своя команда и дебиановские числа по умолчанию.
+usb="$(bash cmd/vm-usb-ports.sh --help 2>&1)"
+has "vm-usb-ports про 8 устройств"  "$usb" "ровно 8 устройств"
+has "vm-usb-ports про dkms"         "$usb" "dkms"
+vp="$(bash guest/vhci-ports set --dry-run 2>&1)"
+has "по умолчанию 15 × 8 = 120"     "$vp" "15 портов × 8 контроллеров = 120"
+has "модули идут в dkms"            "$vp" "dkms install"
+bad32="$(bash guest/vhci-ports set --controllers 32 --dry-run 2>&1)"; rc32=$?
+[[ $rc32 -ne 0 ]] && ok_ "32 контроллера отбиты (на них ядро падало)" \
+    || bad_ "32 контроллера отбиты (на них ядро падало)"
 
 echo
 echo "итого: ok ${pass}, fail ${fail}"

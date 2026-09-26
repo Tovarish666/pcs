@@ -7,7 +7,6 @@
 #    pcs modem-attach --all          воткнуть все созданные
 #    pcs modem-attach --status       что воткнуто сейчас
 #    pcs modem-attach --n 111 --detach   вынуть и забыть
-#    pcs modem-attach --n 111 --force    воткнуть без софта mp.space на ВМ
 #
 #  Модем отдаёт своё USB-устройство по сети (usbipd на его ВМ), здесь оно
 #  подхватывается vhci-hcd и становится обычным USB-модемом Huawei. Дальше
@@ -26,7 +25,7 @@ source "$PCS_ROOT/lib/modem.sh"
 
 usage() { pcs_usage "$0"; }
 
-O_N=""; O_ALL=""; O_VM=""; O_DETACH=""; O_STATUS=""; O_FORCE=""
+O_N=""; O_ALL=""; O_VM=""; O_DETACH=""; O_STATUS=""
 while (( $# )); do
     case "$1" in
         --n)      O_N="${O_N:+${O_N},}$2"; shift 2 ;;
@@ -34,7 +33,6 @@ while (( $# )); do
         --vm)     O_VM="$2"; shift 2 ;;
         --detach) O_DETACH=1; shift ;;
         --status) O_STATUS=1; shift ;;
-        --force)  O_FORCE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "неизвестный аргумент: $1 (pcs modem-attach --help)" ;;
     esac
@@ -49,15 +47,15 @@ vm_alive || die "ВМ ${VM_ID} (${VM_IP}) недоступна по SSH"
 
 vm_push_tool vmodem-attach || die "не доставлен vmodem-attach"
 
-# Воткнуть USB мало: интерфейс поднимают, адрес выдают и маршруты пишут
-# собственные скрипты mp.space. Без них модем виден в lsusb и больше нигде.
+# Воткнуть USB — полдела: интерфейс поднимает и адрес выдаёт тот, кто на ВМ
+# за это отвечает. У mobileproxy.space это его собственные скрипты; если ВМ
+# не под него, поднимать интерфейс придётся самому — поэтому просто говорим.
+MP_THERE=1
 if [[ -z "$O_STATUS$O_DETACH" ]] && ! vm_has_mp; then
-    if [[ -z "$O_FORCE" ]]; then
-        bad "на ВМ ${VM_ID} нет софта mobileproxy.space"
-        info "Модем воткнётся, но интерфейс поднимать некому — адрес 192.168.<N>.100 не появится."
-        die "сначала: pcs mp-install   (всё равно воткнуть: --force)"
-    fi
-    warn "софта mobileproxy.space на ВМ нет (--force) — адрес 192.168.<N>.100 не появится"
+    MP_THERE=""
+    warn "софта mobileproxy.space на ВМ ${VM_ID} нет"
+    info "модем воткнётся как обычный USB-модем Huawei, но адрес 192.168.<N>.100"
+    info "никто не выдаст — если ВМ не под mp.space, подними интерфейс сам"
 fi
 
 if [[ -n "$O_STATUS" ]]; then
@@ -157,6 +155,12 @@ while read -r st n ip; do
 done <"$PCS_TMP/attach.out"
 
 # ── Ждём, пока mp.space поднимет интерфейсы ────────────────────────────────
+if [[ -z "$MP_THERE" ]]; then
+    echo >&2
+    ok "модемы отданы ВМ ${VM_ID} по USB"
+    info "что видно на ВМ: lsusb | grep 12d1:14dc, интерфейсы — ip link"
+    exit $(( problems ? 1 : 0 ))
+fi
 hdr "Жду, пока mp.space настроит интерфейсы"
 {
     printf 'set -u\nLIST="%s"\n' "$list"
