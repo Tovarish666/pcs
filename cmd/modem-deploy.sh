@@ -47,12 +47,25 @@ done
 pcs_begin modem-deploy
 need_pve
 pcs_tmpdir
+ssh_setup
 mdm_server_need "$O_VM"
-state_load "$PCS_SERVER_ID"
+state_need_vm "$PCS_SERVER_ID"
 vm_exists "$PCS_SERVER_ID" || die "ВМ ${PCS_SERVER_ID} в Proxmox нет (pcs vm-use)"
 
 hdr "Модемы для ВМ ${PCS_SERVER_ID} (${VM_NAME:-?} @ ${VM_IP:-?})"
 info "Номера ВМ модемов: ${PCS_SERVER_ID}+n — модем 5 будет ВМ $(( PCS_SERVER_ID + 5 ))"
+
+# Разворачивать модемы в ВМ без софта mp.space бессмысленно: воткнутся, но
+# настраивать их будет некому. Проверяем до того, как создавать десятки ВМ.
+if [[ -z "$O_NO_ATTACH" ]]; then
+    vm_alive || die "ВМ ${PCS_SERVER_ID} (${VM_IP}) недоступна по SSH"
+    if ! vm_has_mp; then
+        bad "на ВМ ${PCS_SERVER_ID} нет софта mobileproxy.space"
+        info "Модемы создадутся и воткнутся, но интерфейсы поднимать некому."
+        die "сначала: pcs mp-install   (создать ВМ модемов без подключения: --no-attach)"
+    fi
+    ok "софт mobileproxy.space на ВМ на месте"
+fi
 
 sub() { local c="$1"; shift; bash "$PCS_ROOT/cmd/${c}.sh" "$@"; }
 

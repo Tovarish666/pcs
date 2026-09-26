@@ -73,6 +73,25 @@ vm_scp() {                         # vm_scp <локальный файл> <пу�
 }
 vm_alive() { [[ -n "${VM_IP:-}" ]] && vm_ssh true 2>/dev/null; }
 
+# Стоит ли на ВМ софт mobileproxy.space. Без него модем можно воткнуть по
+# USB, но интерфейс никто не поднимет и адрес 192.168.N.100 не появится:
+# это делают их собственные скрипты.
+vm_has_mp() {
+    vm_ssh 'command -v modem-manager >/dev/null 2>&1 \
+            || test -d /home/nodejs/work \
+            || systemctl list-unit-files 2>/dev/null | grep -q "^nodejs-server"' >/dev/null 2>&1
+}
+
+# Строки export для скрипта на ВМ: качать через HTTP-прокси. Пустой прокси —
+# пустой вывод, локальные адреса мимо прокси в любом случае.
+vm_proxy_env() {                   # vm_proxy_env [url]
+    local u="${1:-${VM_PROXY:-}}"
+    [[ -n "$u" ]] || return 0
+    printf 'export http_proxy=%q https_proxy=%q HTTP_PROXY=%q HTTPS_PROXY=%q\n' "$u" "$u" "$u" "$u"
+    printf "export no_proxy='localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12'\n"
+    printf 'export NO_PROXY="$no_proxy"\n'
+}
+
 # Положить утилиту из guest/ на ВМ: vm_push_tool <имя> [каталог на ВМ]
 vm_push_tool() {
     local name="$1" dst="${2:-/usr/local/sbin}"

@@ -21,6 +21,10 @@ echo "── mp-auth ──"
 bash tests/test-mp-auth.sh || rc=1
 
 echo
+echo "── mp-install ──"
+bash tests/test-mp-install.sh || rc=1
+
+echo
 echo "── таблица модемов ──"
 bash tests/test-sheet.sh || rc=1
 

@@ -12,11 +12,12 @@
 _PCS_STATE_LOADED=1
 
 PCS_MP_DIR="${PCS_ETC}/mp"
-STATE_KEYS=(VM_ID VM_NAME VM_IP VM_SSH_PORT VM_PASSWORD VM_DNS1 VM_DNS2 VM_NET_MODE VM_BRIDGE)
+STATE_KEYS=(VM_ID VM_NAME VM_IP VM_SSH_PORT VM_PASSWORD VM_DNS1 VM_DNS2 VM_NET_MODE VM_BRIDGE VM_PROXY)
 
 state_reset() {
     VM_ID=""; VM_NAME=""; VM_IP=""; VM_SSH_PORT="22"; VM_PASSWORD=""
     VM_DNS1="1.1.1.1"; VM_DNS2="8.8.8.8"; VM_NET_MODE="static"; VM_BRIDGE="vmbr0"
+    VM_PROXY=""                    # HTTP-прокси для скачивания софта mp.space
 }
 state_reset
 

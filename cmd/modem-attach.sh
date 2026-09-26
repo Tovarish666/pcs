@@ -7,6 +7,7 @@
 #    pcs modem-attach --all          воткнуть все созданные
 #    pcs modem-attach --status       что воткнуто сейчас
 #    pcs modem-attach --n 111 --detach   вынуть и забыть
+#    pcs modem-attach --n 111 --force    воткнуть без софта mp.space на ВМ
 #
 #  Модем отдаёт своё USB-устройство по сети (usbipd на его ВМ), здесь оно
 #  подхватывается vhci-hcd и становится обычным USB-модемом Huawei. Дальше
@@ -25,7 +26,7 @@ source "$PCS_ROOT/lib/modem.sh"
 
 usage() { pcs_usage "$0"; }
 
-O_N=""; O_ALL=""; O_VM=""; O_DETACH=""; O_STATUS=""
+O_N=""; O_ALL=""; O_VM=""; O_DETACH=""; O_STATUS=""; O_FORCE=""
 while (( $# )); do
     case "$1" in
         --n)      O_N="${O_N:+${O_N},}$2"; shift 2 ;;
@@ -33,6 +34,7 @@ while (( $# )); do
         --vm)     O_VM="$2"; shift 2 ;;
         --detach) O_DETACH=1; shift ;;
         --status) O_STATUS=1; shift ;;
+        --force)  O_FORCE=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) die "неизвестный аргумент: $1 (pcs modem-attach --help)" ;;
     esac
@@ -46,6 +48,17 @@ mdm_server_need "$VM_ID"
 vm_alive || die "ВМ ${VM_ID} (${VM_IP}) недоступна по SSH"
 
 vm_push_tool vmodem-attach || die "не доставлен vmodem-attach"
+
+# Воткнуть USB мало: интерфейс поднимают, адрес выдают и маршруты пишут
+# собственные скрипты mp.space. Без них модем виден в lsusb и больше нигде.
+if [[ -z "$O_STATUS$O_DETACH" ]] && ! vm_has_mp; then
+    if [[ -z "$O_FORCE" ]]; then
+        bad "на ВМ ${VM_ID} нет софта mobileproxy.space"
+        info "Модем воткнётся, но интерфейс поднимать некому — адрес 192.168.<N>.100 не появится."
+        die "сначала: pcs mp-install   (всё равно воткнуть: --force)"
+    fi
+    warn "софта mobileproxy.space на ВМ нет (--force) — адрес 192.168.<N>.100 не появится"
+fi
 
 if [[ -n "$O_STATUS" ]]; then
     vm_ssh "vmodem-attach list" 2>&1 | relay
@@ -120,6 +133,7 @@ for n in "${targets[@]}"; do
         ok "модем ${n}: ${got} = 192.168.${n}.100"
     else
         warn "адрес 192.168.${n}.100 пока не появился — см. /var/log/modem-setup.log на ВМ"
+        info "если лога нет, софт mp.space не установлен: pcs mp-install"
         problems=$((problems+1))
     fi
 done
