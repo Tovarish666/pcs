@@ -113,30 +113,80 @@ vm_run_detached attach-prep "$PCS_TMP/prep.sh" 900 || die "ВМ не готов�
 vm_ssh "vmodem-attach install-service" 2>&1 | relay
 
 # ── Втыкаем ────────────────────────────────────────────────────────────────
+# Сначала втыкаем всех — это быстро, — и только потом одним заходом ждём
+# адреса. По очереди на двадцати модемах каждый неудачный ждал бы минуту,
+# и команда растягивалась на полчаса: оборвётся сессия — половина не
+# воткнута. Заодно это два похода по SSH вместо двух на каждый модем.
 problems=0
+pairs=""; list=""
 for n in "${targets[@]}"; do
     mdm_load "$n"
-    [[ -n "${MDM_IP:-}" ]] || { bad "модем ${n}: адрес его ВМ неизвестен (pcs modem-add --n ${n})"; problems=$((problems+1)); continue; }
-    hdr "Модем ${n} (${MDM_IP})"
-    vm_ssh "vmodem-attach add ${n} ${MDM_IP}" 2>&1 | relay
-    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then bad "модем ${n} не воткнулся"; problems=$((problems+1)); continue; fi
-    vm_ssh "systemctl enable --now vmodem-attach@${n}.service" 2>&1 | relay
-    # Скриптам mp.space нужно время поднять интерфейс и получить адрес.
-    step "Жду, пока mp.space настроит интерфейс..."
-    got=""
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-        got="$(vm_ssh "ip -4 -o addr show | awk -v p=192.168.${n}.100 '\$4 ~ \"^\"p\"/\" {print \$2; exit}'" 2>/dev/null)"
-        [[ -n "$got" ]] && break
-        sleep 5
-    done
-    if [[ -n "$got" ]]; then
-        ok "модем ${n}: ${got} = 192.168.${n}.100"
-    else
-        warn "адрес 192.168.${n}.100 пока не появился — см. /var/log/modem-setup.log на ВМ"
-        info "если лога нет, софт mp.space не установлен: pcs mp-install"
-        problems=$((problems+1))
+    if [[ -z "${MDM_IP:-}" ]]; then
+        bad "модем ${n}: адрес его ВМ неизвестен (pcs modem-add --n ${n})"
+        problems=$((problems + 1)); continue
     fi
+    pairs+="${n} ${MDM_IP}"$'\n'
+    list+="${n} "
 done
+[[ -n "$list" ]] || die "втыкать нечего"
+
+hdr "Втыкаю модемы: $(wc -w <<<"$list" | tr -d ' ')"
+{
+    printf 'set -u\n'
+    cat <<'ATTACH'
+while read -r n ip; do
+    [ -n "$n" ] || continue
+    if vmodem-attach add "$n" "$ip" >/dev/null 2>&1; then
+        systemctl enable --now "vmodem-attach@${n}.service" >/dev/null 2>&1
+        echo "OK $n $ip"
+    else
+        echo "FAIL $n $ip"
+    fi
+done <<'PAIRS'
+ATTACH
+    printf '%sPAIRS\n' "$pairs"
+} | vm_ssh_in "bash -s" >"$PCS_TMP/attach.out" 2>&1
+
+while read -r st n ip; do
+    case "$st" in
+        OK)   ok "модем ${n} → ${ip}" ;;
+        FAIL) bad "модем ${n} (${ip}) не воткнулся — проверь vmodem status на ВМ модема"
+              problems=$((problems + 1)) ;;
+        *)    [[ -n "$st" ]] && printf '    %s%s %s %s%s\n' "$D" "$st" "$n" "$ip" "$R" >&2 ;;
+    esac
+done <"$PCS_TMP/attach.out"
+
+# ── Ждём, пока mp.space поднимет интерфейсы ────────────────────────────────
+hdr "Жду, пока mp.space настроит интерфейсы"
+{
+    printf 'set -u\nLIST="%s"\n' "$list"
+    cat <<'WAIT'
+t=0
+while [ "$t" -lt "${ATTACH_WAIT:-150}" ]; do
+    miss=""
+    have="$(ip -4 -o addr show 2>/dev/null)"
+    for n in $LIST; do
+        printf '%s' "$have" | grep -q "192\.168\.${n}\.100/" || miss="$miss $n"
+    done
+    [ -z "$miss" ] && { echo "ALL $t"; exit 0; }
+    [ $((t % 30)) -eq 0 ] && [ "$t" -gt 0 ] && echo "WAIT $t |$miss"
+    sleep 5; t=$((t + 5))
+done
+echo "MISS 0 |$miss"
+WAIT
+} | vm_ssh_in "bash -s" >"$PCS_TMP/wait.out" 2>&1
+
+while IFS= read -r line; do
+    case "$line" in
+        ALL\ *)  ok "все модемы получили 192.168.<N>.100 (${line#ALL }с)" ;;
+        WAIT\ *) step "${line#*|} — ещё без адреса ($(cut -d' ' -f2 <<<"$line")с)" ;;
+        MISS\ *) bad "адрес так и не появился:${line#*|}"
+                 info "их поднимают скрипты mp.space — смотри /var/log/modem-setup.log на ВМ"
+                 problems=$((problems + 1)) ;;
+        "")      ;;
+        *)       printf '    %s%s%s\n' "$D" "$line" "$R" >&2 ;;
+    esac
+done <"$PCS_TMP/wait.out"
 
 hdr "Итог"
 vm_ssh "vmodem-attach check" 2>&1 | relay
