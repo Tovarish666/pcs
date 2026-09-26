@@ -38,9 +38,18 @@ run()  { if [[ -n "$DRY" ]]; then printf '  + %s\n' "$*"; return 0; fi; "$@"; }
 
 kver() { uname -r; }
 
+# Померить потолок можно только у загруженного модуля: на свежей ВМ его
+# ещё никто не грузил, и без этого мы бы увидели ноль вместо стоковых восьми.
+ensure_loaded() {
+    [[ -d /sys/devices/platform/vhci_hcd.0 ]] && return 0
+    modprobe vhci-hcd >/dev/null 2>&1 || return 1
+    return 0
+}
+
 # nports у vhci — это все порты всех контроллеров, половина из них USB3.
 # Модемы у нас High Speed, поэтому делим пополам.
 capacity() {
+    ensure_loaded
     local f v
     for f in /sys/devices/platform/vhci_hcd.*/nports; do
         [[ -r "$f" ]] || continue
@@ -60,6 +69,7 @@ busy() { usbip port 2>/dev/null | grep -c '^Port' || true; }
 ours() { [[ "$(modinfo -n vhci-hcd 2>/dev/null)" == */updates/* ]]; }
 
 cmd_status() {
+    ensure_loaded
     if (( $(controllers) == 0 )); then
         warn "vhci-hcd не загружен (modprobe vhci-hcd)"
         return 1
