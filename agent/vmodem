@@ -269,20 +269,27 @@ def normalize_url(u):
 def fetch_source(src):
     """Текст таблицы и признак «взята из запаса»."""
     last = os.path.join(LIB, "last-good.csv")
-    try:
-        if os.path.isfile(src):
-            text = open(src, encoding="utf-8-sig").read()
-        else:
-            req = urllib.request.Request(normalize_url(src), headers={"User-Agent": "vmodem"})
-            text = urllib.request.urlopen(req, timeout=30).read().decode("utf-8-sig")
-        if text.lstrip().startswith("<"):
-            raise Fail("вместо CSV пришёл HTML — у таблицы нет доступа по ссылке?")
-        return text, False
-    except Exception as e:
-        if os.path.exists(last):
-            log("⚠ таблица недоступна (%s) — беру последнюю удачную" % e)
-            return open(last).read(), True
-        raise Fail("таблица недоступна, а последней удачной нет: %s" % e)
+    err = None
+    for pause in (3, 8, 0):              # сеть и Google иногда рвут TLS — не повод сдаваться
+        try:
+            if os.path.isfile(src):
+                text = open(src, encoding="utf-8-sig").read()
+            else:
+                req = urllib.request.Request(normalize_url(src), headers={"User-Agent": "vmodem"})
+                text = urllib.request.urlopen(req, timeout=30).read().decode("utf-8-sig")
+            if text.lstrip().startswith("<"):
+                err = Fail("вместо CSV пришёл HTML — у таблицы нет доступа по ссылке?")
+                break
+            return text, False
+        except Exception as e:
+            err = e
+            if os.path.isfile(src):
+                break
+            time.sleep(pause)
+    if os.path.exists(last):
+        log("⚠ таблица недоступна (%s) — беру последнюю удачную" % err)
+        return open(last).read(), True
+    raise Fail("таблица недоступна, а последней удачной нет: %s" % err)
 
 
 def local_octets():
@@ -759,8 +766,12 @@ def check_local(n, cfg):
     busid, ifn = host_side(n)
     if not busid:
         return "wait-host", ["сервер не видит USB-устройство"]
-    if host_mode(cfg) != "none" and addr_of(ifn) != "192.168.%d.100" % n:
-        return "wait-host", ["у %s нет 192.168.%d.100" % (ifn or "?", n)]
+    if host_mode(cfg) != "none":
+        ip = "192.168.%d.100" % n
+        if addr_of(ifn) != ip:
+            return "wait-host", ["у %s нет %s" % (ifn or "?", ip)]
+        if "from %s " % ip not in sh("ip", "rule", check=False).stdout.replace("\t", " ") + " ":
+            return "wait-host", ["у сервера пропало правило маршрутизации для %s" % ip]
     return "ok", []
 
 
@@ -1591,9 +1602,20 @@ def cmd_source(args):
     if not args.url:
         print("  таблица: %s" % (cfg["source"] or "не задана"))
         return 0
-    _, stale, desired, disabled, invalid, problems = load_desired(cfg, args.url)
+    try:
+        _, stale, desired, disabled, invalid, problems = load_desired(cfg, args.url)
+    except Fail as e:
+        if not args.force:
+            raise
+        stale, desired, disabled, invalid, problems = True, {}, set(), set(), [str(e)]
     if stale:
-        raise Fail("таблица по ссылке не читается — не запоминаю")
+        if not args.force:
+            raise Fail("таблица по ссылке не читается — не запоминаю (запомнить всё равно: --force)")
+        save_cfg(source=args.url)
+        print("  ⚠ запомнил %s, хотя сейчас она не читается (%s)\n"
+              "    модемы создадутся сами, когда таблица откроется: таймер пробует раз в 2 минуты"
+              % (args.url, problems[0] if problems else "?"))
+        return 0
     save_cfg(source=args.url)
     print("  запомнил: %s\n  годных строк %d, выключено %d, отбраковано %d" % (
         args.url, len(desired), len(disabled), len(invalid)))
@@ -1801,6 +1823,15 @@ def cmd_setup(args):
         wr("/etc/systemd/system/" + name, body)
     wr(HOOK, HOOK_SH, 0o755)
     sh("systemctl", "daemon-reload")
+    # systemd-networkd при перезапуске (любой netplan apply) стирает «чужие» ip rule —
+    # то есть маршрутизацию всех модемов, и свою, и mobileproxy.space.
+    nd = "/etc/systemd/networkd.conf.d/10-vmodem.conf"
+    body = "[Network]\nManageForeignRoutingPolicyRules=no\nManageForeignRoutes=no"
+    if rd(nd) != body:
+        os.makedirs(os.path.dirname(nd), exist_ok=True)
+        wr(nd, body)
+        sh("systemctl", "restart", "systemd-networkd", check=False)
+        log("systemd-networkd больше не стирает маршрутизацию модемов")
     sh("modprobe", "libcomposite")
     loaded = os.path.isdir("/sys/module/dummy_hcd")
     if cfg["transport"] == "dummy" and loaded and len(udc_slots("dummy")) != slots and not running():
@@ -2006,6 +2037,7 @@ def main():
     a.add_argument("--slots", type=int)
     a = sub.add_parser("source")
     a.add_argument("url", nargs="?")
+    a.add_argument("--force", action="store_true", help="запомнить, даже если сейчас не читается")
     a = sub.add_parser("lint")
     a.add_argument("--source")
     a = sub.add_parser("sync")

@@ -558,7 +558,11 @@ def cmd_server_create(a):
     set_active(vmid)
     if a.sheet:
         hdr("Модемы по таблице")
-        ssh_stream(s, "vmodem source %s && vmodem sync" % shlex.quote(a.sheet))
+        if ssh_stream(s, "vmodem source %s" % shlex.quote(a.sheet)) == 0:
+            ssh_stream(s, "vmodem sync")
+        else:
+            ssh_stream(s, "vmodem source --force %s" % shlex.quote(a.sheet))
+            warn("таблица пока не читается — модемы создадутся сами, когда откроется (pcs m status)")
     if a.mpspace:
         cmd_mpspace(argparse.Namespace(action="install", value=None, auth=a.auth, proxy=a.proxy, no_reboot=False, server=vmid))
     hdr("Готово за %d мин" % ((time.time() - t0) // 60 + 1))
