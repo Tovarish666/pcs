@@ -29,7 +29,8 @@ curl -fsSL --retry 3 "https://codeload.github.com/${PCS_REPO}/tar.gz/refs/heads/
 mkdir -p "$tmp/src"
 tar -xzf "$tmp/pcs.tgz" -C "$tmp/src" --strip-components=1
 for f in pcs agent/vmodem agent/vmodem-api; do
-    python3 -m py_compile "$tmp/src/$f" 2>/dev/null || die "$f не компилируется — не ставлю"
+    python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$tmp/src/$f" \
+        || die "$f не разбирается — не ставлю"
 done
 chmod 755 "$tmp/src/pcs" "$tmp/src/agent/"*
 

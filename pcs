@@ -312,8 +312,32 @@ def vm_mac(vmid):
     return m.group(1).lower() if m else ""
 
 
-def vm_ip(vmid):
-    """Адрес основной сетевухи ВМ: guest agent (по MAC net0), иначе таблица соседей."""
+def link_local(mac):
+    """IPv6 link-local по MAC (EUI-64) — так его строит systemd-networkd в Ubuntu."""
+    b = [int(x, 16) for x in mac.split(":")]
+    b[0] ^= 2
+    w = [b[0] << 8 | b[1], b[2] << 8 | 0xff, 0xfe << 8 | b[3], b[4] << 8 | b[5]]
+    return "fe80::" + ":".join("%x" % x for x in w)
+
+
+def vm_ip_via_ll(vmid, bridge):
+    """Пока guest agent не поставлен, ВМ уже отвечает по IPv6 link-local, а ключ PCS
+    cloud-init кладёт в первые секунды: спрашиваем её IPv4 прямо по SSH."""
+    mac = vm_mac(vmid)
+    if not mac:
+        return ""
+    r = subprocess.run(["ssh", "-i", KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+                        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
+                        "root@%s%%%s" % (link_local(mac), bridge),
+                        "ip -4 -o addr show scope global | awk '{split($4,a,\"/\"); print a[1]; exit}'"],
+                       capture_output=True, text=True, timeout=20)
+    ip = r.stdout.strip()
+    return ip if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ip) else ""
+
+
+def vm_ip(vmid, bridge="vmbr0"):
+    """Адрес основной сетевухи ВМ: guest agent (по MAC net0), таблица соседей,
+    SSH по IPv6 link-local."""
     mac = vm_mac(vmid)
     r = sh("qm", "guest", "cmd", str(vmid), "network-get-interfaces", check=False, timeout=15)
     if r.returncode == 0:
@@ -328,7 +352,10 @@ def vm_ip(vmid):
     for line in sh("ip", "-4", "neigh", "show", check=False).stdout.splitlines():
         if mac and mac in line.lower() and "FAILED" not in line:
             return line.split()[0]
-    return ""
+    try:
+        return vm_ip_via_ll(vmid, bridge) if os.path.exists(KEY) else ""
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
 
 
 def user_data(name, password, pubkey, dns):
@@ -420,7 +447,8 @@ def migrate_vmns(s):
     hdr("Переезд с прототипа vmns на vmodem")
     ssh(s, "systemctl disable --now vmns-sync.timer 2>/dev/null; "
            "for n in $(ip netns list | awk '/^vm[0-9]+/{sub(/^vm/,\"\",$1); print $1}'); do vmns down $n >/dev/null 2>&1; done; "
-           "rm -f /etc/systemd/system/vmns-* /usr/local/sbin/vmns; systemctl daemon-reload", timeout=600)
+           "rm -f /etc/systemd/system/vmns-* /usr/local/sbin/vmns /etc/modprobe.d/vmns.conf /etc/modules-load.d/vmns.conf; "
+           "systemctl daemon-reload", timeout=600)
     ok("модемы прототипа сняты, его службы убраны")
     return src
 
@@ -485,7 +513,7 @@ def cmd_server_create(a):
     hdr("Первая загрузка: пакеты, обновление системы, ядро с USB-модулями")
     t0 = time.time()
     while not s["ip"]:
-        s["ip"] = vm_ip(vmid)
+        s["ip"] = vm_ip(vmid, a.bridge)
         if time.time() - t0 > 900:
             raise Fail("адрес ВМ не определился за 15 минут (qm terminal %d)" % vmid)
         time.sleep(5)

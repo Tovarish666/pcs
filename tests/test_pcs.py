@@ -47,6 +47,10 @@ check("DNS задан через resolved", "DNS=1.1.1.1 8.8.8.8" in ud)
 check("авто-обновления выключены", "unattended-upgrades" in ud)
 check("метка конца cloud-init", "/var/lib/pcs-cloud-init-done" in ud)
 
+print("адрес новой ВМ до guest agent:")
+check("IPv6 link-local из MAC — как у живой ВМ на стенде",
+      pcs.link_local("bc:24:11:18:b7:8b") == "fe80::be24:11ff:fe18:b78b", pcs.link_local("bc:24:11:18:b7:8b"))
+
 print("номера ВМ:")
 pcs.used_ids = lambda: {100, 1000, 2000}
 check("свободная тысяча", pcs.next_id() == 3000, pcs.next_id())

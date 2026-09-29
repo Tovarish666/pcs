@@ -65,6 +65,7 @@ API_BIN = "/usr/local/sbin/vmodem-api"
 SB_BIN = "/usr/local/bin/sing-box"
 HOOK = "/usr/local/lib/vmodem/udhcpc-hook"
 HOST_RULE = "/etc/udev/rules.d/80-vmodem-host.rules"
+HOST_LINK = "/etc/systemd/network/10-vmodem-cdc.link"
 MP_SETUP = "/usr/local/bin/modem-interface-setup.sh"
 MP_WORK = "/home/nodejs/work"
 SINGBOX = ("1.10.0", "b33b52bb371ea209e697c1ba4a8920c15bd0bbd60077d3c001e3b687837852a8")
@@ -217,14 +218,26 @@ def save_state(st):
     jsave(os.path.join(RUN, "state.json"), st)
 
 
-def lock():
+class Busy(Fail):
+    pass
+
+
+def lock(wait=300):
+    """Одна правка модемов за раз. Ручные команды подождут идущий sync."""
     os.makedirs(RUN, exist_ok=True)
     f = open(os.path.join(RUN, "lock"), "w")
-    try:
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        raise Fail("vmodem уже работает (идёт sync?) — повтори через минуту")
-    return f
+    t0, said = time.time(), False
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.time() - t0 >= wait:
+                raise Busy("vmodem занят другой командой (идёт sync?) — повтори позже")
+            if not said and wait:
+                print("  … жду, пока закончится идущий sync", flush=True)
+                said = True
+            time.sleep(1)
 
 
 def need_root():
@@ -412,6 +425,24 @@ def cached_desired():
         return lint(open(os.path.join(LIB, "last-good.csv")).read(), local_octets())[0]
     except OSError:
         return {}
+
+
+def live_specs():
+    """С какими настройками модемы работают прямо сейчас (не всегда = таблица:
+    кривую или подозрительную таблицу мы к модемам не применяем)."""
+    out = {}
+    for n in running():
+        try:
+            out[n] = json.load(open(os.path.join(mdir(n), "spec.json")))
+        except (OSError, ValueError):
+            pass
+    return out
+
+
+def specs_now(table=None):
+    specs = dict(cached_desired() if table is None else table)
+    specs.update(live_specs())
+    return specs
 
 
 # ── USB ────────────────────────────────────────────────────────────────────
@@ -827,15 +858,16 @@ def xml(tag, text):
     return m.group(1) if m else ""
 
 
-def hilink(p, path, body=None):
-    """Запрос к веб-морде настоящего модема через его прокси (сессия + токен HiLink)."""
+def hilink(p, path, body=None, timeout=25):
+    """Запрос к веб-морде настоящего модема через его прокси (сессия + токен HiLink).
+    Смена режима сети у модема идёт секунды — ждём ответа дольше, чем диагностика."""
     real = "192.168.%d.1" % p["real"]
     _, _, b = http(socks_connect(p, real, 80), real, "/api/webserver/SesTokInfo")
     ses, tok = xml("SesInfo", b), xml("TokInfo", b)
     if not ses:
         raise Fail("modem-unreachable веб-морда %s не отдала сессию" % real)
     xmlbody = None if body is None else '<?xml version="1.0" encoding="UTF-8"?><request>%s</request>' % body
-    return http(socks_connect(p, real, 80), real, path, ses, tok, xmlbody)
+    return http(socks_connect(p, real, 80, timeout=timeout), real, path, ses, tok, xmlbody)
 
 
 def public_ip(p):
@@ -1110,6 +1142,16 @@ HOST_RULE_TEXT = """# vmodem: любой USB-модем (виртуальный 
 ACTION=="add", SUBSYSTEM=="net", DRIVERS=="cdc_ether|rndis_host|cdc_ncm|huawei_cdc_ncm", TAG+="systemd", ENV{SYSTEMD_WANTS}+="vmodem-host@%k.service"
 """
 
+HOST_LINK_TEXT = """# vmodem: у всех E3372h один MAC. Имя по MAC (enx…) достаётся только первому
+# модему, на втором udev падает с «File exists» и бросает устройство
+# недонастроенным. Оставляем ядерные имена ethN — так же делает mobileproxy.space.
+[Match]
+Driver=cdc_ether rndis_host cdc_ncm huawei_cdc_ncm
+[Link]
+NamePolicy=
+MACAddressPolicy=none
+"""
+
 MODEM_DRIVERS = ("cdc_ether", "rndis_host", "cdc_ncm", "huawei_cdc_ncm")
 
 
@@ -1125,15 +1167,20 @@ def modem_ifaces():
 def apply_hostside(cfg):
     """Своя сторона сервера нужна, только когда адрес у модема больше некому взять."""
     want = host_mode(cfg) == "own"
-    have = os.path.exists(HOST_RULE)
+    have = os.path.exists(HOST_RULE) and os.path.exists(HOST_LINK)
     if want and not have:
+        os.makedirs(os.path.dirname(HOST_LINK), exist_ok=True)
+        wr(HOST_LINK, HOST_LINK_TEXT)
         wr(HOST_RULE, HOST_RULE_TEXT)
         sh("udevadm", "control", "--reload", check=False)
-        for ifn in modem_ifaces():
+        for ifn in modem_ifaces():       # уже воткнутые — прогнать через udev заново
+            sh("udevadm", "trigger", "--action=add", "/sys/class/net/%s" % ifn, check=False)
             sh("systemctl", "start", "--no-block", "vmodem-host@%s" % ifn, check=False)
         log("сторона сервера: свой DHCP и маршруты включены")
-    elif not want and have:
-        os.unlink(HOST_RULE)
+    elif not want and (os.path.exists(HOST_RULE) or os.path.exists(HOST_LINK)):
+        for f in (HOST_RULE, HOST_LINK):
+            if os.path.exists(f):
+                os.unlink(f)
         sh("udevadm", "control", "--reload", check=False)
         sh("systemctl", "stop", "vmodem-host@*", check=False)
         log("сторона сервера: отдаю модемы %s" % ("mobileproxy.space" if host_mode(cfg) == "mpspace" else "никому (hostside=off)"))
@@ -1284,7 +1331,12 @@ def create_all(queue, desired, cfg, st, strategy):
 def cmd_sync(args):
     need_root()
     cfg = load_cfg()
-    lk = lock()
+    try:
+        lk = lock(wait=0 if args.quiet else 300)
+    except Busy:
+        if args.quiet:           # таймер: идёт ручной sync — пропустить этот заход
+            return 0
+        raise
     st = state()
     ensure_module(cfg)
     apply_hostside(cfg)
@@ -1360,8 +1412,8 @@ def cmd_sync(args):
         for n, w in failed.items():
             log("✗ модем %d: %s" % (n, w))
     save_state(st)
-    apply_proxy(cfg, [n for n in running() if n in desired])
-    rows = evaluate(desired, cfg, fresh=set(todo))
+    apply_proxy(cfg, [n for n in running() if n in desired or n in invalid or suspicious])
+    rows = evaluate(specs_now(desired), cfg, fresh=set(todo))
     remember(rows, cfg)
     if not args.quiet:
         print_table(rows)
@@ -1370,7 +1422,7 @@ def cmd_sync(args):
 
 def cmd_status(args):
     cfg = load_cfg()
-    desired = cached_desired()
+    desired = specs_now()
     if args.fast:                   # прокси не трогаем, берём последнюю проверку
         rows = evaluate(desired, cfg, upstream=False)
     else:
@@ -1401,7 +1453,7 @@ def cmd_watch(args):
 
 
 def one(n):
-    p = cached_desired().get(n)
+    p = specs_now().get(n)
     if not p:
         raise Fail("модема %d нет среди годных строк таблицы (vmodem lint)" % n)
     return p
@@ -1425,13 +1477,21 @@ def cmd_diag(args):
 def cmd_rotate(args):
     p = one(args.n)
     before = public_ip(p)
-    print("  модем %d: сейчас %s — меняю IP (данные выкл → режим 02 → 03 → данные вкл)" % (p["n"], before or "?"))
-    for body in ("<dataswitch>0</dataswitch>", "<NetworkMode>02</NetworkMode>" + BANDS,
-                 "<NetworkMode>03</NetworkMode>" + BANDS, "<dataswitch>1</dataswitch>"):
+    print("  модем %d: сейчас %s — меняю IP (данные выкл → режим 02 → 03 → данные вкл)"
+          % (p["n"], before or "?"), flush=True)
+    for i, body in enumerate(("<dataswitch>0</dataswitch>", "<NetworkMode>02</NetworkMode>" + BANDS,
+                              "<NetworkMode>03</NetworkMode>" + BANDS, "<dataswitch>1</dataswitch>")):
         path = "/api/dialup/mobile-dataswitch" if "dataswitch" in body else "/api/net/net-mode"
-        code, _, resp = hilink(p, path, body)
+        try:
+            code, _, resp = hilink(p, path, body)
+        except Fail as e:
+            code, resp = 0, str(e)
         if code != 200 or "<error>" in resp:
-            raise Fail("модем ответил на %s: HTTP %s %s" % (path, code, xml("code", resp)))
+            # Первый шаг не прошёл — до модема не достучались, дальше смысла нет.
+            # Остальные модем иногда молча переваривает: итог решает смена IP.
+            if i == 0:
+                raise Fail("модем не принял команду %s: HTTP %s %s" % (path, code, xml("code", resp)))
+            print("  ⚠ %s: модем ответил HTTP %s — продолжаю" % (path, code), flush=True)
         time.sleep(3)
     t0 = time.time()
     while time.time() - t0 < 120:
