@@ -262,10 +262,71 @@ def test_proxy_conf():
     check("стратегия по умолчанию — окно 5", vm.DEFAULTS["strategy"] == "window:5")
 
 
+def test_layout():
+    print("модем внутри:")
+    import json
+    import tempfile
+    vm.ETC, vm.LOGD = tempfile.mkdtemp(), tempfile.mkdtemp()
+    p = {"n": 201, "real": 81, "host": "188.134.95.184", "port": 1198, "user": "modem81", "pw": "pw"}
+    vm.write_configs(p)
+    sb = json.load(open(os.path.join(vm.mdir(201), "singbox.json")))
+    px = sb["outbounds"][0]
+    check("к прокси — через сокет внутри netns, не напрямую",
+          (px["server"], px["server_port"]) == ("127.0.0.1", vm.RELAY_PORT), px)
+    check("стек system — tun создаётся прямо в netns", sb["inbounds"][0]["stack"] == "system", sb["inbounds"][0])
+    check("любой DNS (и на 8.8.8.8) — к DNS настоящего модема",
+          {"port": 53, "outbound": "dns-out"} in sb["route"]["rules"], sb["route"]["rules"])
+    sock, relay = vm.UNITS["vmodem-px@.socket"], vm.UNITS["vmodem-px@.service"]
+    check("сокет ретранслятора — в netns модема, на том же порту",
+          "NetworkNamespacePath=/run/netns/vm%i" in sock and "127.0.0.1:%d" % vm.RELAY_PORT in sock, sock)
+    check("сам ретранслятор — на сервере (своего netns нет)", "NetworkNamespacePath" not in relay, relay)
+    check("sing-box — в netns модема", "NetworkNamespacePath=/run/netns/vm%i" in vm.UNITS["vmodem-sb@.service"])
+    api = vm.UNITS["vmodem-api@.service"]
+    check("веб-морда — на сервере, слушает в netns", "NetworkNamespacePath" not in api and "--netns" in api, api)
+    check("строка та же — пересоздание из-за новой схемы", vm.same_row(201, dict(p)))
+    check("строка поменялась — так и сказать", not vm.same_row(201, dict(p, pw="другой")))
+    check("модема ещё нет — не «новая схема»", not vm.same_row(202, dict(p, n=202)))
+
+    print("к прокси — через основной канал:")
+    import types
+    world = {
+        ("ip", "-o", "link"):
+            "2: eth0: <UP> mtu 1500\\    link/ether bc:24:11:18:b7:8b brd ff:ff:ff:ff:ff:ff\n"
+            "5: eth1: <UP> mtu 1500\\    link/ether 0c:5b:8f:27:9a:64 brd ff:ff:ff:ff:ff:ff\n",
+        # окно udhcpc: у модема маршрут по умолчанию с метрикой 0 — лучше основного
+        ("ip", "-4", "route", "show", "default", "table", "main"):
+            "default via 192.168.201.1 dev eth1\n"
+            "default via 192.168.88.1 dev eth0 proto dhcp src 192.168.88.7 metric 100\n",
+        ("ip", "-4", "route", "show", "dev", "eth0", "scope", "link", "table", "main"):
+            "192.168.88.0/24 proto kernel src 192.168.88.7 metric 100\n",
+        ("ip", "-4", "rule"): "0:\tfrom all lookup local\n32765:\tfrom all to 10.9.9.9 lookup 90\n",
+    }
+    ran = []
+    real_sh = vm.sh
+
+    def fake_sh(*c, **k):
+        ran.append(c)
+        return types.SimpleNamespace(stdout=world.get(c, ""), returncode=0)
+    vm.sh = fake_sh
+    try:
+        check("основной канал — eth0, хотя у модема метрика лучше",
+              vm.uplink_route(vm.DEFAULTS) == ("192.168.88.1", "eth0"), vm.uplink_route(vm.DEFAULTS))
+        vm.pin_proxies(vm.DEFAULTS, {201: p})
+    finally:
+        vm.sh = real_sh
+    check("таблица 90: по умолчанию через eth0",
+          ("ip", "route", "replace", "default", "via", "192.168.88.1", "dev", "eth0", "table", "90") in ran, ran)
+    check("адрес прокси закреплён",
+          ("ip", "rule", "add", "priority", "32765", "to", "188.134.95.184", "lookup", "90") in ran, ran)
+    check("прокси, которой больше нет в таблице, — правило снято",
+          ("ip", "rule", "del", "priority", "32765", "to", "10.9.9.9", "lookup", "90") in ran, ran)
+
+
 if __name__ == "__main__":
     test_lint()
     test_diag()
     test_notify()
     test_proxy_conf()
+    test_layout()
     print("\nитого: ok %d, fail %d" % (passed, failed))
     sys.exit(1 if failed else 0)

@@ -315,6 +315,14 @@ async def main():
             env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, _ = await probe.communicate()
         check("--probe видит модем", probe.returncode == 0 and b"9GVDW17215000571" in out, out[:200])
+
+        gone = await asyncio.create_subprocess_exec(
+            sys.executable, API, "--virt", str(VIRT), "--real", str(REAL), "--socks", "127.0.0.1:1",
+            "--netns", "/run/netns/нет-такого", "--listen", "127.0.0.1:0",
+            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(gone.communicate(), 10)
+        check("netns модема пропал — выход с понятной ошибкой, без трассы",
+              gone.returncode == 1 and "не могу слушать".encode() in err and b"Traceback" not in err, err[-300:])
     finally:
         proc.terminate()
         await proc.wait()
