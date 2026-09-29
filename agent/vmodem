@@ -70,6 +70,7 @@ MP_SETUP = "/usr/local/bin/modem-interface-setup.sh"
 MP_WORK = "/home/nodejs/work"
 SINGBOX = ("1.10.0", "b33b52bb371ea209e697c1ba4a8920c15bd0bbd60077d3c001e3b687837852a8")
 CHECK_URL = ("connectivitycheck.gstatic.com", 80, "/generate_204")
+CHECK_URL2 = ("cp.cloudflare.com", 80, "/generate_204")
 IP_URL = ("api.ipify.org", 80, "/")
 MP_HOSTS = ("mobileproxy.rent", "mobileproxy.space", "proxeon.net")
 BANDS = "<NetworkBand>3FFFFFFF</NetworkBand><LTEBand>7FFFFFFFFFFFFFFF</LTEBand>"
@@ -914,16 +915,25 @@ def diag(p, udp=False):
             return "no-data", info, ""
     except Fail as e:
         info.append("статус модема не прочитался: %s" % e)
-    try:
-        code, head, _ = http(socks_connect(p, CHECK_URL[0], CHECK_URL[1]), CHECK_URL[0], CHECK_URL[2])
-    except Fail as e:
-        return "no-internet", info + ["модем на связи, но в интернет не выходит: %s" % str(e).split(" ", 1)[1]], ""
-    if code == 0:
-        return "no-internet", info + ["соединение открывается, но ответа нет — трафик уходит в никуда"], ""
-    if code != 204:
+    # Интернет: одна медленная проверка через слабую прокси — ещё не поломка.
+    # Две разные цели и повтор первой при таймауте; портал оператора — сразу.
+    why = ""
+    for host, port, path in (CHECK_URL, CHECK_URL, CHECK_URL2):
+        try:
+            code, head, _ = http(socks_connect(p, host, port, timeout=12), host, path)
+        except Fail as e:
+            why = "модем на связи, но в интернет не выходит: %s" % str(e).split(" ", 1)[1]
+            continue
+        if code == 204:
+            break
+        if code == 0:
+            why = "соединение открывается, но ответа нет — трафик уходит в никуда"
+            continue
         loc = re.search(r"(?im)^location:\s*(\S+)", head)
         return "captive", info + ["вместо 204 пришёл HTTP %s%s — похоже, SIM не оплачена"
                                   % (code, (" → " + loc.group(1)) if loc else "")], ""
+    else:
+        return "no-internet", info + [why], ""
     ip = public_ip(p)
     if udp:
         info.append("UDP: %s" % udp_probe(p))
@@ -1025,17 +1035,21 @@ def reason(r):
 
 
 def remember(rows, cfg, announce=True):
-    """Запомнить состояние и сообщить только об изменениях."""
+    """Запомнить состояние и сообщить только об изменениях. О поломке — когда она
+    подтвердилась двумя проверками подряд (слабая прокси разок не ответить может),
+    о восстановлении — сразу."""
     hp = jload(health_path(), {})
     changes = []
     for r in rows:
         key, old = str(r["n"]), hp.get(str(r["n"]), {})
         v = verdict(r)
-        if old.get("verdict") and old.get("verdict") != v:
+        streak = old.get("streak", 0) + 1 if v == old.get("verdict") else 1
+        told = old.get("told", "ok")
+        if v != told and (v == "ok" or streak >= 2):
             changes.append((r["n"], v, reason(r) if v != "ok" else "снова в порядке" + (" (IP %s)" % r["ip"] if r["ip"] else "")))
-        elif not old.get("verdict") and v != "ok":
-            changes.append((r["n"], v, reason(r)))
-        hp[key] = {"verdict": v, "since": old.get("since", time.time()) if old.get("verdict") == v else time.time(),
+            told = v
+        hp[key] = {"verdict": v, "streak": streak, "told": told,
+                   "since": old.get("since", time.time()) if old.get("verdict") == v else time.time(),
                    "up": r["up"], "up_info": r["up_info"], "ip": r["ip"] or old.get("ip", ""), "t": r["t"] or old.get("t", 0)}
     for key in list(hp):
         if int(key) not in {r["n"] for r in rows}:

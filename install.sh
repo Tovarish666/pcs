@@ -37,6 +37,7 @@ chmod 755 "$tmp/src/pcs" "$tmp/src/agent/"*
 if command -v qm >/dev/null 2>&1; then
     rm -rf "${DEST}.new" "${DEST}.prev"
     cp -a "$tmp/src" "${DEST}.new"
+    printf 'PCS_REPO=%s\nPCS_BRANCH=%s\n' "$PCS_REPO" "$PCS_BRANCH" > "${DEST}.new/.source"   # pcs update — отсюда же
     [[ -d "$DEST" ]] && mv "$DEST" "${DEST}.prev"
     mv "${DEST}.new" "$DEST"
     ln -sf "$DEST/pcs" /usr/local/bin/pcs

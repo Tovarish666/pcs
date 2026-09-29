@@ -122,7 +122,7 @@ class World:
                     "<CurrentNetworkType>19</CurrentNetworkType><SignalIcon>4</SignalIcon></response>"
                     % (self.conn, self.sim)).encode()
             w.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body))
-        elif dst == "connectivitycheck.gstatic.com":
+        elif dst in ("connectivitycheck.gstatic.com", "cp.cloudflare.com"):
             if self.net_mode == "blackhole":
                 await asyncio.sleep(30)
                 return
@@ -218,6 +218,31 @@ def test_diag():
     vm.socks_connect = orig
 
 
+def test_notify():
+    print("оповещения:")
+    import tempfile
+    vm.LIB = tempfile.mkdtemp()
+    vm.server_ip = lambda: "10.0.0.7"
+    sent = []
+    vm.notify = lambda cfg, text: sent.append(text)
+    cfg = vm.DEFAULTS
+    ok_row = {"n": 201, "real": 81, "local": "ok", "local_problems": [], "up": "ok", "up_info": [], "ip": "1.2.3.4", "t": 1}
+    bad_row = dict(ok_row, up="no-internet", up_info=["нет ответа"], ip="")
+    vm.remember([ok_row], cfg)
+    check("исправный модем — молчим", sent == [], sent)
+    vm.remember([bad_row], cfg)
+    check("одна неудачная проверка — ещё не повод будить", sent == [], sent)
+    vm.remember([bad_row], cfg)
+    check("вторая подряд — оповещение", len(sent) == 1 and "модем 201" in sent[0] and "нет интернета" in sent[0], sent)
+    vm.remember([bad_row], cfg)
+    check("дальше не повторяем", len(sent) == 1, sent)
+    vm.remember([ok_row], cfg)
+    check("восстановление — сразу", len(sent) == 2 and "снова в порядке" in sent[1], sent)
+    vm.remember([bad_row], cfg)
+    vm.remember([ok_row], cfg)
+    check("мигнул и вернулся — тишина", len(sent) == 2, sent)
+
+
 def test_proxy_conf():
     print("прямые прокси:")
     cfg = vm.merge(vm.DEFAULTS, {"proxy": {"enabled": True, "user": "u1", "pass": "p1", "base_port": 20000}})
@@ -240,6 +265,7 @@ def test_proxy_conf():
 if __name__ == "__main__":
     test_lint()
     test_diag()
+    test_notify()
     test_proxy_conf()
     print("\nитого: ok %d, fail %d" % (passed, failed))
     sys.exit(1 if failed else 0)

@@ -40,8 +40,20 @@ KEY = os.path.join(ETC, "ssh", "id_ed25519")
 KNOWN = os.path.join(ETC, "ssh", "known_hosts")
 CM_DIR = "/run/pcs"
 LOG = "/var/log/pcs/pcs.log"
-REPO = os.environ.get("PCS_REPO", "Tovarish666/pcs")
-BRANCH = os.environ.get("PCS_BRANCH", "main")
+def _source():
+    """Откуда PCS поставлен (install.sh пишет .source): обновляться оттуда же."""
+    src = {"PCS_REPO": "Tovarish666/pcs", "PCS_BRANCH": "main"}
+    try:
+        for line in open(os.path.join(ROOT, ".source")):
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                src[k] = v
+    except OSError:
+        pass
+    return os.environ.get("PCS_REPO", src["PCS_REPO"]), os.environ.get("PCS_BRANCH", src["PCS_BRANCH"])
+
+
+REPO, BRANCH = _source()
 IMG_URL = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 SUMS_URL = "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
 IMG_PATH = "/var/lib/vz/template/iso/ubuntu-24.04-noble.img"
