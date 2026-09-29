@@ -20,6 +20,12 @@
 адрес, иначе mp.space и браузер уедут на адрес, которого у них нет.
 
 Опасные записи к модему не пропускаются — см. BLOCKED_POST и control_ok().
+Путь для фильтра нормализуется так же, как его поймёт модем: абсолютный URL,
+«//», %xx и регистр фильтр не обходят.
+
+Перезагрузка (--on-reboot). Настоящий модем после Control=1 пропадает с USB
+и возвращается, когда загрузится. Когда модему ушла перезагрузка, запускается
+заданная команда — vmodem вынимает USB до возвращения настоящего модема.
 """
 
 import argparse
@@ -27,10 +33,13 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import socket
 import struct
+import subprocess
 import sys
 import time
+import urllib.parse
 
 HDR_END = re.compile(rb"\r?\n\r?\n")
 ABS_URI = re.compile(rb"^(\S+)\s+https?://[^/\s]+(\S*)\s+(HTTP/\d\.\d)$", re.I)
@@ -204,6 +213,21 @@ def is_texty(headers):
             or b"javascript" in ct or not ct)
 
 
+def norm_path(path):
+    """Путь так, как его поймёт модем: без схемы и хоста, без query, %xx
+    раскрыты, повторные слэши схлопнуты, в нижнем регистре."""
+    p = path.decode("latin1", "replace")
+    m = re.match(r"^[a-z][a-z0-9+.-]*://[^/]*(/.*)?$", p, re.I)
+    if m:
+        p = m.group(1) or "/"
+    p = p.split("?", 1)[0].split("#", 1)[0]
+    p = urllib.parse.unquote(p)
+    p = re.sub(r"/{2,}", "/", p)
+    if not p.startswith("/"):
+        p = "/" + p
+    return p.lower().encode()
+
+
 def control_ok(body):
     """Из /api/device/control пропускаем только перезагрузку (Control=1)."""
     m = CONTROL_RE.search(body or b"")
@@ -212,10 +236,14 @@ def control_ok(body):
     return m.group(1) == b"1"
 
 
+def is_reboot(method, path, body):
+    return method.upper() == b"POST" and norm_path(path).startswith(b"/api/device/control") and control_ok(body)
+
+
 def blocked_reason(method, path, body):
-    if method != b"POST":
+    if method.upper() != b"POST":
         return None
-    low = path.lower()
+    low = norm_path(path)
     for p in BLOCKED_POST:
         if low.startswith(p):
             return "запись по %s" % p.decode()
@@ -236,9 +264,20 @@ class Proxy:
         self.proxy = args.socks
         self.user = args.socks_user
         self.password = args.socks_pass
+        self.on_reboot = getattr(args, "on_reboot", None)
         self.requests = 0
         self.blocked = 0
         self.errors = 0
+
+    def reboot_hook(self):
+        if not self.on_reboot:
+            return
+        try:
+            subprocess.Popen(shlex.split(self.on_reboot), start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log.info("модему ушла перезагрузка — запускаю: %s", self.on_reboot)
+        except OSError as e:
+            log.error("не запустилась команда перезагрузки: %s", e)
 
     async def handle(self, creader, cwriter):
         started = time.monotonic()
@@ -257,7 +296,7 @@ class Proxy:
             reason = blocked_reason(method, path, body)
             if reason:
                 self.blocked += 1
-                log.warning("НЕ ПРОПУЩЕНО %s %s — %s", method.decode(), path.decode(), reason)
+                log.warning("НЕ ПРОПУЩЕНО %s %s — %s", method.decode("latin1"), path.decode("latin1"), reason)
                 await self.reply(cwriter, b"HTTP/1.1 200 OK", BLOCKED_BODY, b"text/html")
                 return
 
@@ -267,8 +306,10 @@ class Proxy:
             rwriter.write(rewrite_request(head, self.real_ip) + b"\r\n\r\n" + body)
             await rwriter.drain()
             status = await self.relay_response(rreader, cwriter)
-            log.info("%s %s → %s (%d мс)", method.decode(), path.decode(),
+            log.info("%s %s → %s (%d мс)", method.decode("latin1"), path.decode("latin1"),
                      status, int((time.monotonic() - started) * 1000))
+            if status == "200" and is_reboot(method, path, body):
+                self.reboot_hook()
         except SocksError as e:
             self.errors += 1
             log.error("%s %s — %s", method.decode("latin1"), path.decode("latin1"), e)
@@ -433,6 +474,7 @@ def main(argv=None):
     ap.add_argument("--socks-user", default=os.environ.get("VMODEM_SOCKS_USER") or None)
     ap.add_argument("--socks-pass-file", help="файл с паролем прокси")
     ap.add_argument("--listen", help="что слушать (по умолчанию 192.168.<virt>.1:80)")
+    ap.add_argument("--on-reboot", help="команда, когда модему ушла перезагрузка (Control=1)")
     ap.add_argument("--probe", action="store_true", help="разовая проверка и выход")
     ap.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"))
     args = ap.parse_args(argv)
