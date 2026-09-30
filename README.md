@@ -26,7 +26,22 @@ Google-таблица: n, real, proxy
 bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 ```
 
-Появится команда `pcs` (без аргументов — меню). На обычном сервере Ubuntu та же команда поставит только агент `vmodem` — модемы работают и без Proxmox.
+Появится команда `pcs` (без аргументов — меню).
+
+### Без Proxmox — модемы прямо на сервере или ПК с Ubuntu
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/vmodem-install.sh) \
+     --sheet 'https://docs.google.com/spreadsheets/d/ID/edit#gid=0'
+```
+
+Нужны Ubuntu 24.04 x86_64, root и интернет. `vmodem-install.sh` ставит заголовки ядра (и под будущие ядра, чтобы dkms пересобирал модуль после обновлений), модули USB-гаджетов и агент `vmodem`; собирает `dummy_hcd`, ставит sing-box и поднимает модемы по таблице. Дальше всё — командой `vmodem` (таблица ниже): таймер сам держит модемы в согласии с таблицей и поднимает их после перезагрузки.
+
+- `--mpspace [--auth '<json>'] [--proxy http://…]` — затем софт mobileproxy.space; в конце сервер перезагрузится.
+- Без `--sheet` — только установка: `vmodem source <ссылка> && vmodem sync` потом.
+- Обновить — запустить скрипт снова.
+- **Secure Boot** на обычном ПК: собранный модуль ядро загрузит, только если ключ dkms зарегистрирован. Скрипт это проверит и подскажет: выключить Secure Boot в BIOS/UEFI или зарегистрировать ключ (`mokutil --import`, перезагрузка, подтвердить на экране).
+- На хосте Proxmox скрипт не ставится: там `pcs`, а модемы — в ВМ.
 
 ## Весь путь одной командой
 
