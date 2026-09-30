@@ -321,6 +321,26 @@ def test_layout():
     check("прокси, которой больше нет в таблице, — правило снято",
           ("ip", "rule", "del", "priority", "32765", "to", "10.9.9.9", "lookup", "90") in ran, ran)
 
+    print("шины USB:")
+    vm.HCD_DRV, vm.GROOT = tempfile.mkdtemp(), tempfile.mkdtemp()
+    for k in range(4):
+        os.mkdir(os.path.join(vm.HCD_DRV, "dummy_hcd.%d" % k))
+    os.mkdir(os.path.join(vm.GROOT, "vm201"))
+    open(os.path.join(vm.GROOT, "vm201", "UDC"), "w").write("dummy_udc.0\n")
+    writes, real_wr = [], vm.wr
+    vm.wr = lambda path, value, mode=None: writes.append((os.path.basename(path), value))
+    try:
+        vm.park_idle_hcds({"modems": {"202": {"slot": "dummy_udc.2"}}})
+        parked = sorted(v for f, v in writes if f == "unbind")
+        writes.clear()
+        vm.bind(203, "dummy_udc.9")
+    finally:
+        vm.wr = real_wr
+    check("пустые шины убраны, шины модемов — нет", parked == ["dummy_hcd.1", "dummy_hcd.3"], parked)
+    check("модем перезагружается (гаджет отвязан) — его шину не трогаем", "dummy_hcd.2" not in parked)
+    check("воткнуть модем — сначала вернуть шину его слота",
+          writes[:2] == [("bind", "dummy_hcd.9"), ("UDC", "dummy_udc.9")], writes)
+
 
 if __name__ == "__main__":
     test_lint()

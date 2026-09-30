@@ -543,7 +543,34 @@ def make_gadget(n, cfg):
     return g
 
 
+HCD_DRV = "/sys/bus/platform/drivers/dummy_hcd"
+
+
+def hcd_power(udc, on):
+    """Своя шина USB (root hub в lsusb) — только у слота с модемом. У пустого слота
+    dummy_hcd отвязан от драйвера: шины нет, а слот UDC остаётся и ждёт модема."""
+    if not udc.startswith("dummy_udc."):
+        return
+    hcd = "dummy_hcd." + udc.rsplit(".", 1)[1]
+    if os.path.exists(os.path.join(HCD_DRV, hcd)) != on:
+        wr(os.path.join(HCD_DRV, "bind" if on else "unbind"), hcd)
+
+
+def park_idle_hcds(st):
+    """Убрать шины пустых слотов. Слот модема, который сейчас перезагружается
+    (гаджет отвязан), тоже занят — по состоянию."""
+    busy = {rd(u) for u in glob.glob(GROOT + "/*/UDC")} | {m.get("slot") for m in st["modems"].values()}
+    for path in glob.glob(HCD_DRV + "/dummy_hcd.*"):
+        udc = "dummy_udc." + path.rsplit(".", 1)[1]
+        if udc not in busy:
+            try:
+                hcd_power(udc, False)
+            except OSError as e:
+                log("⚠ не убрать пустую шину %s: %s" % (udc, e.strerror))
+
+
 def bind(n, udc):
+    hcd_power(udc, True)
     wr("%s/vm%d/UDC" % (GROOT, n), udc)
     if udc.startswith("usbip-vudc."):
         sh("usbip", "attach", "-r", "127.0.0.1", "-d", udc)
@@ -771,6 +798,7 @@ def up(p, cfg, st):
         g = make_gadget(n, cfg)
         for cand in slots[:3]:
             try:
+                hcd_power(cand, True)
                 wr(g + "/UDC", cand)
                 udc = cand
                 break
@@ -1504,6 +1532,8 @@ def cmd_sync(args):
         for n, w in failed.items():
             log("✗ модем %d: %s" % (n, w))
     save_state(st)
+    if not args.dry_run:
+        park_idle_hcds(st)
     apply_proxy(cfg, [n for n in running() if n in desired or n in invalid or suspicious])
     rows = evaluate(specs_now(desired), cfg, fresh=set(todo))
     remember(rows, cfg)
@@ -1651,6 +1681,7 @@ def cmd_down(args):
     down(args.n)
     st["modems"].pop(str(args.n), None)
     save_state(st)
+    park_idle_hcds(st)
     return 0
 
 
