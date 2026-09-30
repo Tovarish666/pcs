@@ -321,6 +321,10 @@ def test_layout():
     check("прокси, которой больше нет в таблице, — правило снято",
           ("ip", "rule", "del", "priority", "32765", "to", "10.9.9.9", "lookup", "90") in ran, ran)
 
+    check("свой sing-box, не общий /usr/local/bin (там его ставят proxyveth и modlink)",
+          not vm.SB_BIN.startswith("/usr/local/bin/")
+          and all(vm.SB_BIN + " run" in vm.UNITS[u] for u in ("vmodem-sb@.service", "vmodem-proxy.service")))
+
     print("DNS сервера:")
     check("sing-box без D-Bus — не пишет DNS своего tun в resolved сервера",
           "InaccessiblePaths=-/run/dbus/system_bus_socket" in vm.UNITS["vmodem-sb@.service"])

@@ -62,7 +62,10 @@ LOGD = "/var/log/vmodem"
 GROOT = "/sys/kernel/config/usb_gadget"
 SELF = "/usr/local/sbin/vmodem"
 API_BIN = "/usr/local/sbin/vmodem-api"
-SB_BIN = "/usr/local/bin/sing-box"
+# Свой sing-box, не /usr/local/bin: там его держат и другие программы (proxyveth,
+# modlink) своей версии. Кто поставил последним, тот и прав — а с 1.12 конфиги
+# в формате 1.10 не принимаются вовсе. Тот же путь — в UNITS.
+SB_BIN = "/usr/local/lib/vmodem/sing-box"
 HOOK = "/usr/local/lib/vmodem/udhcpc-hook"
 HOST_RULE = "/etc/udev/rules.d/80-vmodem-host.rules"
 HOST_LINK = "/etc/systemd/network/10-vmodem-cdc.link"
@@ -1800,7 +1803,7 @@ Description=vmodem: туннель модема %i в SOCKS5
 [Service]
 NetworkNamespacePath=/run/netns/vm%i
 InaccessiblePaths=-/run/dbus/system_bus_socket
-ExecStart=/usr/local/bin/sing-box run -c /etc/vmodem/m/%i/singbox.json
+ExecStart=/usr/local/lib/vmodem/sing-box run -c /etc/vmodem/m/%i/singbox.json
 ExecStartPost=/usr/local/sbin/vmodem routes %i
 Restart=always
 RestartSec=2
@@ -1826,7 +1829,7 @@ RestartSec=3
 Description=vmodem: прямые прокси на каждый модем
 After=network-online.target
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/vmodem/proxy.json
+ExecStart=/usr/local/lib/vmodem/sing-box run -c /etc/vmodem/proxy.json
 Restart=always
 RestartSec=3
 [Install]
@@ -1875,6 +1878,7 @@ def install_singbox():
         return
     url = "https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-linux-amd64.tar.gz" % (ver, ver)
     log("ставлю sing-box %s" % ver)
+    os.makedirs(os.path.dirname(SB_BIN), exist_ok=True)
     data = urllib.request.urlopen(url, timeout=120).read()
     if hashlib.sha256(data).hexdigest() != sha:
         raise Fail("sing-box: контрольная сумма не совпала — не ставлю")
