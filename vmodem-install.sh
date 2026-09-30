@@ -99,22 +99,37 @@ fi
 
 # ── Пакеты ────────────────────────────────────────────────────────────────
 # Заголовки — и под будущие ядра: иначе после обновления ядра dkms не пересоберёт
-# dummy_hcd, и модемы не поднимутся (vmodem соберёт сам, но нужен интернет).
+# dummy_hcd. Модули USB-гаджетов (linux-modules-extra) — только под текущее ядро:
+# метапакет linux-image-extra-* тянет сотни мегабайт прошивок, а под новое ядро
+# их доставит сам vmodem при загрузке.
 export DEBIAN_FRONTEND=noninteractive
-pkgs=(curl ca-certificates python3 dkms "linux-headers-$(uname -r)")
+LOG=/var/log/vmodem-install.log
+kver=$(uname -r)
+pkgs=(curl ca-certificates python3 dkms "linux-headers-$kver")
+modinfo libcomposite >/dev/null 2>&1 || pkgs+=("linux-modules-extra-$kver")
 while read -r meta; do
     flavour=${meta#linux-image-}
-    [[ $flavour == extra-* || $flavour == unsigned-* ]] && continue
-    pkgs+=("linux-headers-$flavour")
-    [[ $flavour == virtual* ]] && pkgs+=("linux-image-extra-${flavour}")   # модули USB-гаджетов
+    [[ $flavour == extra-* || $flavour == unsigned-* ]] || pkgs+=("linux-headers-$flavour")
 done < <(dpkg-query -W -f='${Package} ${db:Status-Status}\n' 'linux-image-*' 2>/dev/null |
          awk '$2 == "installed" && $1 !~ /-[0-9]+\.[0-9]+\.[0-9]+-/ {print $1}')
-apt-get -o DPkg::Lock::Timeout=600 -qq update >/dev/null || warn "apt-get update с ошибками — пробую дальше"
+apt_try() {     # сеть и зеркала иногда рвутся — три попытки, подробности в журнале
+    local i
+    for i in 1 2 3; do
+        apt-get -o DPkg::Lock::Timeout=600 "$@" >>"$LOG" 2>&1 && return 0
+        sleep $((i * 10))
+    done
+    return 1
+}
+: >"$LOG"
+apt_try -qq update || warn "apt-get update с ошибками — пробую дальше (журнал: $LOG)"
 avail=()
 for p in "${pkgs[@]}"; do
     apt-cache show "$p" >/dev/null 2>&1 && avail+=("$p") || warn "нет пакета $p — пропускаю"
 done
-apt-get -o DPkg::Lock::Timeout=600 -y -qq install "${avail[@]}" >/dev/null || die "не поставились пакеты: ${avail[*]}"
+if ! apt_try -y -qq --no-install-recommends install "${avail[@]}"; then
+    tail -3 "$LOG" | cut -c1-200 >&2
+    die "не поставились пакеты (${avail[*]}) — есть ли интернет? Журнал: $LOG"
+fi
 ok "пакеты: ${avail[*]}"
 
 # ── Агент ─────────────────────────────────────────────────────────────────

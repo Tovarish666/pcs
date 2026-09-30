@@ -1376,6 +1376,12 @@ def cmd_proxy(args):
 
 # ── команды ────────────────────────────────────────────────────────────────
 def ensure_module(cfg):
+    # Первым: udc_core, нужный dummy_hcd, лежит там же, где libcomposite
+    if sh("modprobe", "libcomposite", check=False).returncode != 0:
+        # обновилось ядро, а модули USB-гаджетов для него не поставлены
+        log("модулей USB-гаджетов для ядра %s нет — ставлю" % os.uname().release)
+        apt("linux-modules-extra-" + os.uname().release)
+        sh("modprobe", "libcomposite")
     if cfg["transport"] == "dummy" and not os.path.isdir("/sys/module/dummy_hcd"):
         if sh("modprobe", "dummy_hcd", check=False).returncode != 0:
             log("dummy_hcd для ядра %s нет — собираю" % os.uname().release)
@@ -1383,7 +1389,6 @@ def ensure_module(cfg):
             sh("modprobe", "dummy_hcd")
     if cfg["transport"] == "vudc" and not os.path.isdir("/sys/module/usbip_vudc"):
         sh("modprobe", "usbip-vudc")
-    sh("modprobe", "libcomposite", check=False)
 
 
 def create_all(queue, desired, cfg, st, strategy):
