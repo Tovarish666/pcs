@@ -321,6 +321,25 @@ def test_layout():
     check("прокси, которой больше нет в таблице, — правило снято",
           ("ip", "rule", "del", "priority", "32765", "to", "10.9.9.9", "lookup", "90") in ran, ran)
 
+    print("DNS сервера:")
+    check("sing-box без D-Bus — не пишет DNS своего tun в resolved сервера",
+          "InaccessiblePaths=-/run/dbus/system_bus_socket" in vm.UNITS["vmodem-sb@.service"])
+    world2 = {("resolvectl", "dns"): "Global: 1.1.1.1 8.8.8.8\nLink 2 (eth0): 172.20.0.2\n"
+                                     "Link 4 (eth1): 192.168.201.1\nLink 6 (eth2): 172.20.0.2 192.168.202.1\n"}
+    ran2 = []
+
+    def fake_sh2(*c, **k):
+        ran2.append(c)
+        return types.SimpleNamespace(stdout=world2.get(c, ""), returncode=0)
+    vm.sh = fake_sh2
+    try:
+        vm.drop_tun_dns()
+    finally:
+        vm.sh = real_sh
+    fixed = [c[2] for c in ran2 if c[:2] == ("resolvectl", "revert")]
+    check("чужой 172.20.0.2 снят там, где висит, и только там", fixed == ["eth0", "eth2"], fixed)
+    check("DNS из аренды возвращается", ("networkctl", "renew", "eth0") in ran2, ran2)
+
     print("шины USB:")
     vm.HCD_DRV, vm.GROOT = tempfile.mkdtemp(), tempfile.mkdtemp()
     for k in range(4):

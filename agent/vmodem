@@ -700,6 +700,16 @@ def pin_proxies(cfg, specs):
         sh("ip", "rule", "del", "priority", str(PIN_PRIO), "to", ip, "lookup", table, check=False)
 
 
+def drop_tun_dns():
+    """До v4.1 sing-box через D-Bus вешал DNS своего tun (172.20.0.2, «весь DNS — сюда»)
+    на интерфейс сервера с тем же номером. Снять и вернуть DNS хозяину интерфейса."""
+    for m in re.finditer(r"^Link \d+ \((\S+)\): (.*)$", sh("resolvectl", "dns", check=False).stdout, re.M):
+        if "172.20.0.2" in m.group(2).split():
+            sh("resolvectl", "revert", m.group(1), check=False)
+            sh("networkctl", "renew", m.group(1), check=False)       # networkd вернёт DNS из аренды
+            log("DNS интерфейса %s: снят чужой 172.20.0.2" % m.group(1))
+
+
 def tun_routes(n, real):
     """Маршруты через vmtun0. Ядро стирает их вместе с tun, когда sing-box падает, —
     поэтому их же ставит ExecStartPost юнита при каждом перезапуске."""
@@ -1782,10 +1792,14 @@ After=vmodem-px@%i.socket
 EnvironmentFile=/etc/vmodem/m/%i/env
 ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=4096 ${SOCKS}
 """,
+    # Без D-Bus: sing-box прописывает в systemd-resolved DNS своего tun по номеру
+    # интерфейса, а номер — из netns модема. На сервере под тем же номером eth0 или
+    # модем — и весь DNS сервера уходил на 172.20.0.2 внутри чужого netns.
     "vmodem-sb@.service": """[Unit]
 Description=vmodem: туннель модема %i в SOCKS5
 [Service]
 NetworkNamespacePath=/run/netns/vm%i
+InaccessiblePaths=-/run/dbus/system_bus_socket
 ExecStart=/usr/local/bin/sing-box run -c /etc/vmodem/m/%i/singbox.json
 ExecStartPost=/usr/local/sbin/vmodem routes %i
 Restart=always
@@ -1947,6 +1961,7 @@ def cmd_setup(args):
     wr(HOOK, HOOK_SH, 0o755)
     sh("systemctl", "daemon-reload")
     drop_old_root_net()
+    drop_tun_dns()
     # systemd-networkd при перезапуске (любой netplan apply) стирает «чужие» ip rule —
     # то есть маршрутизацию всех модемов, и свою, и mobileproxy.space.
     nd = "/etc/systemd/networkd.conf.d/10-vmodem.conf"
