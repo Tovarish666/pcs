@@ -54,7 +54,7 @@ import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 ETC = "/etc/vmodem"
 RUN = "/run/vmodem"
 LIB = "/var/lib/vmodem"
@@ -62,7 +62,10 @@ LOGD = "/var/log/vmodem"
 GROOT = "/sys/kernel/config/usb_gadget"
 SELF = "/usr/local/sbin/vmodem"
 API_BIN = "/usr/local/sbin/vmodem-api"
-SB_BIN = "/usr/local/bin/sing-box"
+# Свой sing-box, не /usr/local/bin: там его держат и другие программы (proxyveth,
+# modlink) своей версии. Кто поставил последним, тот и прав — а с 1.12 конфиги
+# в формате 1.10 не принимаются вовсе. Тот же путь — в UNITS.
+SB_BIN = "/usr/local/lib/vmodem/sing-box"
 HOOK = "/usr/local/lib/vmodem/udhcpc-hook"
 HOST_RULE = "/etc/udev/rules.d/80-vmodem-host.rules"
 HOST_LINK = "/etc/systemd/network/10-vmodem-cdc.link"
@@ -79,7 +82,6 @@ DEFAULTS = {
     "source": "",
     "transport": "dummy",          # dummy | vudc
     "slots": 48,                   # экземпляров dummy_hcd (не больше свободных USB-шин)
-    "uplink": "",                  # пусто — интерфейс маршрута по умолчанию
     "strategy": "window:5",        # сколько модемов «в пути» одновременно: у mp.space 5 слотов
     "host_timeout": 90,
     "diag_interval": 300,          # как часто перепроверять исправные модемы на прокси
@@ -171,11 +173,7 @@ def load_cfg():
         user = json.load(open(os.path.join(ETC, "config.json")))
     except (OSError, ValueError):
         user = {}
-    cfg = merge(DEFAULTS, user)
-    if not cfg["uplink"]:
-        m = re.search(r"dev (\S+)", sh("ip", "route", "show", "default", check=False).stdout)
-        cfg["uplink"] = m.group(1) if m else "eth0"
-    return cfg
+    return merge(DEFAULTS, user)
 
 
 def save_cfg(**changes):
@@ -409,8 +407,22 @@ def lint(text, taken_octets=frozenset()):
     return desired, disabled, invalid, problems
 
 
+LAYOUT = 3          # как устроен модем внутри; сменилось — sync пересоздаёт модемы сам
+RELAY_PORT = 1080   # vmodem-px: 127.0.0.1:1080 внутри netns модема → SOCKS5 прокси (то же в .socket)
+ROW = ("real", "host", "port", "user", "pw")
+
+
 def spec_hash(p):
-    return hashlib.sha1(json.dumps([p["real"], p["host"], p["port"], p["user"], p["pw"]]).encode()).hexdigest()[:12]
+    return hashlib.sha1(json.dumps([LAYOUT] + [p[k] for k in ROW]).encode()).hexdigest()[:12]
+
+
+def same_row(n, p):
+    """Строка таблицы та же, что у запущенного модема, — значит, пересоздаём из-за новой схемы."""
+    try:
+        old = json.load(open(os.path.join(mdir(n), "spec.json")))
+    except (OSError, ValueError):
+        return False
+    return all(old.get(k) == p[k] for k in ROW)
 
 
 def load_desired(cfg, src=None):
@@ -534,7 +546,34 @@ def make_gadget(n, cfg):
     return g
 
 
+HCD_DRV = "/sys/bus/platform/drivers/dummy_hcd"
+
+
+def hcd_power(udc, on):
+    """Своя шина USB (root hub в lsusb) — только у слота с модемом. У пустого слота
+    dummy_hcd отвязан от драйвера: шины нет, а слот UDC остаётся и ждёт модема."""
+    if not udc.startswith("dummy_udc."):
+        return
+    hcd = "dummy_hcd." + udc.rsplit(".", 1)[1]
+    if os.path.exists(os.path.join(HCD_DRV, hcd)) != on:
+        wr(os.path.join(HCD_DRV, "bind" if on else "unbind"), hcd)
+
+
+def park_idle_hcds(st):
+    """Убрать шины пустых слотов. Слот модема, который сейчас перезагружается
+    (гаджет отвязан), тоже занят — по состоянию."""
+    busy = {rd(u) for u in glob.glob(GROOT + "/*/UDC")} | {m.get("slot") for m in st["modems"].values()}
+    for path in glob.glob(HCD_DRV + "/dummy_hcd.*"):
+        udc = "dummy_udc." + path.rsplit(".", 1)[1]
+        if udc not in busy:
+            try:
+                hcd_power(udc, False)
+            except OSError as e:
+                log("⚠ не убрать пустую шину %s: %s" % (udc, e.strerror))
+
+
 def bind(n, udc):
+    hcd_power(udc, True)
     wr("%s/vm%d/UDC" % (GROOT, n), udc)
     if udc.startswith("usbip-vudc."):
         sh("usbip", "attach", "-r", "127.0.0.1", "-d", udc)
@@ -575,13 +614,17 @@ def write_configs(p):
              "mtu": 1400, "auto_route": False, "strict_route": False, "stack": "system", "sniff": False},
             {"type": "direct", "tag": "dns-in", "listen": "127.0.0.1", "listen_port": 5353},
         ],
+        # Прокси — через vmodem-px: сокет внутри netns, соединение наружу — с самого
+        # сервера. Своей сети наружу у netns нет, поэтому и veth в корне не нужен.
         "outbounds": [
-            {"type": "socks", "tag": "proxy", "version": "5", "server": p["host"], "server_port": p["port"],
+            {"type": "socks", "tag": "proxy", "version": "5", "server": "127.0.0.1", "server_port": RELAY_PORT,
              "username": p["user"], "password": p["pw"]},
             {"type": "dns", "tag": "dns-out"},
         ],
-        "route": {"rules": [{"inbound": ["dns-in"], "outbound": "dns-out"}], "final": "proxy",
-                  "auto_detect_interface": False},
+        # Любой DNS через модем (и dnsmasq модема, и клиент на 8.8.8.8) — к DNS
+        # настоящего модема по TCP: по UDP через прокси ген1 он бы просто не дошёл.
+        "route": {"rules": [{"inbound": ["dns-in"], "outbound": "dns-out"}, {"port": 53, "outbound": "dns-out"}],
+                  "final": "proxy", "auto_detect_interface": False},
     }
     files = {
         "singbox.json": json.dumps(sb, indent=1),
@@ -601,14 +644,73 @@ def write_configs(p):
         wr(os.path.join(d, name), body, 0o600)
 
 
-def ensure_root_net(uplink):
-    wr("/proc/sys/net/ipv4/ip_forward", "1")
-    for r in (("-t", "nat", "POSTROUTING", "-s", "10.250.0.0/16", "-o", uplink, "-j", "MASQUERADE"),
-              ("-t", "filter", "FORWARD", "-i", "vx+", "-j", "ACCEPT"),
-              ("-t", "filter", "FORWARD", "-o", "vx+", "-m", "conntrack", "--ctstate",
-               "ESTABLISHED,RELATED", "-j", "ACCEPT")):
-        if sh("iptables", r[0], r[1], "-C", *r[2:], check=False).returncode != 0:
-            sh("iptables", r[0], r[1], "-I", *r[2:])
+def drop_old_root_net():
+    """До v4.1 у каждого модема была veth-пара vxN в корне и NAT 10.250/16 — убрать следы."""
+    for r in (("-t", "nat", "POSTROUTING", "-s", "10.250.0.0/16"),
+              ("-t", "filter", "FORWARD", "-i", "vx+"), ("-t", "filter", "FORWARD", "-o", "vx+")):
+        for line in sh("iptables", "-t", r[1], "-S", r[2], check=False).stdout.splitlines():
+            if " ".join(r[3:]) in line:
+                sh("iptables", "-t", r[1], *shlex.split(line.replace("-A ", "-D ", 1)), check=False)
+
+
+# К прокси сервер ходит сам (ретранслятор vmodem-px, веб-морда, проверки) — и всегда
+# через основной канал. Скрипт mp.space на каждый воткнутый модем зовёт udhcpc, а тот
+# на пару секунд ставит маршрут по умолчанию через модем с метрикой 0, лучше основного.
+# Соединение к прокси, открытое в это окно, ушло бы в свой же туннель и размножилось
+# петлёй: тысячи соединений, и прокси начинает отказывать. Правило стоит после правил
+# «from 192.168.N.100» (mp.space и наших), перед main — их маршрутизацию не трогает.
+PIN_TABLE, PIN_PRIO = 90, 32765        # таблицы модемов — 100–299
+
+
+def uplink_route(cfg):
+    """(шлюз, интерфейс) лучшего маршрута по умолчанию не через модем."""
+    mac = "link/ether %s " % cfg["usb"]["host_mac"].lower()
+    modems = {ln.split(":")[1].strip().split("@")[0]
+              for ln in sh("ip", "-o", "link", check=False).stdout.splitlines() if mac in ln + " "}
+    best = None
+    for ln in sh("ip", "-4", "route", "show", "default", "table", "main", check=False).stdout.splitlines():
+        f = ln.split()
+        dev = f[f.index("dev") + 1] if "dev" in f else ""
+        metric = int(f[f.index("metric") + 1]) if "metric" in f else 0
+        if dev and dev not in modems and (best is None or metric < best[0]):
+            best = (metric, f[f.index("via") + 1] if "via" in f else None, dev)
+    return best[1:] if best else None
+
+
+def pin_proxies(cfg, specs):
+    up = uplink_route(cfg)
+    if not up:
+        log("⚠ не нашёл основной канал сервера — маршрут к прокси не закреплён")
+        return
+    gw, dev = up
+    table = str(PIN_TABLE)
+    if any("dev %s " % dev not in ln + " " for ln in
+           sh("ip", "-4", "route", "show", "table", table, check=False).stdout.splitlines()):
+        sh("ip", "route", "flush", "table", table, check=False)        # основной канал сменился
+    for ln in sh("ip", "-4", "route", "show", "dev", dev, "scope", "link", "table", "main", check=False).stdout.splitlines():
+        sh("ip", "route", "replace", ln.split()[0], "dev", dev, "table", table, check=False)
+    sh("ip", "route", "replace", "default", *(["via", gw] if gw else []), "dev", dev, "table", table)
+    want = set()
+    for p in specs.values():
+        try:
+            want.update(socket.gethostbyname_ex(p["host"])[2])
+        except OSError:
+            pass
+    have = set(re.findall(r"to (\S+) lookup %s\b" % table, sh("ip", "-4", "rule", check=False).stdout))
+    for ip in want - have:
+        sh("ip", "rule", "add", "priority", str(PIN_PRIO), "to", ip, "lookup", table)
+    for ip in have - want:
+        sh("ip", "rule", "del", "priority", str(PIN_PRIO), "to", ip, "lookup", table, check=False)
+
+
+def drop_tun_dns():
+    """До v4.1 sing-box через D-Bus вешал DNS своего tun (172.20.0.2, «весь DNS — сюда»)
+    на интерфейс сервера с тем же номером. Снять и вернуть DNS хозяину интерфейса."""
+    for m in re.finditer(r"^Link \d+ \((\S+)\): (.*)$", sh("resolvectl", "dns", check=False).stdout, re.M):
+        if "172.20.0.2" in m.group(2).split():
+            sh("resolvectl", "revert", m.group(1), check=False)
+            sh("networkctl", "renew", m.group(1), check=False)       # networkd вернёт DNS из аренды
+            log("DNS интерфейса %s: снят чужой 172.20.0.2" % m.group(1))
 
 
 def tun_routes(n, real):
@@ -621,6 +723,9 @@ def tun_routes(n, real):
         time.sleep(0.2)
     else:
         raise Fail("vmtun0 не появился (%s/sb-%d.log)" % (LOGD, n))
+    # В туннель — только трафик клиента модема (таблица 100). В основной таблице
+    # маршрута по умолчанию нет: свой трафик sing-box идёт на 127.0.0.1 (vmodem-px),
+    # а всё остальное из netns наружу не попадёт и в свой же tun петлёй не уйдёт.
     nsh(ns, "route", "replace", "default", "dev", "vmtun0", "table", "100")
     nsh(ns, "route", "replace", "192.168.%d.1/32" % real, "dev", "vmtun0")
 
@@ -648,9 +753,10 @@ def ensure_dns(ns, n):
 def down(n, quiet=False):
     """Разборка сверху вниз: сетевуха гаджета исчезает раньше гаджета."""
     ns, g = "vm%d" % n, "%s/vm%d" % (GROOT, n)
-    for u in ("api", "sb", "dns"):
-        sh("systemctl", "stop", "vmodem-%s@%d" % (u, n), check=False)
-        sh("systemctl", "reset-failed", "vmodem-%s@%d" % (u, n), check=False)
+    for u in ("api", "sb", "px", "dns"):
+        units = ["vmodem-%s@%d.service" % (u, n)] + (["vmodem-px@%d.socket" % n] if u == "px" else [])
+        sh("systemctl", "stop", *units, check=False)
+        sh("systemctl", "reset-failed", *units, check=False)
     if os.path.isdir(g):
         unbind(n)
         if os.path.islink(g + "/configs/c.1/ecm.usb0"):
@@ -660,7 +766,8 @@ def down(n, quiet=False):
                 os.rmdir(os.path.join(g, d) if d else g)
             except OSError:
                 pass
-    sh("ip", "link", "del", "vx%d" % n, check=False)
+    if os.path.exists("/sys/class/net/vx%d" % n):     # veth модема до v4.1
+        sh("ip", "link", "del", "vx%d" % n, check=False)
     sh("ip", "netns", "del", ns, check=False)
     try:
         os.unlink(os.path.join(RUN, "rebooting-%d" % n))
@@ -680,20 +787,18 @@ def up(p, cfg, st):
         raise Fail("нет свободного слота UDC (%s*) — vmodem setup --slots больше?" % udc_prefix(cfg["transport"]))
     step, udc = "netns", None
     try:
+        # В netns модема — только lo, usb0 и tun sing-box. Своей сети наружу у него нет:
+        # к прокси sing-box ходит через сокет vmodem-px, веб-морда живёт на сервере.
         sh("ip", "netns", "add", ns)
-        sh("ip", "link", "add", "vx%d" % n, "type", "veth", "peer", "name", "ve0", "netns", ns)
-        sh("ip", "addr", "add", "10.250.%d.1/30" % n, "dev", "vx%d" % n)
-        sh("ip", "link", "set", "vx%d" % n, "up")
         nsh(ns, "link", "set", "lo", "up")
-        nsh(ns, "addr", "add", "10.250.%d.2/30" % n, "dev", "ve0")
-        nsh(ns, "link", "set", "ve0", "up")
-        nsh(ns, "route", "add", "default", "via", "10.250.%d.1" % n)
-        ensure_root_net(cfg["uplink"])
+        nsx(ns, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0",
+            "net.ipv4.conf.default.rp_filter=0")
 
         step = "dhcp"                    # bind-dynamic: подхватит usb0, когда тот появится
         sh("systemctl", "start", "vmodem-dns@%d" % n)
 
         step = "tunnel"                  # ExecStartPost сам поставит маршруты через tun
+        sh("systemctl", "start", "vmodem-px@%d.socket" % n)
         sh("systemctl", "start", "vmodem-sb@%d" % n)
         tun_routes(n, p["real"])
         nsh(ns, "rule", "add", "from", "192.168.%d.0/24" % n, "lookup", "100")
@@ -701,13 +806,12 @@ def up(p, cfg, st):
         nsx(ns, "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "vmtun0", "-j", "MASQUERADE")
         nsx(ns, "iptables", "-A", "FORWARD", "-o", "vmtun0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
             "-j", "TCPMSS", "--clamp-mss-to-pmtu")
-        nsx(ns, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv4.conf.all.rp_filter=0",
-            "net.ipv4.conf.default.rp_filter=0")
 
         step = "usb"                     # привязка к UDC = модем воткнут; дальше — быстро
         g = make_gadget(n, cfg)
         for cand in slots[:3]:
             try:
+                hcd_power(cand, True)
                 wr(g + "/UDC", cand)
                 udc = cand
                 break
@@ -754,9 +858,9 @@ def check_local(n, cfg):
         probs.append("USB-гаджет не воткнут")
     if "192.168.%d.1/" % n not in nsh(ns, "-4", "-o", "addr", "show", "usb0", check=False).stdout:
         probs.append("usb0 без адреса")
-    for u in ("dns", "sb", "api"):
-        if sh("systemctl", "is-active", "vmodem-%s@%d" % (u, n), check=False).stdout.strip() != "active":
-            probs.append("vmodem-%s не работает" % u)
+    for unit in ("vmodem-dns@%d" % n, "vmodem-px@%d.socket" % n, "vmodem-sb@%d" % n, "vmodem-api@%d" % n):
+        if sh("systemctl", "is-active", unit, check=False).stdout.strip() != "active":
+            probs.append("%s не работает" % unit)
     if "vmtun0" not in nsh(ns, "route", "show", "default", "table", "100", check=False).stdout:
         probs.append("нет маршрута в туннель")
     if not dns_bound(ns, n):
@@ -1285,6 +1389,12 @@ def cmd_proxy(args):
 
 # ── команды ────────────────────────────────────────────────────────────────
 def ensure_module(cfg):
+    # Первым: udc_core, нужный dummy_hcd, лежит там же, где libcomposite
+    if sh("modprobe", "libcomposite", check=False).returncode != 0:
+        # обновилось ядро, а модули USB-гаджетов для него не поставлены
+        log("модулей USB-гаджетов для ядра %s нет — ставлю" % os.uname().release)
+        apt("linux-modules-extra-" + os.uname().release)
+        sh("modprobe", "libcomposite")
     if cfg["transport"] == "dummy" and not os.path.isdir("/sys/module/dummy_hcd"):
         if sh("modprobe", "dummy_hcd", check=False).returncode != 0:
             log("dummy_hcd для ядра %s нет — собираю" % os.uname().release)
@@ -1292,7 +1402,6 @@ def ensure_module(cfg):
             sh("modprobe", "dummy_hcd")
     if cfg["transport"] == "vudc" and not os.path.isdir("/sys/module/usbip_vudc"):
         sh("modprobe", "usbip-vudc")
-    sh("modprobe", "libcomposite", check=False)
 
 
 def create_all(queue, desired, cfg, st, strategy):
@@ -1369,6 +1478,8 @@ def cmd_sync(args):
     for pr in problems:
         log(pr if pr.startswith("⚠") else "✗ " + pr)
     now = running()
+    if not args.dry_run:
+        pin_proxies(cfg, specs_now(desired))
 
     remove = [n for n in now if n not in desired and n not in invalid]
     if [n for n in now if n in invalid]:
@@ -1391,7 +1502,9 @@ def cmd_sync(args):
         m = st["modems"].get(str(n), {})
         if m.get("hash") != spec_hash(desired[n]):
             recreate.append(n)
-            why[n] = "поменялась строка таблицы" if m.get("hash") else "модем без учёта — пересоздаю"
+            why[n] = ("модем без учёта — пересоздаю" if not m.get("hash") else
+                      "новая схема модема (vmodem %s)" % VERSION if same_row(n, desired[n]) else
+                      "поменялась строка таблицы")
             continue
         cls, probs = check_local(n, cfg)
         if cls == "broken" and time.time() >= m.get("next_try", 0):
@@ -1437,6 +1550,8 @@ def cmd_sync(args):
         for n, w in failed.items():
             log("✗ модем %d: %s" % (n, w))
     save_state(st)
+    if not args.dry_run:
+        park_idle_hcds(st)
     apply_proxy(cfg, [n for n in running() if n in desired or n in invalid or suspicious])
     rows = evaluate(specs_now(desired), cfg, fresh=set(todo))
     remember(rows, cfg)
@@ -1570,7 +1685,9 @@ def cmd_up(args):
     need_root()
     cfg, lk, st = load_cfg(), lock(), state()
     ensure_module(cfg)
-    up(one(args.n), cfg, st)
+    p = one(args.n)
+    pin_proxies(cfg, dict(specs_now(), **{str(args.n): p}))
+    up(p, cfg, st)
     save_state(st)
     log("модем %d поднят (%s)" % (args.n, st["modems"][str(args.n)]["slot"]))
     return 0
@@ -1582,13 +1699,14 @@ def cmd_down(args):
     down(args.n)
     st["modems"].pop(str(args.n), None)
     save_state(st)
+    park_idle_hcds(st)
     return 0
 
 
 def cmd_logs(args):
     n = args.n
     os.execvp("journalctl", ["journalctl", "--no-pager", "-n", str(args.lines), "-u", "vmodem-dns@%d" % n,
-                             "-u", "vmodem-sb@%d" % n, "-u", "vmodem-api@%d" % n])
+                             "-u", "vmodem-px@%d" % n, "-u", "vmodem-sb@%d" % n, "-u", "vmodem-api@%d" % n])
 
 
 def cmd_routes(args):
@@ -1662,11 +1780,30 @@ ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/vmodem/m/%i/dn
 Restart=always
 RestartSec=2
 """,
+    "vmodem-px@.socket": """[Unit]
+Description=vmodem: выход модема %i к прокси (сокет внутри netns модема)
+[Socket]
+NetworkNamespacePath=/run/netns/vm%i
+ListenStream=127.0.0.1:1080
+""",
+    # Сам ретранслятор — на сервере: принимает внутри netns, соединяется отсюда.
+    "vmodem-px@.service": """[Unit]
+Description=vmodem: выход модема %i к прокси
+Requires=vmodem-px@%i.socket
+After=vmodem-px@%i.socket
+[Service]
+EnvironmentFile=/etc/vmodem/m/%i/env
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=4096 ${SOCKS}
+""",
+    # Без D-Bus: sing-box прописывает в systemd-resolved DNS своего tun по номеру
+    # интерфейса, а номер — из netns модема. На сервере под тем же номером eth0 или
+    # модем — и весь DNS сервера уходил на 172.20.0.2 внутри чужого netns.
     "vmodem-sb@.service": """[Unit]
 Description=vmodem: туннель модема %i в SOCKS5
 [Service]
 NetworkNamespacePath=/run/netns/vm%i
-ExecStart=/usr/local/bin/sing-box run -c /etc/vmodem/m/%i/singbox.json
+InaccessiblePaths=-/run/dbus/system_bus_socket
+ExecStart=/usr/local/lib/vmodem/sing-box run -c /etc/vmodem/m/%i/singbox.json
 ExecStartPost=/usr/local/sbin/vmodem routes %i
 Restart=always
 RestartSec=2
@@ -1674,9 +1811,8 @@ RestartSec=2
     "vmodem-api@.service": """[Unit]
 Description=vmodem: веб-морда модема %i
 [Service]
-NetworkNamespacePath=/run/netns/vm%i
 EnvironmentFile=/etc/vmodem/m/%i/env
-ExecStart=/usr/local/sbin/vmodem-api --virt %i --real ${REAL} --socks ${SOCKS} --socks-user ${SOCKS_USER} --socks-pass-file /etc/vmodem/m/%i/proxy.pass --on-reboot "systemd-run --no-block --collect --unit=vmodem-reboot-%i /usr/local/sbin/vmodem replug %i --reboot"
+ExecStart=/usr/local/sbin/vmodem-api --netns /run/netns/vm%i --virt %i --real ${REAL} --socks ${SOCKS} --socks-user ${SOCKS_USER} --socks-pass-file /etc/vmodem/m/%i/proxy.pass --on-reboot "systemd-run --no-block --collect --unit=vmodem-reboot-%i /usr/local/sbin/vmodem replug %i --reboot"
 Restart=always
 RestartSec=2
 """,
@@ -1693,7 +1829,7 @@ RestartSec=3
 Description=vmodem: прямые прокси на каждый модем
 After=network-online.target
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /etc/vmodem/proxy.json
+ExecStart=/usr/local/lib/vmodem/sing-box run -c /etc/vmodem/proxy.json
 Restart=always
 RestartSec=3
 [Install]
@@ -1742,6 +1878,7 @@ def install_singbox():
         return
     url = "https://github.com/SagerNet/sing-box/releases/download/v%s/sing-box-%s-linux-amd64.tar.gz" % (ver, ver)
     log("ставлю sing-box %s" % ver)
+    os.makedirs(os.path.dirname(SB_BIN), exist_ok=True)
     data = urllib.request.urlopen(url, timeout=120).read()
     if hashlib.sha256(data).hexdigest() != sha:
         raise Fail("sing-box: контрольная сумма не совпала — не ставлю")
@@ -1819,10 +1956,16 @@ def cmd_setup(args):
     save_cfg(slots=slots)
     wr("/etc/modprobe.d/vmodem.conf", "options dummy_hcd num=%d\noptions usbip-vudc num=%d" % (slots, slots))
     wr("/etc/modules-load.d/vmodem.conf", "libcomposite\n" + ("dummy_hcd" if cfg["transport"] == "dummy" else "usbip-vudc"))
+    # Упало ядро — перезагрузиться через 10 с, а не висеть: модемы после загрузки
+    # поднимаются сами. Иначе один сбой в драйвере гаджета кладёт сервер до ручного reset.
+    wr("/etc/sysctl.d/90-vmodem.conf", "kernel.panic = 10\nkernel.panic_on_oops = 1\n")
+    sh("sysctl", "-q", "-p", "/etc/sysctl.d/90-vmodem.conf", check=False)
     for name, body in UNITS.items():
         wr("/etc/systemd/system/" + name, body)
     wr(HOOK, HOOK_SH, 0o755)
     sh("systemctl", "daemon-reload")
+    drop_old_root_net()
+    drop_tun_dns()
     # systemd-networkd при перезапуске (любой netplan apply) стирает «чужие» ip rule —
     # то есть маршрутизацию всех модемов, и свою, и mobileproxy.space.
     nd = "/etc/systemd/networkd.conf.d/10-vmodem.conf"

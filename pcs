@@ -502,6 +502,8 @@ def cmd_server_create(a):
     sh("qm", "create", str(vmid), "--name", name, "--memory", str(a.ram), "--cores", str(a.cores),
        "--cpu", "host", "--balloon", "0", "--net0", "virtio,bridge=%s" % a.bridge, "--ostype", "l26",
        "--machine", "q35", "--scsihw", "virtio-scsi-single", "--agent", "enabled=1", "--serial0", "socket",
+       # без «QEMU Tablet» в lsusb: серверу мышь не нужна, а по ней видно виртуалку
+       "--tablet", "0",
        "--onboot", "1", "--description", "pcs %s: сервер под виртуальные модемы" % VERSION)
     sh("qm", "importdisk", str(vmid), IMG_PATH, storage, timeout=900)
     disk = re.search(r"^unused\d+: (\S+)", sh("qm", "config", str(vmid)).stdout, re.M).group(1)

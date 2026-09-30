@@ -5,7 +5,7 @@
 #      bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 #
 #  На хосте Proxmox — команда pcs (/opt/pcs): создаёт серверы и управляет ими.
-#  На обычном сервере Ubuntu — только агент vmodem: модемы прямо на нём.
+#  На обычном сервере или ПК с Ubuntu — модемы прямо на нём (vmodem-install.sh).
 #
 #  PCS_REPO=owner/repo  PCS_BRANCH=main — откуда брать.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -44,9 +44,6 @@ if command -v qm >/dev/null 2>&1; then
     ok "PCS $("$DEST/pcs" version) → ${DEST}, команда: pcs"
     ok "дальше: pcs   (меню)   или   pcs server create"
 else
-    install -m 0755 "$tmp/src/agent/vmodem" /usr/local/sbin/vmodem
-    install -m 0755 "$tmp/src/agent/vmodem-api" /usr/local/sbin/vmodem-api
-    ok "агент vmodem $(vmodem version) → /usr/local/sbin"
-    vmodem setup
-    ok "дальше: vmodem source <ссылка на Google-таблицу> && vmodem sync"
+    # Не Proxmox — модемы прямо здесь (то же, что vmodem-install.sh; параметры — его)
+    bash "$tmp/src/vmodem-install.sh" --src "$tmp/src" "$@"
 fi

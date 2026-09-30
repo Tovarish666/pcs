@@ -462,6 +462,32 @@ def octet(v):
     return n
 
 
+CLONE_NEWNET = 0x40000000
+
+
+def listen_in(netns, host, port):
+    """Слушающий сокет внутри netns модема, а сам процесс — на сервере: веб-морду
+    видит только клиент модема, а к прокси она ходит напрямую, без veth и NAT."""
+    setns = getattr(os, "setns", None)          # Python 3.12+; раньше — через libc
+    if setns is None:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+
+        def setns(fd, kind):
+            if libc.setns(fd, kind) != 0:
+                raise OSError(ctypes.get_errno(), "setns")
+    own, target = os.open("/proc/self/ns/net", os.O_RDONLY), os.open(netns, os.O_RDONLY)
+    try:
+        setns(target, CLONE_NEWNET)
+        try:
+            return socket.create_server((host, port))
+        finally:
+            setns(own, CLONE_NEWNET)
+    finally:
+        os.close(own)
+        os.close(target)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="vmodem-api",
@@ -474,6 +500,7 @@ def main(argv=None):
     ap.add_argument("--socks-user", default=os.environ.get("VMODEM_SOCKS_USER") or None)
     ap.add_argument("--socks-pass-file", help="файл с паролем прокси")
     ap.add_argument("--listen", help="что слушать (по умолчанию 192.168.<virt>.1:80)")
+    ap.add_argument("--netns", help="слушать внутри этого netns (/run/netns/vmN), остальное — отсюда")
     ap.add_argument("--on-reboot", help="команда, когда модему ушла перезагрузка (Control=1)")
     ap.add_argument("--probe", action="store_true", help="разовая проверка и выход")
     ap.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"))
@@ -502,7 +529,10 @@ def main(argv=None):
     proxy = Proxy(args)
 
     async def run():
-        server = await asyncio.start_server(proxy.handle, listen[0], listen[1])
+        if args.netns:
+            server = await asyncio.start_server(proxy.handle, sock=listen_in(args.netns, *listen))
+        else:
+            server = await asyncio.start_server(proxy.handle, listen[0], listen[1])
         addr = server.sockets[0].getsockname()
         log.info("слушаю %s:%d → модем %s через SOCKS5 %s:%d",
                  addr[0], addr[1], proxy.real_ip, proxy.proxy[0], proxy.proxy[1])
