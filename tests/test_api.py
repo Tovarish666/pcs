@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Проверка agent/vmodem-api без модема, без прокси и без root.
+"""Проверка pcs/proxyveth/modem_web.py без модема, без прокси и без root.
 
 Поднимаем заглушку веб-морды Huawei и заглушку SOCKS5, между ними запускаем
 настоящий vmodem-api и смотрим, что видит модем и что получает клиент.
@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-API = os.path.join(HERE, os.pardir, "agent", "vmodem-api")
+API = os.path.join(HERE, os.pardir, "pcs", "proxyveth", "modem_web.py")
 VIRT, REAL = 64, 101
 REAL_IP = "192.168.%d.1" % REAL
 VIRT_IP = "192.168.%d.1" % VIRT

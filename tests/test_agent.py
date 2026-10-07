@@ -19,7 +19,7 @@ import sys
 import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-loader = importlib.machinery.SourceFileLoader("vmodem", os.path.join(HERE, os.pardir, "agent", "vmodem"))
+loader = importlib.machinery.SourceFileLoader("vmodem", os.path.join(HERE, os.pardir, "pcs", "proxyveth", "usb.py"))
 spec = importlib.util.spec_from_loader("vmodem", loader)
 vm = importlib.util.module_from_spec(spec)
 loader.exec_module(vm)

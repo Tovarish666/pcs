@@ -11,7 +11,7 @@ import sys
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PCS = os.path.join(HERE, os.pardir, "pcs")
+PCS = os.path.join(HERE, os.pardir, "pcs", "hub", "cli.py")
 loader = importlib.machinery.SourceFileLoader("pcs_cli", PCS)
 spec = importlib.util.spec_from_loader("pcs_cli", loader)
 pcs = importlib.util.module_from_spec(spec)
