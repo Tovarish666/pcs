@@ -45,12 +45,14 @@
 | путь | что | владелец |
 |---|---|---|
 | `docs/ARCHITECTURE.md`, `pcs/core/{util,singbox,net,table}.py`, `pcs/__init__.py`, `bin/*`, `tests/run-all.sh`, `tests/singbox_check.py`, `tests/test_core.py` | ядро и каркас | ведущий |
-| `pcs/hub/**`, `pcs/core/dns.py`, `install.sh`, `README.md` (раздел хаба), `tests/test_hub*.py`, `tests/test_dns.py`, `tests/test_pcs.py` | хаб, меню, DNS, установка на хост | A |
+| `pcs/hub/**`, `pcs/core/dns.py`, `bin/pcs-node`, `install.sh`, `tests/test_hub*.py`, `tests/test_dns.py`, `tests/test_pcs.py` | хаб, меню, DNS, установка на хост, служебная команда хаба на сервере | A |
 | `pcs/proxyveth/{cli,usb,modem_web}.py`, `tests/test_proxyveth_usb*.py`, `tests/test_agent.py`, `tests/test_api.py` | proxyveth: команда, режим usb, веб-морда модема | B1 |
 | `pcs/proxyveth/gw.py`, `tests/test_proxyveth_gw*.py` | proxyveth: режим gw | B2 |
 | `pcs/modlink/**`, `tests/test_modlink*.py` | modlink | C |
 | `pcs/hivelink/**`, `tests/test_hivelink*.py` | hivelink | D |
 | `pcs/web/**`, `tests/test_web*.py` | веб-панель | E |
+
+`README.md` переписывает ведущий в конце — части его не трогают.
 
 Файлы чужой части не правим. Нужна правка ядра или чужой части — пишем в отчёт
 ведущему, что и зачем.
@@ -276,6 +278,9 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
 
 - Хаб ходит на сервер по SSH ключом `/etc/pcs/ssh/id_ed25519`, со своим known_hosts. На
   сервере вызывает команды частей с `--json`.
+- Своё на сервере (сводка для хаба, DNS-фикс, пароль, ключ) хаб делает через
+  служебную команду `pcs-node` (A): `pcs-node info --json` — версия, режим proxyveth,
+  сводка модемов, mp.space; `pcs-node dns-fix`, `pcs-node passwd`, `pcs-node key`.
 - Долгие операции (создать ВМ, поставить mp.space, обновить) — фоновые задания хаба:
   `pcs.hub.jobs`. Есть журнал и состояние; панель их опрашивает.
 - **API хаба для панели** — `pcs/hub/api.py` (пишет A, использует E). Все функции
