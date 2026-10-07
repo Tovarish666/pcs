@@ -218,12 +218,12 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
   - устройства на шине `dummy_hcd` для hivelink: это модемы proxyveth usb
     (`readlink -f /sys/class/net/X/device` содержит `/dummy_hcd.`);
   - интерфейс хоста с адресом 192.168.X.100 — не модем, если он не USB-модем.
-- **sysctl** — один файл `/etc/sysctl.d/90-pcs.conf` (`kernel.panic=10`,
-  `kernel.panic_on_oops=1`, `ip_forward=1`). rp_filter части выставляют на своих интерфейсах.
-- **systemd-networkd**: drop-in `/etc/systemd/networkd.conf.d/10-pcs.conf` с
-  `ManageForeignRoutingPolicyRules=no`, `ManageForeignRoutes=no` — иначе любой
-  `netplan apply` стирает маршрутизацию модемов. Ставит тот, кто первым настраивает
-  сервер или хост; проверяет каждый, кому это важно.
+- **База машины — `pcs.core.net.ensure_base()`**, её зовёт `setup` каждой части:
+  - один файл `/etc/sysctl.d/90-pcs.conf` (`kernel.panic=10`, `kernel.panic_on_oops=1`,
+    `ip_forward=1`); rp_filter части выставляют на своих интерфейсах;
+  - drop-in `/etc/systemd/networkd.conf.d/10-pcs.conf` с
+    `ManageForeignRoutingPolicyRules=no`, `ManageForeignRoutes=no` — иначе любой
+    `netplan apply` стирает маршрутизацию модемов.
 - **Адреса прокси** всегда идут через основной канал (`pcs.core.net.pin_proxies`). Это
   зовёт proxyveth при каждом sync. Без этого udhcpc из скрипта mp.space на пару секунд
   уводит маршрут по умолчанию в модем, и соединения к прокси размножаются петлёй.

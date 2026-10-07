@@ -13,10 +13,33 @@ modemK), — поэтому на сервере с USB-модемами N и N+2
 Правила iptables — только с -m comment --comment pcs:<часть>; уборка снимает
 только помеченное своей частью.
 """
+import os
 import re
 import socket
 
-from .util import sh
+from .util import rd, sh, wr
+
+SYSCTL = "/etc/sysctl.d/90-pcs.conf"
+SYSCTL_TEXT = ("# PCS: упало ядро — перезагрузка через 10 с, а не висеть до ручного reset\n"
+               "kernel.panic = 10\nkernel.panic_on_oops = 1\nnet.ipv4.ip_forward = 1\n")
+NETWORKD = "/etc/systemd/networkd.conf.d/10-pcs.conf"
+NETWORKD_TEXT = ("# PCS: networkd при перезапуске (любой netplan apply) не стирает чужие\n"
+                 "# правила и маршруты — то есть маршрутизацию модемов и mp.space\n"
+                 "[Network]\nManageForeignRoutingPolicyRules=no\nManageForeignRoutes=no\n")
+
+
+def ensure_base(log=print):
+    """Общая база любой машины с модемами: sysctl PCS и networkd без уборки чужого.
+    Идемпотентно; networkd перезапускается, только если drop-in поменялся."""
+    if rd(SYSCTL) != SYSCTL_TEXT.strip():
+        os.makedirs(os.path.dirname(SYSCTL), exist_ok=True)
+        wr(SYSCTL, SYSCTL_TEXT)
+        sh("sysctl", "-q", "-p", SYSCTL, check=False)
+    if rd(NETWORKD) != NETWORKD_TEXT.strip():
+        os.makedirs(os.path.dirname(NETWORKD), exist_ok=True)
+        wr(NETWORKD, NETWORKD_TEXT)
+        sh("systemctl", "try-restart", "systemd-networkd", check=False)
+        log("systemd-networkd больше не стирает маршрутизацию модемов")
 
 PIN_TABLE, PIN_PRIO = 90, 32765
 RANGES = {"gw": (1000, 30000), "hivelink": (2000, 31000)}
