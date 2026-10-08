@@ -72,10 +72,20 @@ def status():
             "user": d.get("user"), "login_set": bool(d.get("hash"))}
 
 
+def ready():
+    import importlib.util
+    try:
+        return importlib.util.find_spec("pcs.web.server") is not None
+    except ImportError:
+        return False
+
+
 def on():
     util.need_root()
     if not jload(creds_path(), {}).get("hash"):
         raise Fail("сначала логин и пароль панели: pcs web passwd")
+    if not ready():
+        raise Fail("веб-панели в этой версии PCS ещё нет (pcs.web.server) — включится после pcs update --host")
     text = UNIT_TEXT % (PORT, os.path.join(remote.ROOT, "bin", "pcs"))
     if util.rd(UNIT) != text.strip():
         util.wr(UNIT, text)
@@ -92,10 +102,12 @@ def off():
 
 
 def serve(argv):
+    if not ready():
+        raise Fail("веб-панели в этой версии ещё нет (pcs.web.server) — обнови PCS: pcs update --host")
     try:
         from ..web import server
-    except ImportError:
-        raise Fail("веб-панели в этой версии ещё нет (pcs.web.server) — обнови PCS: pcs update --host")
+    except ImportError as e:
+        raise Fail("веб-панель не загрузилась: %s" % e)
     if not hasattr(server, "main"):
         raise Fail("pcs.web.server без main() — веб-панель не готова")
     return server.main(argv)

@@ -140,6 +140,15 @@ if os.geteuid() != 0:
     r = pcs("status", "--json")
     check("--json: ошибка — конвертом", r.returncode == 1 and r.stdout.strip() == '{"ok": false, "error": "нужен root"}',
           r.stdout + r.stderr)
+if os.geteuid() != 0:
+    r = subprocess.run(["bash", os.path.join(ROOT, "install.sh")], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    check("install.sh без root — отказ одной строкой", r.returncode == 1 and "нужен root" in r.stderr, r.stderr)
+with open(os.path.join(ROOT, "install.sh")) as f:
+    inst = f.read()
+check("install.sh: только Proxmox, VPS — понятный отказ", "qm" in inst and "pvesm" in inst and "VPS" in inst
+      and "vmodem" not in inst)
+check("install.sh: панель (PCS_WEB_USER/PCS_WEB_PASS) и hivelink на хост",
+      "web passwd" in inst and "web on" in inst and "PCS_WEB_PASS" in inst and '/bin/hivelink" install' in inst)
 r = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "pcs-node"), "version"], capture_output=True, text=True)
 check("pcs-node version", r.returncode == 0 and r.stdout.strip() == VERSION, r.stdout + r.stderr)
 
