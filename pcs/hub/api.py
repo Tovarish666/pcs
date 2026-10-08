@@ -159,7 +159,7 @@ def term_argv(target):
 
 # ── исполнители фоновых заданий (pcs job run ID) ──────────────────────────
 def _job_create(p):
-    return srv.create(p)
+    return srv.create(p, select=False)
 
 
 def _job_mpspace(p):

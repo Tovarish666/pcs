@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, os.pardir)
@@ -373,12 +373,12 @@ calls.clear()
 remote.ssh = lambda s, cmd, check=True, timeout=None, input=None: types.SimpleNamespace(returncode=0, stdout="yes\n", stderr="")
 remote.stream = lambda s, cmd, tty=False: (calls.append(cmd), 1 if cmd == "proxyveth setup" else 0)[1]
 try:
-    with redirect_stdout(quiet):
+    with redirect_stdout(quiet), redirect_stderr(quiet):
         servers.setup(s)
     check("proxyveth setup упал — Fail, дальше не идём", False)
 except Fail:
     check("proxyveth setup упал — Fail, дальше не идём", "modlink setup" not in calls)
-with redirect_stdout(io.StringIO()):
+with redirect_stdout(quiet), redirect_stderr(quiet):
     upd = servers.update_servers([2000, 200])
 check("update --server: остановленная ВМ пропущена, ошибки собраны", upd["updated"] == [] and set(upd["failed"]) == {"2000", "200"}
       and "не запущена" in upd["failed"]["200"], upd)

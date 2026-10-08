@@ -119,8 +119,9 @@ def normalize(p):
     return q
 
 
-def create(p):
-    """ВМ Ubuntu 24.04 под ключ: образ → ВМ → cloud-init → код PCS → proxyveth → (таблица) → (mp.space)."""
+def create(p, select=True):
+    """ВМ Ubuntu 24.04 под ключ: образ → ВМ → cloud-init → код PCS → proxyveth → (таблица) → (mp.space).
+    select — сделать новую ВМ выбранной (только из терминала: задание панели выбор человека не трогает)."""
     p = normalize(p)
     pve.need_pve()
     pub = remote.ensure_key()
@@ -193,7 +194,8 @@ def create(p):
         remote.ssh(s, "systemd-run --on-active=2 --collect systemctl reboot", check=False)
         remote.wait_reboot(s, boot)
         ui.ok("ядро %s" % remote.ssh(s, "uname -r").stdout.strip())
-    store.set_active(vmid)
+    if select:
+        store.set_active(vmid)
     setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
     if p["mpspace"]:
         mpspace_install(s, p["auth"], p["proxy"])
