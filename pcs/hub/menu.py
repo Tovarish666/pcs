@@ -372,7 +372,8 @@ class Menu:
                     return
                 if danger and not self.confirm_server("modlink %s %s на сервере %s" % (verb, i, self.sel)):
                     return
-                self.run(["modlink", verb, i, "--server", self.sel])
+                # подтверждение уже было — modlink без терминала ждёт --yes
+                self.run(["modlink", verb, i] + (["--yes"] if verb == "del" else []) + ["--server", self.sel])
             return go
 
         def add():

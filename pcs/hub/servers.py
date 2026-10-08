@@ -204,7 +204,8 @@ def create(p):
 
 
 def setup(s, mode=None, sheet="", fresh=False):
-    """Код PCS на сервер, DNS, proxyveth setup, режим, таблица."""
+    """Код PCS на сервер, DNS (у новой ВМ), proxyveth setup (+ режим, таблица), modlink setup.
+    Падение любой из частей — Fail: обновление сервера не должно казаться удачным."""
     ui.hdr("Код PCS на сервер %s" % s["id"])
     had = fresh or remote.ssh(s, "for p in /usr/local/bin/proxyveth /usr/local/sbin/vmodem /etc/vmodem; do "
                                  "test -e $p && echo yes && break; done", check=False).stdout.strip() == "yes"
@@ -218,18 +219,22 @@ def setup(s, mode=None, sheet="", fresh=False):
             ui.ok("DNS сервера: %s" % " ".join(dnsfix.DEFAULT))
         except Fail as e:
             ui.warn(str(e))
-    if not had:
-        ui.info("proxyveth на сервере не было — setup не запускаю (поставить: pcs proxyveth setup --server %s)" % s["id"])
-        return
-    ui.hdr("proxyveth setup")
-    if remote.stream(s, "proxyveth setup") != 0:
-        raise Fail("proxyveth setup на сервере %s не прошёл — см. выше" % s["id"])
-    if mode:
-        if remote.stream(s, "proxyveth mode %s --yes" % shlex.quote(mode)) != 0:
-            raise Fail("proxyveth mode %s не прошёл — см. выше" % mode)
-        s["mode"] = mode
-        store.save(s)
-    if sheet:
+    if had:
+        ui.hdr("proxyveth setup")
+        if remote.stream(s, "proxyveth setup") != 0:
+            raise Fail("proxyveth setup на сервере %s не прошёл — см. выше" % s["id"])
+        if mode:
+            if remote.stream(s, "proxyveth mode %s --yes" % shlex.quote(mode)) != 0:
+                raise Fail("proxyveth mode %s не прошёл — см. выше" % mode)
+            s["mode"] = mode
+            store.save(s)
+    else:
+        ui.info("proxyveth на сервере не было — его setup не запускаю (поставить: pcs proxyveth setup --server %s)"
+                % s["id"])
+    ui.hdr("modlink setup")
+    if remote.stream(s, "modlink setup") != 0:
+        raise Fail("modlink setup на сервере %s не прошёл — см. выше" % s["id"])
+    if sheet and had:
         ui.hdr("Модемы по таблице")
         if remote.stream(s, "proxyveth source %s" % shlex.quote(sheet)) == 0:
             if remote.stream(s, "proxyveth sync") != 0:
