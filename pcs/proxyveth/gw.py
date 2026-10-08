@@ -477,10 +477,9 @@ def fix(n, row, bad, up):
 
 def refresh(n, row, m, o):
     """Конфиг sing-box поменялся (новая версия кода, другой DNS) — переписать и перезапустить."""
-    path = mdir(n) + "/singbox.json"
-    text = json.dumps(sb_config(row, m.get("proxy_ip") or resolve(row["host"]), o["dns"]), indent=1)
-    if util.rd(path) != text:
-        util.wr(path, text, 0o600)
+    ip = m.get("proxy_ip") or resolve(row["host"])
+    if util.rd(mdir(n) + "/singbox.json") != json.dumps(sb_config(row, ip, o["dns"]), indent=1):
+        write_files(row, ip, o)
         sh("systemctl", "restart", UNIT_SB % n, check=False, timeout=90)
         log("модем %d: конфиг sing-box обновлён" % n)
 
