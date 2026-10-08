@@ -44,7 +44,7 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
   proxyveth table [show|pull|edit]      показать / подтянуть из Google / открыть копию в $EDITOR
   proxyveth lint                        проверить таблицу, ничего не трогая
   proxyveth sync [--force]              привести модемы к таблице (таймер делает это сам)
-  proxyveth up|down|restart N|all      down и restart всех — с --yes
+  proxyveth up|down|restart N|all       down и restart всех — с --yes
   proxyveth status [--wan]              состояние (с --wan — внешний IP через каждый модем)
   proxyveth problems                    только проблемные
   proxyveth diag N                      прокси → логин → модем → SIM → интернет
