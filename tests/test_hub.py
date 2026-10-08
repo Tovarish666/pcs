@@ -420,7 +420,7 @@ web.ITER = 1000
 web.set_login("admin", "очень-секретно")
 wj = os.path.join(store.ETC, "web.json")
 d = json.load(open(wj))
-check("PBKDF2-SHA256 с солью, без пароля в файле, права 600", d["algo"] == "pbkdf2_sha256" and len(d["salt"]) == 32
+check("PBKDF2-SHA256 с солью (формат панели), без пароля в файле, права 600", d["password"]["algo"] == "pbkdf2-sha256" and len(d["password"]["salt"]) == 32
       and "очень" not in open(wj).read() and stat.S_IMODE(os.stat(wj).st_mode) == 0o600, d)
 check("верный вход", web.verify("admin", "очень-секретно") is True)
 check("неверный пароль или логин", not web.verify("admin", "очень-секретнО") and not web.verify("root", "очень-секретно"))

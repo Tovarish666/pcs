@@ -4,11 +4,8 @@ web.json (600): {"user": "admin", "algo": "pbkdf2_sha256", "iterations": 600000,
                  "salt": "<hex>", "hash": "<hex>", "updated": "…"}
 Проверка входа — verify(user, password); саму панель пишет pcs.web.
 """
-import hashlib
-import hmac
 import os
 import re
-import secrets
 import time
 
 from ..core import util
@@ -17,7 +14,6 @@ from . import remote, store
 
 PORT = 666
 UNIT = "/etc/systemd/system/pcs-web.service"
-ITER = 600000
 UNIT_TEXT = """[Unit]
 Description=PCS: веб-панель хаба (порт %d)
 Wants=network-online.target
@@ -37,10 +33,10 @@ def creds_path():
     return os.path.join(store.ETC, "web.json")
 
 
-def hash_pw(password, salt=None, iterations=ITER):
-    salt = salt or secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), iterations).hex()
-    return {"algo": "pbkdf2_sha256", "iterations": iterations, "salt": salt, "hash": h}
+def _auth():
+    """Формат web.json один — тот, что читает панель (pcs.web.auth)."""
+    from ..web import auth
+    return auth
 
 
 def set_login(user, password):
@@ -50,18 +46,13 @@ def set_login(user, password):
         raise Fail("пароль панели — не короче 8 символов")
     if re.search(r"[\r\n\x00]", password):
         raise Fail("в пароле перевод строки — так нельзя")
-    d = dict(hash_pw(password), user=user, updated=time.strftime("%F %T"))
     os.makedirs(store.ETC, mode=0o700, exist_ok=True)
-    jsave(creds_path(), d, 0o600)
+    _auth().set_password(creds_path(), user, password)
     return {"user": user}
 
 
 def verify(user, password):
-    d = jload(creds_path(), {})
-    if not d.get("hash") or d.get("algo") != "pbkdf2_sha256":
-        return False
-    h = hash_pw(password or "", d["salt"], int(d.get("iterations") or ITER))["hash"]
-    return hmac.compare_digest(user or "", d.get("user", "")) & hmac.compare_digest(h, d["hash"])
+    return _auth().check(creds_path(), user, password)
 
 
 def status():
@@ -69,7 +60,7 @@ def status():
     en = sh("systemctl", "is-enabled", "pcs-web.service", check=False).stdout.strip() or "disabled"
     d = jload(creds_path(), {})
     return {"active": act == "active", "state": act, "enabled": en == "enabled", "port": PORT,
-            "user": d.get("user"), "login_set": bool(d.get("hash"))}
+            "user": d.get("user"), "login_set": isinstance(d.get("password"), dict)}
 
 
 def ready():
@@ -82,7 +73,7 @@ def ready():
 
 def on():
     util.need_root()
-    if not jload(creds_path(), {}).get("hash"):
+    if not isinstance(jload(creds_path(), {}).get("password"), dict):
         raise Fail("сначала логин и пароль панели: pcs web passwd")
     if not ready():
         raise Fail("веб-панели в этой версии PCS ещё нет (pcs.web.server) — включится после pcs update --host")
