@@ -265,8 +265,12 @@ def test_commands():
         rc, d = ok_json("diag", "0")
         check("номер вне 1..254 — понятная ошибка", rc == 1 and "1..254" in d["error"], d)
 
+        fake.calls.clear()
+        rc, d = ok_json("down", "all")
+        check("down all без --yes в скрипте — отказ, ничего не снято", rc == 1 and "--yes" in d["error"] and not fake.calls, d)
         for argv, want in ((("up", "all"), [("up", (None,))]), (("down", "5"), [("down", (5,))]),
-                           (("restart", "3"), [("down", (3,)), ("up", (3,))])):
+                           (("restart", "3"), [("down", (3,)), ("up", (3,))]),
+                           (("down", "all", "--yes"), [("down", (None,))])):
             fake.calls.clear()
             rc, d = ok_json(*argv)
             got = [(c[0], c[1]) for c in fake.calls if c[0] in ("up", "down")]

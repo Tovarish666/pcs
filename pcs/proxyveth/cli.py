@@ -44,7 +44,7 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
   proxyveth table [show|pull|edit]      показать / подтянуть из Google / открыть копию в $EDITOR
   proxyveth lint                        проверить таблицу, ничего не трогая
   proxyveth sync [--force]              привести модемы к таблице (таймер делает это сам)
-  proxyveth up|down|restart N|all
+  proxyveth up|down|restart N|all      down и restart всех — с --yes
   proxyveth status [--wan]              состояние (с --wan — внешний IP через каждый модем)
   proxyveth problems                    только проблемные
   proxyveth diag N                      прокси → логин → модем → SIM → интернет
@@ -465,6 +465,8 @@ def cmd_updown(a):
     n = parse_n(a.n, allow_all=True)
     cfg = load_cfg()
     mode, mod = need_mode(cfg)
+    if n is None and a.cmd in ("down", "restart"):
+        confirm(a, "%s все модемы сервера" % ("снять" if a.cmd == "down" else "пересоздать"), "да")
     with held():
         if a.cmd in ("up", "restart"):
             pin(read_table(cfg, mode, fetch=False)["desired"], mod)
@@ -614,7 +616,9 @@ def parser():
     p.add_argument("--force", action="store_true")
     p.add_argument("--quiet", action="store_true")
     for c in ("up", "down", "restart"):
-        sub.add_parser(c, add_help=False).add_argument("n")
+        p = sub.add_parser(c, add_help=False)
+        p.add_argument("n")
+        p.add_argument("--yes", action="store_true")
     p = sub.add_parser("status", add_help=False)
     p.add_argument("--wan", action="store_true")
     p = sub.add_parser("diag", add_help=False)
