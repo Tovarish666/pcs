@@ -292,7 +292,12 @@ def snap(full=True):
     return s
 
 
-def running(s, st=None):
+def running():
+    """Номера своих модемов — для общей команды proxyveth (интерфейс режима)."""
+    return sorted(own_modems(snap(full=False), load_state()))
+
+
+def own_modems(s, st=None):
     """Свои модемы: netns pvN, у которых на сервере veth pvN или которые создавали мы.
     netns pvN без того и другого — не наш (у режима usb те же имена)."""
     known = set((st or {}).get("modems", {}))
@@ -564,7 +569,7 @@ def ensure(rows, st, o, force=False, only=None):
     up = s["uplink"]
     if not up:
         raise Fail("не нашёл основной канал сервера (маршрут по умолчанию не через модем) — модемам не к чему подключиться")
-    now, old, taken = running(s, st), legacy_ns(s), local_octets()
+    now, old, taken = own_modems(s, st), legacy_ns(s), local_octets()
     retry = util.jload(P(RETRY), {})
     todo = {}
     for n in sorted(rows):
@@ -644,7 +649,7 @@ def apply(desired, cfg, force=False):
         else:
             rows[int(k)] = norm(k, r)
     s = snap(full=False)
-    now = running(s, st)
+    now = own_modems(s, st)
     want = {n for n, r in rows.items() if r["enabled"]}
     gone = sorted(n for n in now if n not in want and n not in keep)
     held = []
@@ -659,7 +664,7 @@ def apply(desired, cfg, force=False):
     res["removed"] = gone
     if held:
         res["held"] = held
-    sweep(running(snap(full=False), st))
+    sweep(own_modems(snap(full=False), st))
     prev = st["desired"]
     st["desired"] = {str(n): r for n, r in rows.items()}
     for n in keep:
@@ -688,7 +693,7 @@ def up(n=None):
 def down(n=None):
     """Снять модем n (None — все). Остаётся снятым, пока не up: таймер его не вернёт."""
     st = load_state()
-    mine = running(snap(full=False), st)
+    mine = own_modems(snap(full=False), st)
     targets = sorted(mine) if n is None else [n]
     marks = set(st["down"]) | set(targets)
     if n is None:
@@ -796,7 +801,7 @@ def status(wan=False):
     st = load_state()
     rows = {int(k): r for k, r in st["desired"].items()}
     s = snap()
-    mine, old = running(s, st), legacy_ns(s)
+    mine, old = own_modems(s, st), legacy_ns(s)
     inner = dict(zip(sorted(mine), par(sorted(mine), inner_routes, {"workers": 16})))
     found = {n: judge(n, rows.get(n), mine, old, s, inner.get(n), st) for n in sorted(set(rows) | mine)}
     hp = util.jload(P(HEALTH), {})
@@ -851,7 +856,7 @@ def diag(n):
         return ok
 
     s = snap()
-    mine = running(s, st)
+    mine = own_modems(s, st)
     if not row["enabled"] or n not in mine:
         state, probs = judge(n, row, mine, legacy_ns(s), s, None, st)
         step("своя сторона", False, "; ".join(probs) or "выключен в таблице")
@@ -881,7 +886,7 @@ def diag(n):
 def teardown():
     """Снять всё своё: модемы, правила, юниты, конфиги. config.json и копию таблицы не трогаем (они cli)."""
     st = load_state()
-    mine = running(snap(full=False), st) | {
+    mine = own_modems(snap(full=False), st) | {
         int(m.group(1)) for m in (re.fullmatch(r"proxyveth-(?:gw|hostfix)@(\d+)\.service", u) for u in units_state()) if m}
     par(sorted(mine), lambda k: remove(k, quiet=True))
     sweep(set())

@@ -262,7 +262,9 @@ def cmd_setup(a):
         if not mode and os.path.exists(OLD_GW):
             mode = "gw"
         if not mode:
-            raise Fail("режим сервера не задан: proxyveth mode usb|gw (он же подготовит сервер)")
+            # Нечего готовить — это не ошибка: так pcs update проходит по серверам без модемов
+            log("режим сервера не задан — готовить нечего; выбрать: proxyveth mode usb|gw")
+            return 0, {"mode": None, "migrated": False, "sync": None}
         mod = mode_mod(mode)
         save_cfg(mode=mode)
         mod.setup(load_cfg())
