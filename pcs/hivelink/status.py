@@ -70,7 +70,7 @@ def probe_row(row, ext=True):
         row["errors"].append("мобильные данные выключены (hivelink dataon %d)" % row["n"])
     if p["conn"] is not None and p["conn"] != 901:
         row["errors"].append("связь: %s" % row["conn_text"])
-    if ext:
+    if ext and p["conn"] in (901, None):        # модем сам говорит «не в сети» — не ждём таймаутов
         row["ext_ip"] = hilink.ext_ip(row["addr"])
         if not row["ext_ip"]:
             row["errors"].append("в интернет через модем не выйти")
@@ -114,19 +114,26 @@ def fix_text(fix, size):
     return "собран, модуль не загружен (модемов с rndis_host нет)" if fix["dkms"] else "не собран (hivelink install)"
 
 
+def net_text(mode):
+    if mode == "on":
+        return "своя (DHCP через networkd, таблицы 2000+N)"
+    if os.path.exists(common.MP_SETUP):
+        return "у mp.space — hivelink только USB и HiLink"
+    return "выключена в настройках (net=off) — hivelink только USB и HiLink"
+
+
 def show(data, conf):
     s = data["usb"]
-    netw = {"on": "своя (DHCP через networkd, таблицы 2000+N)", "off": "у mp.space (hivelink её не трогает)"}
     print("  hivelink %s%s · USB-модемов %d: HiLink %d, Zero-CD %d, stick %d, прочих %d · с адресом %d · сеть: %s"
           % (data["version"], "" if data["installed"] else " (не установлен: hivelink install)", s["total"],
-             s["hilink"], s["zerocd"], s["stick"], s["other"], s["with_addr"], netw[data["net"]]))
+             s["hilink"], s["zerocd"], s["stick"], s["other"], s["with_addr"], net_text(data["net"])))
     if data["virtual"]:
         print("  виртуальных модемов proxyveth (dummy_hcd): %d — не трогаю" % data["virtual"])
     print("  фикс приёма rndis_host: %s" % fix_text(data["fix"], conf["rx_urb_size"]))
     if not data["modems"]:
         print("\n  настоящих USB-модемов Huawei нет")
         return
-    fmt = "  %-4s %-10s %-11s %-10s %-4s %-14s %-6s %-4s %s"
+    fmt = "  %-4s %-10s %-14s %-10s %-4s %-14s %-6s %-4s %s"
     print()
     print(fmt % ("N", "IFACE", "DRIVER", "USB", "CFG", "СВЯЗЬ", "ДАННЫЕ", "СЕТЬ", "ВНЕШНИЙ IP"))
     dash = lambda v: "—" if v is None else str(v)       # noqa: E731
@@ -187,8 +194,7 @@ def doctor():
         check(out, "сеть модемов", nd and have, "своя: networkd %s, %s %s" % (
             "работает" if nd else "НЕ запущен", install.NETWORK, "есть" if have else "НЕТ"))
     else:
-        check(out, "сеть модемов", not os.path.exists(install.NETWORK),
-              "у mp.space (%s) — hivelink только USB и HiLink" % common.MP_SETUP)
+        check(out, "сеть модемов", not os.path.exists(install.NETWORK), net_text(mode))
     rules_text = sh("ip", "-4", "rule", "show", check=False).stdout
     foreign = foreign_in_range(rules_text)
     check(out, "правила 31001–31254", not foreign, "только свои" if not foreign else "чужие: %s" % "; ".join(foreign[:4]))

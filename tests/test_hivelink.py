@@ -432,6 +432,38 @@ rows2, reach2 = status.local_rows(conf, ADDR.replace("192.168.101.", "192.168.5.
 check("подсеть у виртуального модема — в web-API не идём", not reach2
       and any("занята интерфейсом eth1" in e for r in rows2 for e in r["errors"]))
 
+probed = []
+real_probe, real_ext = hilink.probe, hilink.ext_ip
+hilink.probe = lambda n, src, timeout=5: (probed.append((n, src)), {"conn": 902, "dataswitch": 0, "net": "LTE",
+                                                                   "signal": 3, "errors": []})[1]
+hilink.ext_ip = lambda src, timeout=6: probed.append(("ext", src))
+real_ssh, real_dsh, real_ish = status.sh, driver.sh, install.sh
+status.sh = driver.sh = install.sh = fake_sh
+try:
+    data = status.collect(conf)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        status.show(data, conf)
+    checks = status.doctor()
+    with redirect_stdout(buf):
+        status.show_doctor(checks)
+finally:
+    hilink.probe, hilink.ext_ip = real_probe, real_ext
+    status.sh, driver.sh, install.sh = real_ssh, real_dsh, real_ish
+check("status --json сериализуется, в web-API — только свой модем со своего адреса",
+      json.loads(json.dumps(data))["modems"] and probed == [(101, "192.168.101.100")], probed)
+r = next(r for r in data["modems"] if r["n"] == 101)
+check("status: связь кодом, данные, внешний IP — честно null", (r["conn"], r["conn_text"], r["dataswitch"], r["ext_ip"])
+      == (902, "отключён", 0, None) and any("dataon 101" in e for e in r["errors"]), r)
+check("status: модем не в сети — внешний IP не ждём", ("ext", "192.168.101.100") not in probed)
+check("status: модемы с номером — первыми", [r["n"] for r in data["modems"]][0] == 101)
+check("status: виртуальные посчитаны, но не показаны", data["virtual"] == 2 and len(data["modems"]) == 3)
+out = buf.getvalue()
+check("человеку: таблица и проблемы", "N    IFACE" in out and "⚠ Zero-CD" in out and "виртуальных модемов proxyveth" in out, out)
+check("doctor: проверки в общем виде", checks and all(set(c) == {"name", "ok", "text"} for c in checks))
+check("doctor видит чужое правило в диапазоне hivelink",
+      any(c["name"] == "правила 31001–31254" and not c["ok"] for c in checks))
+
 print("миграция со старого e3372-driver:")
 OLD = """# конфиг
 PREFER_DRIVER=cdc_ether

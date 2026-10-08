@@ -84,7 +84,7 @@ def cmd_install(args):
         data = install.install(skip_fix=os.environ.get("HIVELINK_SKIP_RNDIS_FIX") == "1")
     say("  hivelink установлен%s: udev + hivelink.timer (15 с), сеть модемов — %s"
         % (" (старый e3372-driver снят)" if data["migrated"] else "",
-           "своя" if data["net"] == "on" else "у mp.space"))
+           status.net_text(data["net"])))
     say("  состояние: hivelink status · разбор: hivelink doctor · журнал: journalctl -t hivelink -f")
     return 0, data
 
