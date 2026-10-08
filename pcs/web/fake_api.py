@@ -7,6 +7,7 @@
 import copy
 import hashlib
 import itertools
+import os
 import sys
 import threading
 import time
@@ -62,9 +63,10 @@ def _table_csv(srv):
 
 
 def _modlink(sid, ns, count):
+    """Строки §8; id = номер модема N (как у modlink для 192.168.N.x)."""
     rows = []
     for i, n in enumerate(ns[:count]):
-        rows.append({"id": i + 1, "enabled": i != 3, "name": "m%d" % n, "login": "u%d" % n,
+        rows.append({"id": n, "enabled": i != 3, "name": "m%d" % n, "login": "u%d" % n,
                      "password": _pw("ml-%s-%s" % (sid, n), 12), "port": 20000 + n,
                      "lan_ip": "192.168.%d.100" % n, "modem_ip": "192.168.%d.1" % n,
                      "reconnect_port": 21000 + n, "interval_min": 0 if i % 3 else 10})
@@ -78,7 +80,9 @@ def _server(sid, name, ip, mode, ns, bad=(), ml=0, cores=4, ram_gb=8, disk_gb=40
            "source": {"source": "google",
                       "url": "https://docs.google.com/spreadsheets/d/1Fake%sTableId/edit#gid=0" % sid,
                       "local": "/etc/proxyveth/table.csv", "synced": _now() - 95, "stale": False},
-           "modlink": _modlink(sid, ns, ml), "ml_log": {}, "hivelink": False, "auth_mp": True}
+           "modlink": _modlink(sid, ns, ml), "ml_log": {}, "ml_pending": False, "ml_applied": {},
+           "hivelink": False, "auth_mp": True}
+    srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
     srv["table"] = _table_csv(srv)
     return srv
 
@@ -315,10 +319,55 @@ def job(job_id):
 
 
 def term_argv(target):
+    """Фейковая консоль: отвечает на proxyveth/modlink/hivelink фейковыми данными. Не настоящая оболочка."""
     if target != "host":
         _srv(target)
-    banner = "фейк: консоль %s — это локальная оболочка, не сервер" % target
-    return ["/bin/sh", "-c", 'printf "%s\\r\\n" "$0"; exec "${SHELL:-/bin/sh}" -i', banner]
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return [sys.executable, "-c", "import sys; sys.path.insert(0, %r); from pcs.web.fake_api import shell; shell(%r)"
+            % (root, str(target))]
+
+
+def _table(rows):
+    cols = ["n", "real", "proxy", "state", "ext_ip", "problems"]
+    out = ["%-4s %-4s %-22s %-9s %-16s %s" % tuple(cols)]
+    for r in rows:
+        out.append("%-4s %-4s %-22s %-9s %-16s %s" % (r["n"], r["real"], r["proxy"], r["state"], r["ext_ip"] or "—",
+                                                     "; ".join(r["problems"])))
+    return "\n".join(out)
+
+
+def shell(target):
+    """Цикл фейковой консоли (свой процесс — своя копия данных)."""
+    import json
+    global DELAY
+    DELAY = 0
+    sid = None if target == "host" else int(target)
+    name = HOST if sid is None else S[sid]["name"]
+    print("фейк: консоль %s (%s) — команды частей отвечают фейковыми данными; exit — выход" % (target, name))
+    while True:
+        try:
+            line = input("root@%s:~# " % name)
+        except EOFError:
+            print()
+            return
+        except KeyboardInterrupt:
+            print("^C")
+            continue
+        a = line.split()
+        if not a:
+            continue
+        if a[0] in ("exit", "logout"):
+            return
+        if a[0] not in ("proxyveth", "modlink", "hivelink"):
+            print("фейк: %s — здесь только proxyveth, modlink, hivelink" % a[0])
+            continue
+        e = run(sid, a[0], a[1:])
+        if not e["ok"]:
+            print("  ✗ %s" % e["error"])
+        elif a[0] == "proxyveth" and a[1:2] in (["status"], ["problems"]):
+            print(_table(e["data"]) if e["data"] else "  ✓ проблем нет")
+        else:
+            print(json.dumps(e["data"], ensure_ascii=False, indent=1))
 
 
 # ── run: команды частей ─────────────────────────────────────────────────────
@@ -449,22 +498,51 @@ def _ml_free(srv, key, base):
     return next(p for p in itertools.count(base) if p not in used)
 
 
+def _ml_newid(srv, lan_ip):
+    """Как у modlink: id = N для 192.168.N.x, если свободен, иначе с 1001."""
+    used = {r["id"] for r in srv["modlink"]}
+    parts = str(lan_ip).split(".")
+    if len(parts) == 4 and parts[:2] == ["192", "168"] and parts[2].isdigit() and int(parts[2]) not in used:
+        return int(parts[2])
+    return next(i for i in itertools.count(1001) if i not in used)
+
+
+def _ml_ip(rid):
+    return "94.25.%d.%d" % (100 + rid % 150, 2 + (rid * 7) % 250)
+
+
 def _ml(srv, a, inp):
     cmd = a[0] if a else ""
+    pend = srv["ml_pending"]
     if cmd == "list":
-        return copy.deepcopy(srv["modlink"])
+        rows = copy.deepcopy(srv["modlink"])
+        if "--show-pass" not in a:
+            for r in rows:
+                r["password"] = None
+        return {"proxies": rows, "pending": pend}
     if cmd == "status":
-        en = [r for r in srv["modlink"] if r["enabled"]]
-        return {"service": "работает", "sing_box": "работает", "proxies": len(srv["modlink"]),
-                "enabled": len(en), "rows": [{"id": r["id"], "state": "ok" if r["enabled"] else "off",
-                                              "ext_ip": "94.25.%d.%d" % (110 + r["id"], 20 + r["id"])
-                                              if r["enabled"] else None} for r in srv["modlink"]]}
+        t, out = _now(), []
+        for r in srv["modlink"]:
+            applied = srv["ml_applied"].get(r["id"]) == r
+            st = "pending" if not applied else "disabled" if not r["enabled"] else "ok"
+            out.append({"id": r["id"], "name": r["name"], "enabled": r["enabled"], "applied": applied, "state": st,
+                        "port": r["port"], "port_up": st == "ok", "lan_ip": r["lan_ip"],
+                        "iface": "eth%d" % (r["id"] % 100), "reconnect_port": r["reconnect_port"],
+                        "trigger_up": st == "ok", "trigger_error": None, "interval_min": r["interval_min"],
+                        "next": t + 60 * r["interval_min"] if r["interval_min"] and st == "ok" else None,
+                        "last": {"t": t - 900, "how": "timer", "ok": True, "dt": 8.7,
+                                 "text": "IP %s" % _ml_ip(r["id"])} if r["interval_min"] else None})
+        return {"sb": "active", "daemon": "active", "unit": "modlink-sb.service", "pending": pend, "rows": out}
     if cmd == "add":
         opts = dict(zip(a[1::2], a[2::2]))
         if "--lan-ip" not in opts:
             raise Fail("нужен --lan-ip")
-        rid = max([r["id"] for r in srv["modlink"]] + [0]) + 1
+        rid = _ml_newid(srv, opts["--lan-ip"])
         pw = opts.get("--password", "gen")
+        if pw == "-":
+            pw = (inp or "").strip()
+            if not pw:
+                raise Fail("--password -: пароль не пришёл на stdin")
         port = opts.get("--port", "auto")
         rport = opts.get("--reconnect-port", "auto")
         row = {"id": rid, "enabled": True, "name": opts.get("--name", "p%d" % rid),
@@ -477,7 +555,8 @@ def _ml(srv, a, inp):
         if any(r["port"] == row["port"] for r in srv["modlink"]):
             raise Fail("порт %d уже занят строкой modlink" % row["port"])
         srv["modlink"].append(row)
-        return {"id": rid}
+        srv["ml_pending"] = True
+        return {"id": rid, "pending": True}
     if cmd == "set":
         r = _ml_find(srv, a[1])
         for kv in a[2:]:
@@ -491,41 +570,60 @@ def _ml(srv, a, inp):
                 if k == "port" and any(x["port"] == v and x is not r for x in srv["modlink"]):
                     raise Fail("порт %d уже занят строкой modlink" % v)
             r[k] = v
-        return {"id": r["id"]}
+        srv["ml_pending"] = True
+        return {"id": r["id"], "pending": True}
     if cmd in ("enable", "disable"):
         _ml_find(srv, a[1])["enabled"] = cmd == "enable"
-        return {"id": int(a[1])}
+        srv["ml_pending"] = True
+        return {"id": int(a[1]), "pending": True}
     if cmd == "del":
         r = _ml_find(srv, a[1])
+        if "--yes" not in a:
+            raise Fail("удалить строку %s — нужен --yes" % r["id"])
         srv["modlink"].remove(r)
-        return {"deleted": r["id"]}
+        srv["ml_pending"] = True
+        return {"id": r["id"], "deleted": True, "pending": True}
     if cmd == "apply":
+        srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
+        srv["ml_pending"] = False
         return {"config": "/etc/modlink/sing-box.json", "check": "ok", "restarted": True,
                 "proxies": len([r for r in srv["modlink"] if r["enabled"]])}
     if cmd == "test":
         r = _ml_find(srv, a[1])
         if not r["enabled"]:
-            raise Fail("строка %s выключена" % r["id"])
-        return {"id": r["id"], "ext_ip": "94.25.%d.%d" % (110 + r["id"], 20 + r["id"]),
-                "hilink": bool(r["modem_ip"]), "ms": 180 + 7 * r["id"]}
+            return {"id": r["id"], "proxy": {"ok": False, "error": "строка выключена"},
+                    "hilink": {"ok": False, "error": "не проверялся"}, "iface": None}
+        return {"id": r["id"], "proxy": {"ok": True, "ip": _ml_ip(r["id"])},
+                "hilink": {"ok": bool(r["modem_ip"]), "status": "connected", "net": "LTE", "signal": "-87 dBm"}
+                if r["modem_ip"] else {"ok": False, "error": "IP модема не задан"},
+                "iface": "eth%d" % (r["id"] % 100)}
     if cmd in ("reconnect", "reboot"):
         r = _ml_find(srv, a[1])
         srv["ml_log"].setdefault(r["id"], []).append("%s %s по кнопке панели" % (
             time.strftime("%F %T"), "реконнект" if cmd == "reconnect" else "перезагрузка модема"))
-        return {"id": r["id"], "done": cmd}
+        if cmd == "reboot":
+            return {"id": r["id"], "ok": True}
+        return {"id": r["id"], "ok": True, "ip": _ml_ip(r["id"] + int(time.time()) % 50), "same": False, "dt": 9.4}
     if cmd == "log":
         r = _ml_find(srv, a[1])
-        base = ["%s реконнект по таймеру, IP 94.25.%d.%d → 94.25.%d.%d" % (
+        base = ["%s timer: IP 94.25.%d.%d → 94.25.%d.%d за 8.7 с" % (
             time.strftime("%F %T", time.localtime(time.time() - 600 * k)), 110 + k, 20 + k, 111 + k, 21 + k)
             for k in (3, 2, 1)]
-        return base + srv["ml_log"].get(r["id"], [])
+        return {"id": r["id"], "lines": base + srv["ml_log"].get(r["id"], [])}
     if cmd == "export":
-        return ["%s:%d:%s:%s\thttp://%s:%d/reconnect" % (srv["ip"], r["port"], r["login"], r["password"], srv["ip"],
-                                                        r["reconnect_port"]) for r in srv["modlink"] if r["enabled"]]
+        ip = srv["ip"]
+        return {"ip": ip, "lines": ["%s:%d:%s:%s\thttp://%s:%d/reconnect" % (
+            ip, r["port"], r["login"], r["password"], ip, r["reconnect_port"]) for r in srv["modlink"] if r["enabled"]]}
     if cmd == "from-ifaces":
         have = {r["lan_ip"] for r in srv["modlink"]}
-        return [{"lan_ip": "192.168.%d.100" % m["n"], "modem_ip": "192.168.%d.1" % m["n"], "name": "m%d" % m["n"]}
-                for m in srv["modems"] if "192.168.%d.100" % m["n"] not in have]
+        sug = [{"lan_ip": "192.168.%d.100" % m["n"], "modem_ip": "192.168.%d.1" % m["n"], "name": "m%d" % m["n"],
+                "iface": m["iface"]} for m in srv["modems"] if "192.168.%d.100" % m["n"] not in have]
+        added = []
+        if "--add" in a:
+            for x in sug:
+                added.append(_ml(srv, ["add", "--lan-ip", x["lan_ip"], "--modem-ip", x["modem_ip"], "--name", x["name"]],
+                                 None)["id"])
+        return {"suggest": sug, "added": added}
     raise Fail("modlink %s: в фейке нет" % " ".join(a))
 
 

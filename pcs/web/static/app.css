@@ -83,11 +83,13 @@ main#main { overflow: auto; padding: 20px 26px 40px; min-width: 0; }
 .tree-host .muted { font-weight: 400; font-size: 12px; }
 .tree-vm {
   display: grid; grid-template-columns: 12px 1fr; column-gap: 8px; padding: 6px 14px 6px 26px;
-  color: var(--fg); border-left: 3px solid transparent;
+  color: var(--fg); border-left: 4px solid hsl(var(--h, 210) 60% 50%);
 }
 .tree-vm .sub { grid-column: 2; font-size: 12px; color: var(--muted); }
 .tree-vm:hover, .tree-host:hover { background: var(--panel2); text-decoration: none; }
-.tree-vm.active, .tree-host.active { background: var(--panel2); border-left-color: var(--accent); }
+.tree-vm.active { background: hsl(var(--h, 210) var(--plaque-s) var(--plaque-l)); font-weight: 600; }
+.tree-host { border-left: 4px solid transparent; }
+.tree-host.active { background: var(--panel2); border-left-color: var(--accent); }
 .tree-add { display: block; margin: 12px 14px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 6px; text-align: center; }
 
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; align-self: center; }
@@ -158,8 +160,14 @@ table.t tr.new td { background: var(--ok-bg); }
 table.t tr.gone td { background: var(--bad-bg); text-decoration: line-through; opacity: .75; }
 table.t tr.gone td.acts-cell { text-decoration: none; opacity: 1; }
 table.t input { padding: 3px 6px; width: 100%; min-width: 60px; }
-table.t input.w-s { min-width: 64px; max-width: 80px; }
-table.t input.w-ip { min-width: 118px; }
+table.t input[type="checkbox"] { width: auto; min-width: 0; }
+table.t input.w-xs { min-width: 0; width: 48px; }
+table.t input.w-s { min-width: 0; width: 66px; }
+table.t input.w-ip { min-width: 0; width: 122px; }
+table.t input.w-m { min-width: 0; width: 100px; }
+table.t input.w-l { min-width: 0; width: 330px; }
+table.t.ml td, table.t.ml th { padding: 4px 5px; }
+table.t.ml .pill { gap: 2px; }
 table.t .acts-cell { white-space: nowrap; }
 table.t .acts-cell button { padding: 2px 7px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; white-space: nowrap; }

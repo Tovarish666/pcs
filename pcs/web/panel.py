@@ -69,7 +69,7 @@ def envelope(x):
     return ok(x)
 
 
-def rows_of(data, keys=("rows", "proxies", "items", "modems", "list")):
+def rows_of(data, keys=("rows", "proxies", "suggest", "items", "modems", "list")):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
@@ -245,25 +245,30 @@ class Panel:
     # ── modlink ─────────────────────────────────────────────────────────────
 
     def modlink(self, sid, query, body):
+        """list (без паролей) + status. pending — правки есть, но `modlink apply` ещё не было."""
         sid = int(sid)
+        if query.get("only") == "status":
+            return ok({"status": self._run(sid, "modlink", ["status"])})
         r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]))
         if r["list"]["ok"]:
+            d = r["list"]["data"]
             rows = []
-            for row in rows_of(r["list"]["data"]):
+            for row in rows_of(d):
                 if isinstance(row, dict):
                     row = dict(row)
-                    pw = row.pop("password", None)      # пароли — только по явному запросу (§8)
-                    row["password_set"] = bool(pw) or bool(row.get("password_set"))
+                    if row.pop("password", None):      # пароли — только по явному запросу (§8)
+                        row["password_set"] = True
                     rows.append(row)
-            r["list"] = ok(rows)
+            r["list"] = ok({"rows": rows, "pending": bool(isinstance(d, dict) and d.get("pending"))})
         return ok(r)
 
     def ml_reveal(self, sid, query, body):
+        """Пароль одной строки: `modlink list --show-pass`, запасной путь — export."""
         sid = int(sid)
         rid = str(body.get("id", "")).strip()
         if not rid.isdigit():
             raise Bad("номер строки modlink")
-        e = self._run(sid, "modlink", ["list"])
+        e = self._run(sid, "modlink", ["list", "--show-pass"])
         if not e["ok"]:
             return e
         row = next((r for r in rows_of(e["data"]) if isinstance(r, dict) and str(r.get("id")) == rid), None)
@@ -272,7 +277,6 @@ class Panel:
         pw = row.get("password")
         if isinstance(pw, str) and pw and set(pw) - set("*•"):
             return ok({"id": int(rid), "password": pw})
-        # list прячет пароли — берём из export по порту и логину
         x = self._run(sid, "modlink", ["export"])
         if x["ok"]:
             for line in _export_lines(x["data"]):
@@ -292,9 +296,9 @@ class Panel:
         sid = int(sid)
         steps, fail = [], False
 
-        def step(what, args):
+        def step(what, args, inp=None):
             nonlocal fail
-            e = self._run(sid, "modlink", args)
+            e = self._run(sid, "modlink", args, inp)
             steps.append({"what": what, "ok": e["ok"], "error": e.get("error"), "data": e.get("data")})
             fail = fail or not e["ok"]
             return e
@@ -305,7 +309,7 @@ class Panel:
         if not isinstance(dels, list) or not isinstance(sets, list) or not isinstance(adds, list):
             raise Bad("modlink: del/set/add — списки")
         for rid in dels:
-            step("удалить %s" % rid, ["del", _rid(rid)])
+            step("удалить %s" % rid, ["del", _rid(rid), "--yes"])    # подтверждено в панели
         for ch in sets:
             if not isinstance(ch, dict) or not isinstance(ch.get("fields"), dict):
                 raise Bad("modlink: правка строки — {id, fields}")
@@ -319,7 +323,8 @@ class Panel:
         for row in adds:
             if not isinstance(row, dict):
                 raise Bad("modlink: новая строка — объект")
-            e = step("добавить %s" % (row.get("lan_ip") or "?"), _ml_add(row))
+            args, secret = _ml_add(row)
+            e = step("добавить %s" % (row.get("lan_ip") or "?"), args, secret)
             if e["ok"] and row.get("enabled") is False and isinstance(e.get("data"), dict) and "id" in e["data"]:
                 step("выключить %s" % e["data"]["id"], ["disable", str(e["data"]["id"])])
         applied = None
@@ -460,9 +465,10 @@ def _ml_val(k, v):
 
 
 def _ml_add(row):
+    """-> (args, stdin). Набранный пароль идёт через stdin (`--password -`), не в командной строке."""
     if not row.get("lan_ip"):
         raise Bad("новая строка: нужен LAN IP")
-    a = ["add", "--lan-ip", _ml_val("lan_ip", row["lan_ip"])]
+    a, secret = ["add", "--lan-ip", _ml_val("lan_ip", row["lan_ip"])], None
     for k, flag, dflt in (("name", "--name", None), ("login", "--login", None), ("password", "--password", "gen"),
                           ("port", "--port", "auto"), ("modem_ip", "--modem-ip", None),
                           ("reconnect_port", "--reconnect-port", "auto"), ("interval_min", "--interval", None)):
@@ -470,9 +476,15 @@ def _ml_add(row):
         v = "" if v is None else str(v).strip()
         if v == "" and dflt:
             v = dflt
-        if v != "":
-            a += [flag, v if (k == "password" and v == "gen") else _ml_val(k, v)]
-    return a
+        if v == "":
+            continue
+        if k == "password" and v != "gen":
+            secret = _ml_val(k, v) + "\n"
+            v = "-"
+        elif not (k == "password" or v == "auto"):
+            v = _ml_val(k, v)
+        a += [flag, v]
+    return a, secret
 
 
 def _export_lines(d):

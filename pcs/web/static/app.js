@@ -89,7 +89,14 @@
     if (c.ok < c.total) return "работают не все модемы";
     return "работает";
   }
-  const hue = (id) => Math.round((Number(id) * 137.508) % 360);
+  // Цвет ВМ — по месту в списке хоста: соседние ВМ всегда заметно разного цвета, красного нет
+  // (красный — это «сломано»). Новые ВМ обычно с большим номером — цвета старых не меняются.
+  const PALETTE = [210, 145, 275, 30, 185, 320, 95, 245, 55, 165];
+  function hue(id) {
+    const ids = ((S.ov && S.ov.servers) || []).map((s) => Number(s.id)).sort((a, b) => a - b);
+    const i = ids.indexOf(Number(id));
+    return PALETTE[(i >= 0 ? i : Number(id)) % PALETTE.length];
+  }
   function plural(n, one, few, many) {
     const a = Math.abs(n) % 100, b = a % 10;
     if (a > 10 && a < 20) return many;
@@ -118,7 +125,8 @@
     enabled: "включено", created: "создано", recreated: "пересоздано", removed: "снято", failed: "не вышло",
     rows: "строк", saved: "сохранено", dns: "DNS", fingerprint: "отпечаток", added: "добавлен",
     deleted: "удалена", mode: "режим", id: "№", restarted: "перезапущен", check: "проверка", config: "конфиг",
-    checked: "проверено", disabled: "выключены", invalid: "брак", problems: "замечаний", target: "где"};
+    checked: "проверено", disabled: "выключены", invalid: "брак", problems: "замечаний", target: "где",
+    sb: "sing-box", daemon: "демон", unit: "юнит", pending: "неприменённые правки"};
   function fmtVal(v) {
     if (v === true) return "да";
     if (v === false) return "нет";
@@ -241,7 +249,7 @@
     const tail = el("div");
     const box = el("div", {class: "joblog"},
       el("div", {}, el("b", {text: opts.title || "Задание " + jid}), " · ", st, " ",
-        el("a", {href: "#/job/" + encodeURIComponent(jid), class: "muted", text: "журнал отдельно"})), pre, tail);
+        opts.page ? null : el("a", {href: "#/job/" + encodeURIComponent(jid), class: "muted", text: "журнал отдельно"})), pre, tail);
     let first = true;
     async function tick() {
       if (!first && !box.isConnected) return;
@@ -300,7 +308,7 @@
     for (const s of (S.ov && S.ov.servers) || []) {
       const c = counts(s);
       kids.push(el("a", {class: "tree-vm" + (cur.kind === "vm" && String(cur.id) === String(s.id) ? " active" : ""),
-        href: "#/vm/" + s.id, title: levelText(s)},
+        href: "#/vm/" + s.id, title: levelText(s), style: "--h:" + hue(s.id)},
         el("span", {class: "dot " + level(s)}), el("span", {}, el("b", {text: String(s.id)}), " ", s.name || ""),
         el("span", {class: "sub", text: modeShort(s.mode) + " · " + c.ok + "/" + c.total})));
     }
@@ -401,8 +409,8 @@
   function plaque(id) {
     const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
     const box = el("div", {class: "plaque"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
-    box.style.setProperty("--h", String(hue(id)));
     function update() {
+      box.style.setProperty("--h", String(hue(id)));
       const s = srv(id);
       if (!s) {
         big.textContent = "ВМ " + id;
@@ -589,10 +597,11 @@
       const isLocal = source && source.ok && source.data && source.data.source === "local";
       mainCb.checked = !!isLocal;
 
+      const wcls = (j) => /^\s*(n|num|номер|real|modem|enabled|вкл|on|port|proxy_port)\s*$/i.test(grid[0][j] || "") ? "w-s" : "w-l";
       function drawGrid() {
-        const head = el("tr", {}, grid[0].map((v, j) => el("th", {}, el("input", {value: v, oninput: (e) => { grid[0][j] = e.target.value; }}))), el("th"));
+        const head = el("tr", {}, grid[0].map((v, j) => el("th", {}, el("input", {value: v, class: wcls(j), oninput: (e) => { grid[0][j] = e.target.value; }}))), el("th"));
         const body = grid.slice(1).map((row, i) => el("tr", {},
-          row.map((v, j) => el("td", {}, el("input", {value: v, class: j === 0 || /^(n|real|enabled)$/i.test(grid[0][j]) ? "w-s" : "", oninput: (e) => { grid[i + 1][j] = e.target.value; }}))),
+          row.map((v, j) => el("td", {}, el("input", {value: v, class: wcls(j), spellcheck: false, oninput: (e) => { grid[i + 1][j] = e.target.value; }}))),
           el("td", {}, btn("✕", () => { grid.splice(i + 1, 1); drawGrid(); }, "icon", "убрать строку"))));
         area.replaceChildren(el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, head), el("tbody", {}, body))),
           el("div", {class: "bar"}, btn("+ строка", () => { grid.push(Array(grid[0].length).fill("")); drawGrid(); })));
@@ -665,8 +674,10 @@
   const csvJoin = (rows) => rows.map((r) => r.map((c) => csvCell(String(c))).join(",")).join("\n") + "\n";
 
   // ── вкладка modlink ───────────────────────────────────────────────────────
-  const ML_COLS = [["enabled", "вкл"], ["name", "имя"], ["login", "логин"], ["password", "пароль"], ["port", "порт"],
-    ["lan_ip", "LAN IP"], ["modem_ip", "IP модема"], ["reconnect_port", "порт реконнекта"], ["interval_min", "интервал, мин"]];
+  const ML_COLS = [["enabled", "вкл", "строка активна"], ["name", "имя", "метка"], ["login", "логин"], ["password", "пароль"],
+    ["port", "порт", "порт прокси (постоянный)"], ["lan_ip", "LAN IP", "адрес интерфейса модема на сервере"],
+    ["modem_ip", "IP модема", "веб-интерфейс Huawei (HiLink)"], ["reconnect_port", "реконнект", "порт триггера: GET http://IP:порт/reconnect"],
+    ["interval_min", "мин", "автореконнект, минут (0 — выкл)"]];
 
   function mlTab(id) {
     const statusLine = el("div", {class: "muted"});
@@ -674,7 +685,7 @@
     const res = el("span", {class: "res"});
     const out = el("div", {class: "muted mono"});
     const dirtyEl = el("span", {class: "problems"});
-    let orig = [], states = {}, edits = {}, added = [], deleted = new Set(), revealed = {}, err = null, seq = 0;
+    let orig = [], states = {}, edits = {}, added = [], deleted = new Set(), revealed = {}, err = null, seq = 0, pending = false;
 
     const val = (r, k) => (edits[r.id] && k in edits[r.id]) ? edits[r.id][k] : r[k];
     function setEdit(r, k, v) {
@@ -686,13 +697,14 @@
     }
     function markDirty() {
       const n = Object.keys(edits).length + added.length + deleted.size;
-      dirtyEl.textContent = n ? "несохранённых правок: " + n + " — «Применить»" : "";
+      dirtyEl.textContent = n ? "несохранённых правок: " + n + " — «Применить»"
+        : pending ? "есть неприменённые правки (modlink apply не было) — «Применить»" : "";
       for (const tr of tbl.querySelectorAll("tr[data-id]")) tr.classList.toggle("dirty", !!edits[tr.dataset.id]);
     }
 
     function inputFor(r, k, isNew) {
-      const v = isNew ? r.fields[k] : val(r, k);
-      const cls = ["port", "reconnect_port", "interval_min"].includes(k) ? "w-s" : (k === "lan_ip" || k === "modem_ip") ? "w-ip" : "";
+      const v = isNew ? r.fields[k] : k === "password" ? ((edits[r.id] || {}).password ?? revealed[r.id]) : val(r, k);
+      const cls = k === "interval_min" ? "w-xs" : ["port", "reconnect_port"].includes(k) ? "w-s" : (k === "lan_ip" || k === "modem_ip") ? "w-ip" : "w-m";
       if (k === "enabled") {
         return el("input", {type: "checkbox", checked: !!v, onchange: (e) => isNew ? (r.fields[k] = e.target.checked) : setEdit(r, k, e.target.checked)});
       }
@@ -723,23 +735,25 @@
       const x = await run(id, "modlink", args);
       if (!x.ok) { out.textContent = "строка " + r.id + " · " + what + " — Ошибка: " + x.error; return; }
       if (args[0] === "log") {
-        const lines = Array.isArray(x.data) ? x.data.join("\n") : typeof x.data === "string" ? x.data : JSON.stringify(x.data, null, 1);
+        const L = Array.isArray(x.data) ? x.data : x.data && Array.isArray(x.data.lines) ? x.data.lines : null;
+        const lines = L ? L.map((l) => typeof l === "string" ? l : JSON.stringify(l)).join("\n")
+          : typeof x.data === "string" ? x.data : JSON.stringify(x.data, null, 1);
         out.textContent = "";
         showText("Журнал реконнектов · строка " + r.id + " · ВМ " + id, lines || "пусто");
         return;
       }
-      out.textContent = "строка " + r.id + " · " + what + ": " + (summary(x.data, ["id"]) || "Применено");
+      out.textContent = "строка " + r.id + " · " + what + ": " + mlResult(args[0], x.data);
     }
 
     function draw() {
       if (err) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + err})); return; }
-      const head = el("tr", {}, el("th"), ML_COLS.map(([, t]) => el("th", {text: t})), el("th"));
+      const head = el("tr", {}, el("th"), ML_COLS.map(([, t, title]) => el("th", {text: t, title: title || null})), el("th"));
       const body = [];
       for (const r of orig) {
         const st = states[r.id];
         const gone = deleted.has(r.id);
         body.push(el("tr", {"data-id": String(r.id), class: (gone ? "gone" : "") + (edits[r.id] ? " dirty" : "")},
-          el("td", {title: st ? summary(st, ["id"]) : ""}, el("span", {class: "dot " + (!st ? "" : st.state === "ok" ? "ok" : st.state === "off" ? "" : "bad")})),
+          el("td", {class: "ml-dot", "data-id": String(r.id), title: mlStateText(st)}, el("span", {class: "dot " + mlDot(st)})),
           ML_COLS.map(([k]) => el("td", {}, k === "password" ? pwCell(r) : inputFor(r, k))),
           el("td", {class: "acts-cell"},
             btn("Test", () => rowAct(r, "Test", ["test", String(r.id)]), "icon", "внешний IP через прокси + HiLink"),
@@ -754,7 +768,7 @@
           el("td", {class: "acts-cell"}, btn("✕", () => { added = added.filter((x) => x !== a); draw(); markDirty(); }, "icon danger", "убрать новую строку"))));
       }
       if (!body.length) body.push(el("tr", {}, el("td", {colspan: ML_COLS.length + 2, class: "muted", text: "прокси нет — «Добавить» или «Из интерфейсов»"})));
-      tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), el("tbody", {}, body)));
+      tbl.replaceChildren(el("table", {class: "t ml"}, el("thead", {}, head), el("tbody", {}, body)));
     }
 
     async function load() {
@@ -763,13 +777,30 @@
       const L = r.data.list, St = r.data.status;
       err = L.ok ? null : L.error;
       orig = L.ok ? rowsOf(L.data) : [];
+      pending = !!(L.ok && L.data && L.data.pending);
+      applyStatus(St);
+      edits = {}; added = []; deleted = new Set(); revealed = {};
+      draw(); markDirty();
+    }
+    function applyStatus(St) {
       states = {};
       if (St && St.ok && St.data && typeof St.data === "object") {
         for (const x of rowsOf(St.data)) if (x && x.id != null) states[x.id] = x;
-        statusLine.textContent = Array.isArray(St.data) ? "" : summary(St.data, ["rows"]);
+        if (!Array.isArray(St.data)) {
+          statusLine.textContent = summary(St.data, ["rows", "pending"]);
+          if (St.data.pending != null) pending = !!St.data.pending;
+        }
       } else statusLine.textContent = St && !St.ok ? "modlink status — Ошибка: " + St.error : "";
-      edits = {}; added = []; deleted = new Set(); revealed = {};
-      draw(); markDirty();
+      for (const td of tbl.querySelectorAll("td.ml-dot")) {
+        const st = states[td.dataset.id];
+        td.title = mlStateText(st);
+        td.firstChild.className = "dot " + mlDot(st);
+      }
+      markDirty();
+    }
+    async function pollStatus() {
+      const r = await GET("/api/servers/" + id + "/modlink?only=status");
+      if (r.ok) applyStatus(r.data.status);
     }
 
     const bAdd = btn("Добавить", () => {
@@ -777,13 +808,22 @@
       draw(); markDirty();
     });
     const bIf = btn("Из интерфейсов", async (e) => {
-      const r = await act(e.target, res, () => run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length + " — проверьте и «Применить»");
-      if (r && r.ok) {
-        for (const s of rowsOf(r.data)) added.push({tmp: ++seq, fields: Object.assign({enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "", reconnect_port: "", interval_min: "0"}, s)});
-        draw(); markDirty();
-      }
-    }, "", "modlink from-ifaces: строки по интерфейсам 192.168.N.100");
+      const r = await act(e.target, res, () => run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length);
+      if (!r || !r.ok) return;
+      const sug = rowsOf(r.data);
+      if (!sug.length) { setRes(res, "ok", "новых интерфейсов 192.168.N.100 нет — всё уже в таблице"); return; }
+      modal("Строки по интерфейсам · ВМ " + id, el("div", {},
+        el("p", {text: "modlink добавит строки (логин, пароль и порты — сам). В силу вступят после «Применить»."}),
+        el("pre", {text: sug.map((x) => [x.lan_ip, x.modem_ip, x.iface, x.name].filter(Boolean).join("  ")).join("\n")})), [
+        {text: "Отмена"},
+        {text: "Добавить " + sug.length, cls: "primary", onclick: async (close) => {
+          close();
+          await act(bIf, res, () => run(id, "modlink", ["from-ifaces", "--add"]), (d) => "добавлено строк: " + ((d && d.added) || []).length + " — «Применить»");
+          await load();
+        }}]);
+    }, "", "modlink from-ifaces: строки по интерфейсам 192.168.N.100 сервера");
     const bApply = btn("Применить", async (e) => {
+      if (deleted.size && !window.confirm("Удалить строки modlink: " + [...deleted].join(", ") + "? Прокси на их портах перестанут работать.")) return;
       const payload = {
         del: [...deleted],
         set: Object.entries(edits).filter(([k]) => !deleted.has(Number(k)) && !deleted.has(k)).map(([k, f]) => ({id: Number(k), fields: f})),
@@ -802,7 +842,42 @@
     const root = el("div", {}, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
       el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
     let loaded = false;
-    return {el: root, show() { if (!loaded) { loaded = true; tbl.replaceChildren(el("div", {class: "item muted", text: "загрузка…"})); load(); } }};
+    const pl = poller(15000, pollStatus);
+    return {
+      el: root,
+      show() { if (!loaded) { loaded = true; tbl.replaceChildren(el("div", {class: "item muted", text: "загрузка…"})); load(); } else pollStatus(); pl.start(); },
+      hide() { pl.stop(); },
+      dispose() { pl.stop(); },
+    };
+  }
+
+  const ML_STATE = {ok: ["ok", "работает"], warn: ["warn", "апстрим/модем"], broken: ["bad", "сломан"],
+    disabled: ["", "выключен"], pending: ["info", "ждёт «Применить»"]};
+  const mlDot = (st) => st ? (ML_STATE[st.state] || ["bad"])[0] : "";
+  function mlStateText(st) {
+    if (!st) return "";
+    const t = [(ML_STATE[st.state] || [, st.state])[1]];
+    if (st.port_up === false) t.push("порт " + (st.port || "") + " не слушает");
+    if (st.trigger_up === false) t.push("триггер не слушает" + (st.trigger_error ? ": " + st.trigger_error : ""));
+    if (st.iface) t.push("интерфейс " + st.iface);
+    if (st.next) t.push("следующий реконнект " + new Date(st.next * 1000).toLocaleTimeString("ru-RU"));
+    if (st.last) t.push("последний: " + (st.last.t ? new Date(st.last.t * 1000).toLocaleString("ru-RU") + " " : "") +
+      (st.last.how || "") + " " + (st.last.ok ? "✓" : "✗") + " " + (st.last.text || "") + (st.last.dt ? " за " + st.last.dt + " с" : ""));
+    return t.join(" · ");
+  }
+  function okErr(o, good) {
+    if (!o || typeof o !== "object") return fmtVal(o);
+    return o.ok ? "✓ " + good(o) : "✗ " + (o.error || "нет");
+  }
+  function mlResult(cmd, d) {
+    if (!d || typeof d !== "object") return d == null ? "Применено" : String(d);
+    if (cmd === "test")
+      return "прокси " + okErr(d.proxy, (p) => "внешний IP " + (p.ip || "—")) + " · HiLink " +
+        okErr(d.hilink, (h) => [h.status, h.net, h.signal].filter(Boolean).join(", ") || "отвечает") + (d.iface ? " · " + d.iface : "");
+    if (cmd === "reconnect")
+      return d.ok === false ? "✗ " + (d.error || "не вышло") : "✓ IP " + (d.ip || "—") + (d.same ? " (тот же!)" : "") + (d.dt ? " за " + d.dt + " с" : "");
+    if (cmd === "reboot") return d.ok === false ? "✗ " + (d.error || "не вышло") : "✓ модем перезагружается";
+    return summary(d, ["id"]) || "Применено";
   }
 
   // ── терминал ──────────────────────────────────────────────────────────────
@@ -962,8 +1037,9 @@
       const s = srv(id) || {};
       mpState.textContent = mpText(s.mpspace);
       modeCur.textContent = "сейчас: " + modeShort(s.mode);
-      if (s.mode) modeSel.value = s.mode === "usb" ? "gw" : "usb";
+      if (s.mode && s.mode !== shownMode) { shownMode = s.mode; modeSel.value = s.mode === "usb" ? "gw" : "usb"; }
     }
+    let shownMode = null;
     const root = el("div", {}, facts, el("div", {class: "acts", style: "margin-top:10px"}, rDns.el, rPw.el, rKey.el, rMp.el, rHl.el, rMode.el, rUp.el));
     let loaded = false;
     return {el: root, update, show() { update(); if (!loaded) { loaded = true; loadHl(); loadFacts(); } }};
@@ -1005,7 +1081,7 @@
   }
 
   function pageJob(jid) {
-    return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {})), update() { document.title = "Задание — PCS"; }};
+    return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {page: true})), update() { document.title = "Задание — PCS"; }};
   }
 
   function pageHostTerm() {
