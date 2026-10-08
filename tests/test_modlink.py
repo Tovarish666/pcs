@@ -208,6 +208,7 @@ class Modem:
     def __init__(self):
         self.calls, self.issued, self.used = [], set(), set()
         self.data, self.mode, self.error, self.gate, self.n = 1, "03", None, None, 0
+        self.mode_posts, self.fail_modes = 0, set()
         modem = self
 
         class H(BaseHTTPRequestHandler):
@@ -258,6 +259,9 @@ class Modem:
                     modem.data = v
                     modem.calls.append(("data", v))
                 elif self.path == "/api/net/net-mode":
+                    modem.mode_posts += 1
+                    if modem.mode_posts in modem.fail_modes:
+                        return self.send("<error><code>112003</code><message></message></error>")
                     modem.calls.append(("mode", re.search(r"<NetworkMode>(\w+)<", body).group(1),
                                         re.search(r"<LTEBand>(\w+)<", body).group(1)))
                 elif self.path == "/api/device/control":
@@ -281,6 +285,12 @@ h.reconnect(wait=3)
 check("реконнект: данные выкл → режим сети туда-обратно → данные вкл",
       m.calls == [("data", 0), ("mode", "02", "800C5"), ("mode", "03", "800C5"), ("data", 1)], m.calls)
 check("каждый POST — со своим свежим токеном", len(m.used) == 4)
+m.calls.clear()
+m.mode_posts, m.fail_modes = 0, {2, 3, 4}
+e = fails(h.reconnect, wait=3)
+check("режим сети не вернулся — данные всё равно включены, и об этом сказано",
+      e and "режим сети не вернулся к 03" in e and m.calls[-1] == ("data", 1) and m.data == 1, (e, m.calls))
+m.fail_modes = set()
 m.calls.clear()
 h.reboot()
 check("ребут — device/control Control=1", m.calls == [("control", "1")], m.calls)
@@ -365,6 +375,13 @@ code, body = get("/reconnect")
 check("тот же IP второй раз — отмечено в журнале", "тот же" in ops.last(201)["text"])
 code, body = get("/status")
 check("другие пути — 404", code == 404 and body["ok"] is False, (code, body))
+req = urllib.request.Request("http://127.0.0.1:%d/reconnect" % rport, data=b"x", method="POST")
+try:
+    urllib.request.urlopen(req, timeout=5)
+    code = 200
+except urllib.error.HTTPError as e:
+    code = e.code
+check("POST — 405, реконнекта нет", code == 405 and ops.last(201)["how"] == "trigger")
 m.gate = threading.Event()
 slow = threading.Thread(target=get, args=("/reconnect",))
 slow.start()

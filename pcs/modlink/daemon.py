@@ -16,11 +16,16 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from ..core.util import Busy, Fail, Log, jsave, jload
+from ..core.util import Busy, Fail, jsave, jload
 from . import ops, store
 from .store import P
 
 RETRY = 30                    # с, повторная попытка занять порт триггера
+
+
+def journal(msg):
+    """В journald (stdout юнита): у него своя ротация; реконнекты — в журналах строк."""
+    print(msg, flush=True)
 
 
 class Server(ThreadingHTTPServer):
@@ -41,6 +46,11 @@ def handler(d, rid):
             if urllib.parse.urlsplit(self.path).path.rstrip("/") != "/reconnect":
                 return self.reply(404, {"ok": False, "error": "есть только GET /reconnect"})
             self.reply(*d.trigger(rid))
+
+        def do_POST(self):
+            self.reply(405, {"ok": False, "error": "только GET /reconnect"})
+
+        do_PUT = do_DELETE = do_PATCH = do_POST
 
         def reply(self, code, body):
             data = json.dumps(body, ensure_ascii=False).encode()
@@ -82,7 +92,7 @@ class Daemon:
         self.rows, self.trig, self.next, self.running = {}, {}, {}, set()
         self.lock = threading.Lock()
         self.stop_ev, self.reload_ev = threading.Event(), threading.Event()
-        self.log = log or Log("modlink", P.log)
+        self.log = log or journal
         self._state = None
 
     def load(self):

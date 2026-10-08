@@ -111,25 +111,45 @@ class HiLink:
         lte = m.get("LTEBand") or "7FFFFFFFFFFFFFFF"
         self.data(False)
         self.pause(2)
+        stuck = None
         try:
             self.net_mode("02" if orig != "02" else "03", band, lte)
-            self.pause(2)
-            self.net_mode(orig, band, lte)
-            self.pause(1)
         except Error:
             pass                    # не у всех прошивок есть net-mode — хватит передачи данных
-        self.data(True)
+        else:
+            self.pause(2)
+            stuck = self._again(lambda: self.net_mode(orig, band, lte))
+            self.pause(1)
+        err = self._again(lambda: self.data(True))     # модем без данных хуже любой ошибки
+        if err:
+            raise Error("модем %s: не включилась передача данных — %s" % (self.ip, err))
         last = ""
         for _ in range(wait):
             try:
                 st = self.status().get("ConnectionStatus", "")
                 if st == "901":
-                    return True
+                    break
                 last = STATUS.get(st, st)
             except Error as e:
                 last = str(e)
             self.pause(1)
-        raise Error("модем %s не подключился за %d с (%s)" % (self.ip, wait, last or "нет ответа"))
+        else:
+            raise Error("модем %s не подключился за %d с (%s)" % (self.ip, wait, last or "нет ответа"))
+        if stuck:
+            raise Error("модем %s: подключён, но режим сети не вернулся к %s — %s" % (self.ip, orig, stuck))
+        return True
+
+    def _again(self, fn, tries=3):
+        """Повторить действие; None — вышло, иначе текст последней ошибки."""
+        for i in range(tries):
+            try:
+                fn()
+                return None
+            except Error as e:
+                err = str(e)
+                if i < tries - 1:
+                    self.pause(2)
+        return err
 
     def reboot(self):
         self.post("/api/device/control", "<Control>1</Control>")
