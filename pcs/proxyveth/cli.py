@@ -134,14 +134,29 @@ def src_of(cfg):
     return TABLE if s == "local" else s
 
 
-def read_table(cfg, mode, fetch=True):
-    """fetch — из источника (с локальной копией про запас), иначе только копия."""
-    if fetch:
-        text, stale = table.fetch(src_of(cfg), TABLE, log=log)
-    else:
+def read_table(cfg, mode, fetch=True, strict=False):
+    """fetch — из источника (с локальной копией про запас), иначе только копия.
+    Таблица без единой годной строки — сломана: копия остаётся прошлой, модемы
+    приводятся к ней. strict (для lint) — разбор именно того, что пришло."""
+    taken, mp, note = net.local_octets(), mode == "usb", []
+    if not fetch:
         text, stale = rd(TABLE), False
-    d, dis, inv, probs = table.lint(text, net.local_octets(), mp_tables=(mode == "usb"))
-    return {"text": text, "stale": stale, "desired": d, "disabled": dis, "invalid": inv, "problems": probs}
+    else:
+        src = src_of(cfg)
+        prev = rd(TABLE) if src != TABLE else ""
+        text, stale = table.fetch(src, TABLE, log=log)
+        d, dis, _, probs = table.lint(text, taken, mp_tables=mp)
+        if not d and not dis and prev and not stale:
+            pd, pdis, _, _ = table.lint(prev, taken, mp_tables=mp)
+            if pd or pdis:            # пустая или сломанная таблица — не повод забыть прошлую
+                note.append("в таблице ни одной годной строки (%s) — считаю её сломанной, %s"
+                            % (probs[0] if probs else "пусто", "копию не трогаю" if strict else "беру прошлую копию"))
+                wr(TABLE + ".tmp", prev, 0o600)
+                os.replace(TABLE + ".tmp", TABLE)
+                if not strict:
+                    text, stale = prev, True
+    d, dis, inv, probs = table.lint(text, taken, mp_tables=mp)
+    return {"text": text, "stale": stale, "desired": d, "disabled": dis, "invalid": inv, "problems": note + probs}
 
 
 def show_problems(probs):
@@ -408,7 +423,7 @@ def cmd_table(a):
 
 def cmd_lint(a):
     cfg = load_cfg()
-    t = read_table(cfg, cur_mode(cfg) or "usb")
+    t = read_table(cfg, cur_mode(cfg) or "usb", strict=True)
     show_problems(t["problems"])
     say("  годных %d (выключено %d), отбраковано n: %s%s" % (
         len(t["desired"]), len(t["disabled"]), ",".join(map(str, sorted(t["invalid"]))) or "—",

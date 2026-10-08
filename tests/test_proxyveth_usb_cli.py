@@ -181,6 +181,13 @@ def test_sync():
         check("адреса прокси закреплены: из таблицы и у работающих модемов",
               pinned and set(pinned[-1]) == {"10.0.0.%d" % n for n in range(1, 6)} | {"9.9.9.9"}, pinned)
 
+        put_cfg(mode="usb", source=src("n,real,proxy,enabled\n"))
+        rc, d = ok_json("sync")
+        a = [c for c in fake.calls if c[0] == "apply"][-1]
+        check("пустая таблица — считается сломанной, берётся прошлая копия",
+              sorted(a[1][0]) == [1, 2, 3, 4, 5] and d["data"]["stale"] and "сломанной" in d["data"]["problems"][0]
+              and open(cli.TABLE).read() == CSV, d)
+
         put_cfg(mode="usb", source=src(CSV.split("\n2,")[0] + "\n"))
         rc, d = ok_json("sync")
         keep = [c for c in fake.calls if c[0] == "apply"][-1][1][1]["keep"]
@@ -195,7 +202,7 @@ def test_sync():
         a = [c for c in fake.calls if c[0] == "apply"][-1]
         check("кривая строка про работающий модем — модем не трогаем", 3 not in a[1][0] and a[1][1]["keep"] == [3], a)
 
-        pair = "n,real,proxy\n1,81,h:1:u:p1\n201,82,h:1:u:p2\n"
+        pair = "n,real,proxy\n1,81,h:1:u:p1\n201,82,h:1:u:p2\n7,87,h:1:u:p7\n"
         put_cfg(mode="usb", source=src(pair))
         ok_json("sync")
         usb_d = sorted([c for c in fake.calls if c[0] == "apply"][-1][1][0])
@@ -205,7 +212,7 @@ def test_sync():
         ok_json("sync")
         undo2()
         gw_d = sorted([c for c in fake_gw.calls if c[0] == "apply"][-1][1][0])
-        check("N и N+200: в usb — брак (таблицы mp.space), в gw — можно", usb_d == [] and gw_d == [1, 201], (usb_d, gw_d))
+        check("N и N+200: в usb — брак (таблицы mp.space), в gw — можно", usb_d == [7] and gw_d == [1, 7, 201], (usb_d, gw_d))
 
         put_cfg(mode="usb", source=src(CSV))
         fake.calls.clear()
@@ -277,8 +284,9 @@ def test_commands():
         rc, d = ok_json("lint")
         check("lint --json: годные, выключенные, брак", d["ok"] and d["data"]["ok"] == [1, 2, 3, 4, 5], d)
         put_cfg(mode="usb", source=src("n,real,proxy\n1,81,h:0:u:p\n"))
-        rc, _, _ = run("lint")
-        check("lint в терминале: есть брак — код 1", rc == 1)
+        rc, out, _ = run("lint")
+        check("lint в терминале: брак виден, код 1 (даже если вся таблица сломана)", rc == 1 and "порт прокси" in out, out)
+        check("а копия после lint сломанной таблицы — прошлая", open(cli.TABLE).read().startswith("n,real,proxy,enabled\n1,81"))
     finally:
         undo()
 
