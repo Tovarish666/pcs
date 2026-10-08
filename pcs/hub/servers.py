@@ -186,8 +186,9 @@ def create(p, select=True):
     ui.step("жду cloud-init (apt upgrade идёт на ВМ, это несколько минут)")
     remote.ssh(s, "cloud-init status --wait >/dev/null 2>&1; test -f /var/lib/pcs-cloud-init-done", timeout=3600)
     ui.ok("cloud-init отработал за %d с" % (time.time() - t0))
-    need = remote.ssh(s, "test -f /var/run/reboot-required && echo reboot; modinfo libcomposite >/dev/null 2>&1 || echo reboot",
-                      check=False).stdout
+    # usb: модули USB-гаджета приходят с новым ядром — без перезагрузки их нет
+    need = remote.ssh(s, "test -f /var/run/reboot-required && echo reboot" + (
+        "; modinfo libcomposite >/dev/null 2>&1 || echo reboot" if p["mode"] == "usb" else ""), check=False).stdout
     if "reboot" in need:
         ui.step("перезагрузка на новое ядро")
         boot = remote.boot_id(s)

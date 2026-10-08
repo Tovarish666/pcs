@@ -21,7 +21,7 @@ ROOT = os.path.join(HERE, os.pardir)
 sys.path.insert(0, ROOT)
 from pcs import VERSION  # noqa: E402
 from pcs.core.util import Fail  # noqa: E402
-from pcs.hub import api, cli, jobs, menu, ops, pve, remote, servers, store, ui, web  # noqa: E402
+from pcs.hub import api, cli, jobs, menu, pve, remote, servers, store, ui, web  # noqa: E402
 
 passed = failed = 0
 
