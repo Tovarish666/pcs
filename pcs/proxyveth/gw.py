@@ -197,9 +197,13 @@ def ensure_units():
     return changed
 
 
-def ns_rules():
+def ns_rules(n=None, real=None):
     """iptables внутри netns модема — одним iptables-restore."""
     c = "-m comment --comment %s" % TAG
+    # Настоящий модем отвечает на DNS по 192.168.N.1. При real != n этот адрес — посредник
+    # Host, поэтому DNS к нему отправляем на настоящий модем: дальше туннель и hijack-dns.
+    dnat = ["-A PREROUTING -d 192.168.%d.1/32 -p %s -m %s --dport 53 %s -j DNAT --to-destination 192.168.%d.1:53"
+            % (n, p, p, c, real) for p in ("udp", "tcp")] if n and real and real != n else []
     return "\n".join([
         "*filter", ":INPUT ACCEPT [0:0]", ":FORWARD ACCEPT [0:0]", ":OUTPUT ACCEPT [0:0]",
         # DNS в туннель пускаем — его перехватит sing-box. Остальной UDP режем: прокси
@@ -212,6 +216,7 @@ def ns_rules():
         "-A FORWARD -i %s -o %s %s -j ACCEPT" % (TUN, INNER, c),
         "COMMIT",
         "*nat", ":PREROUTING ACCEPT [0:0]", ":INPUT ACCEPT [0:0]", ":OUTPUT ACCEPT [0:0]", ":POSTROUTING ACCEPT [0:0]",
+        *dnat,
         "-A POSTROUTING -o %s %s -j MASQUERADE" % (TUN, c),
         "COMMIT", ""])
 
@@ -418,7 +423,7 @@ def create(row, up, o):
         nsh(name, "route", "add", "%s/32" % ip, "via", "192.168.%d.100" % n, "dev", INNER,
             "src", "192.168.%d.254" % n)
         step = "iptables"
-        nsx(name, "iptables-restore", input=ns_rules())
+        nsx(name, "iptables-restore", input=ns_rules(n, real))
         nsx(name, "iptables", "-w", "5", "-I", *MSS, check=False)
         step = "маршрутизация сервера"
         server_side(n, up)

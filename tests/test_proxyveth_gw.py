@@ -156,7 +156,10 @@ check("посредник — модулем", "ExecStart=/usr/bin/python3 -m pc
 print("номера, имена, пометки:")
 check("таблица и приоритет — из pcs.core.net", gw.rt(5) == net.table("gw", 5) == 1005
       and gw.prio(5) == net.prio("gw", 5) == 30005 and gw.prio(254) < net.PIN_PRIO)
-check("все правила внутри netns помечены", all("--comment pcs:proxyveth" in ln for ln in gw.ns_rules().splitlines()
+check("DNS к 192.168.N.1 при real≠n — на настоящий модем (udp и tcp), при real=n — не нужно",
+      "-d 192.168.5.1/32 -p udp -m udp --dport 53" in gw.ns_rules(5, 9) and "--to-destination 192.168.9.1:53" in gw.ns_rules(5, 9)
+      and "DNAT" not in gw.ns_rules(5, 5))
+check("все правила внутри netns помечены", all("--comment pcs:proxyveth" in ln for ln in gw.ns_rules(5, 9).splitlines()
                                               if ln.startswith("-A")))
 check("TCPMSS — первым в FORWARD и помечен", gw.MSS[:2] == ["FORWARD", "1"] and "pcs:proxyveth" in gw.MSS)
 check("NAT к прокси — с адреса netns, через канал, помечен",
@@ -204,7 +207,7 @@ check("маршрут к прокси — мимо туннеля, с адрес
       ("ip", "-n", "pv201", "route", "add", "188.134.95.184/32", "via", "192.168.201.100", "dev", "eth0",
        "src", "192.168.201.254") in w.calls)
 rest = [k for k in w.inputs if "iptables-restore" in k]
-check("iptables в netns — одним iptables-restore", rest and w.inputs[rest[0]] == gw.ns_rules())
+check("iptables в netns — одним iptables-restore, с DNS модема на настоящий", rest and w.inputs[rest[0]] == gw.ns_rules(201, 81))
 check("sing-box и посредник — юнитами, не дочерними процессами",
       ("systemctl", "start", "proxyveth-gw@201") in w.calls and ("systemctl", "start", "proxyveth-hostfix@201") in w.calls
       and not any("sing-box" in " ".join(c) for c in w.calls))
