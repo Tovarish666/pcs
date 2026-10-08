@@ -325,6 +325,9 @@ def cmd_migrate(a):
         for w in res["warnings"]:
             say("  ⚠ " + w)
         say("  это проверка; перенести: modlink migrate%s" % (" --from " + a.src if a.src else ""))
+    else:
+        say("  перенос готов: строк %d, sing-box %s, демон %s; клиентам — modlink export"
+            % (len(res["rows"]), res["sb"], res["daemon"]))
     return 0, res
 
 
