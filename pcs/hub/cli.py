@@ -117,8 +117,9 @@ def parser():
     return ap
 
 
-def split_target(args, allow_host=False):
-    """--server ID / --server=ID / --host — откуда угодно в аргументах части; остальное — как есть."""
+def split_target(args, allow_host=True):
+    """--server ID / --server=ID / --host — откуда угодно в аргументах части; остальное — как есть.
+    --host — всегда флаг хаба: для proxyveth и modlink это ошибка, а не «молча на выбранный сервер»."""
     rest, server, host = [], None, False
     i = 0
     while i < len(args):
@@ -139,7 +140,7 @@ def split_target(args, allow_host=False):
 
 # ── сквозные команды частей ────────────────────────────────────────────────
 def passthru(part, args):
-    rest, server, host = split_target(args, allow_host=(part == "hivelink"))
+    rest, server, host = split_target(args)
     as_json = "--json" in rest
     try:
         t = store.target(server, host)
@@ -168,7 +169,7 @@ def say_fail(e, as_json):
 
 def shell(cmd, args):
     """pcs ssh [ID] [аргументы ssh] / pcs exec [ID] 'команда'."""
-    rest, server, host = split_target(args, allow_host=True)
+    rest, server, host = split_target(args)
     if rest and (rest[0].isdigit() or rest[0] in ("host", "хост")) and (cmd == "ssh" or len(rest) > 1):
         server, rest = rest[0], rest[1:]
     try:

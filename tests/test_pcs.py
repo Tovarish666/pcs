@@ -104,12 +104,12 @@ a = cli.parser().parse_args(["key", "--server", "2000", "--add", "ssh-ed25519 AA
 check("key --add PUBKEY", a.add == "ssh-ed25519 AAAA me@laptop" and a.server == "2000")
 rest, srv, host = cli.split_target(["status", "--server", "2000", "--wan", "--json"])
 check("proxyveth: --server где угодно, остальное как есть", rest == ["status", "--wan", "--json"] and srv == "2000")
-rest, srv, host = cli.split_target(["install", "--host"], allow_host=True)
+rest, srv, host = cli.split_target(["install", "--host"])
 check("hivelink --host", rest == ["install"] and host and srv is None)
 rest, srv, host = cli.split_target(["source", "https://x?a=1", "--server=200"])
 check("--server=ID", rest == ["source", "https://x?a=1"] and srv == "200")
 rest, _, host = cli.split_target(["status", "--host"])
-check("у proxyveth --host — аргумент части, не хаба", rest == ["status", "--host"] and not host)
+check("--host — всегда флаг хаба (у proxyveth это ошибка, не выбранный сервер)", rest == ["status"] and host)
 
 print("командная строка:")
 
