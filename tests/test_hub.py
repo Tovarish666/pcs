@@ -431,12 +431,23 @@ for u, p in (("admin", "коротко"), ("ад мин", "достаточно-
     except Fail:
         check("брак логина/пароля — отказ: %r" % u, True)
 try:
-    web.serve([])
-    check("pcs web serve без панели — понятная ошибка", False)
-except Fail as e:
-    check("pcs web serve без панели — понятная ошибка", "веб-панели" in str(e) or "не готова" in str(e), e)
-except Exception as e:                       # панель E уже на месте — тогда это не наш случай
-    check("pcs web serve без панели — понятная ошибка (панель есть)", True, e)
+    from pcs.web import server as _panel
+except ImportError:
+    _panel = None
+if _panel is None:
+    try:
+        web.serve([])
+        check("pcs web serve без панели — понятная ошибка", False)
+    except Fail as e:
+        check("pcs web serve без панели — понятная ошибка", "веб-панели" in str(e) or "не готова" in str(e), e)
+else:                                        # панель есть — serve отдаёт ей управление, не поднимая сервер
+    _seen, _real = [], _panel.main
+    _panel.main = lambda argv=None: _seen.append(argv) or 0
+    try:
+        check("pcs web serve → pcs.web.server.main(argv)", web.serve(["--port", "6660"]) == 0
+              and _seen == [["--port", "6660"]], _seen)
+    finally:
+        _panel.main = _real
 
 # ── меню ───────────────────────────────────────────────────────────────────
 print("меню:")
