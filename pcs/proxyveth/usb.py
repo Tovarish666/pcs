@@ -385,14 +385,23 @@ def write_configs(p):
         wr(os.path.join(d, name), body, 0o600)
 
 
+def tun_dns_links():
+    """Интерфейсы сервера, на которых висит DNS чужого tun 172.20.0.2."""
+    try:
+        out = sh("resolvectl", "dns", check=False).stdout
+    except Fail:                          # нет systemd-resolved — нет и беды
+        return []
+    return [m.group(1) for m in re.finditer(r"^Link \d+ \((\S+)\): (.*)$", out, re.M)
+            if "172.20.0.2" in m.group(2).split()]
+
+
 def drop_tun_dns():
     """sing-box до запрета D-Bus вешал DNS своего tun (172.20.0.2, «весь DNS — сюда»)
     на интерфейс сервера с тем же номером. Снять и вернуть DNS хозяину интерфейса."""
-    for m in re.finditer(r"^Link \d+ \((\S+)\): (.*)$", sh("resolvectl", "dns", check=False).stdout, re.M):
-        if "172.20.0.2" in m.group(2).split():
-            sh("resolvectl", "revert", m.group(1), check=False)
-            sh("networkctl", "renew", m.group(1), check=False)       # networkd вернёт DNS из аренды
-            log("DNS интерфейса %s: снят чужой 172.20.0.2" % m.group(1))
+    for link in tun_dns_links():
+        sh("resolvectl", "revert", link, check=False)
+        sh("networkctl", "renew", link, check=False)       # networkd вернёт DNS из аренды
+        log("DNS интерфейса %s: снят чужой 172.20.0.2" % link)
 
 
 def tun_routes(n, real):
@@ -1603,8 +1612,7 @@ def doctor():
     hm = host_mode(cfg)
     chk("сторона сервера", hm != "own" or os.path.exists(HOST_RULE),
         {"mpspace": "mobileproxy.space", "own": "своя (DHCP + маршруты)", "none": "никто (hostside=off)"}[hm])
-    foreign = [m.group(1) for m in re.finditer(r"^Link \d+ \((\S+)\): (.*)$", sh("resolvectl", "dns", check=False).stdout, re.M)
-               if "172.20.0.2" in m.group(2).split()]
+    foreign = tun_dns_links()
     chk("DNS сервера", not foreign, ("чужой 172.20.0.2 на %s — proxyveth setup" % ", ".join(foreign)) if foreign else "без следов sing-box")
     chk("база PCS", os.path.exists(net.SYSCTL) and os.path.exists(net.NETWORKD), "%s, %s" % (net.SYSCTL, net.NETWORKD))
     chk("vmodem 4.x", not vmodem_found(), "следов нет" if not vmodem_found() else "стоит старый vmodem — proxyveth setup перенесёт")
