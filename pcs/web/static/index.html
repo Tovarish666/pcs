@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCS</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<header class="top">
+  <span class="brand">PCS</span>
+  <span id="h-host" class="muted">…</span>
+  <span class="muted">Proxmox</span>
+  <span id="h-port" class="muted mono"></span>
+  <span id="h-fake" class="badge" hidden>фейковые данные</span>
+  <span class="spacer"></span>
+  <button id="theme" class="link" title="тема: авто / светлая / тёмная">◐</button>
+  <span id="h-user"></span>
+  <button id="logout" class="link">выйти</button>
+</header>
+<div class="layout">
+  <nav id="tree" aria-label="хост и ВМ"></nav>
+  <main id="main"><p class="muted">загрузка…</p></main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
