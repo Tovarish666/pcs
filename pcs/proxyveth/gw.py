@@ -108,7 +108,7 @@ def resolve(host):
 
 def opts(cfg):
     o = dict(DEFAULTS)
-    o.update((cfg or {}).get("gw") or {})
+    o.update((cfg if isinstance(cfg, dict) else {}).get("gw") or {})
     return o
 
 
@@ -348,8 +348,10 @@ def server_side(n, up):
     """Маршрутизация и NAT модема на сервере. Идемпотентно: что есть — не трогаем."""
     name, t, p = ns(n), str(rt(n)), str(prio(n))
     with _HOST:
+        # Приоритет сверяем по выводу: у старого proxyveth-virt правило с тем же from и
+        # lookup, но другим приоритетом — его за своё не считать.
         have = sh("ip", "-4", "rule", "show", "priority", p, check=False).stdout
-        if "from 192.168.%d.100 " % n not in have + " ":
+        if not re.search(r"^%s:\s+from 192\.168\.%d\.100 " % (p, n), have, re.M):
             for _ in range(10):
                 if sh("ip", "rule", "del", "priority", p, check=False).returncode != 0:
                     break

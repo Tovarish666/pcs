@@ -363,8 +363,6 @@ def tidy(f):
         shutil.move(P(LOGS), t if not os.path.exists(t) else "%s-%d" % (t, time.time()))
     for p in glob.glob(P("/run/proxyveth/ns_*.pid")) + glob.glob(P("/run/proxyveth/hostfix_*.pid")):
         os.unlink(p)
-    for n in f["rows"]:
-        shutil.rmtree(P("/etc/netns/ns_%d" % n), ignore_errors=True)
 
 
 def gate(n, before, tries=2):
