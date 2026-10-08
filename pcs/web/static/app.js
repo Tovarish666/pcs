@@ -153,7 +153,7 @@
   }
   function rowsOf(d) {
     if (Array.isArray(d)) return d;
-    if (d && typeof d === "object") for (const k of ["rows", "proxies", "items", "modems", "list"]) if (Array.isArray(d[k])) return d[k];
+    if (d && typeof d === "object") for (const k of ["rows", "proxies", "suggest", "items", "modems", "list"]) if (Array.isArray(d[k])) return d[k];
     return [];
   }
   function srv(id) {

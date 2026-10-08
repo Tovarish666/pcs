@@ -526,9 +526,10 @@ def _ml(srv, a, inp):
             applied = srv["ml_applied"].get(r["id"]) == r
             st = "pending" if not applied else "disabled" if not r["enabled"] else "ok"
             out.append({"id": r["id"], "name": r["name"], "enabled": r["enabled"], "applied": applied, "state": st,
-                        "port": r["port"], "port_up": st == "ok", "lan_ip": r["lan_ip"],
+                        "port": r["port"], "port_up": None if st == "pending" else st == "ok", "lan_ip": r["lan_ip"],
                         "iface": "eth%d" % (r["id"] % 100), "reconnect_port": r["reconnect_port"],
-                        "trigger_up": st == "ok", "trigger_error": None, "interval_min": r["interval_min"],
+                        "trigger_up": None if st == "pending" else st == "ok", "trigger_error": None,
+                        "interval_min": r["interval_min"],
                         "next": t + 60 * r["interval_min"] if r["interval_min"] and st == "ok" else None,
                         "last": {"t": t - 900, "how": "timer", "ok": True, "dt": 8.7,
                                  "text": "IP %s" % _ml_ip(r["id"])} if r["interval_min"] else None})
