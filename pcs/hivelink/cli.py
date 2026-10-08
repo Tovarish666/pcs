@@ -73,7 +73,7 @@ def with_n(m, c):
 
 def one_arg(args, name):
     if len(args) != 1:
-        raise Fail("hivelink %s N" % name)
+        raise Fail("нужен один номер модема: hivelink %s N" % name)
     return args[0]
 
 

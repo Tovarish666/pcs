@@ -360,9 +360,22 @@ def ensure(size, log):
     if not st["dkms"]:
         raise Fail("на диске штатный rndis_host (%s) — DKMS не подменил модуль" % (st["file"] or "?"))
     if st["size"] != size:
+        if secure_boot():
+            raise Fail("модуль не загрузился: включён Secure Boot, а модуль DKMS не подписан ключом MOK — "
+                       "выключи Secure Boot в ВМ или зарегистрируй ключ (mokutil --import)")
         raise Fail("в памяти rx_urb_size_override=%s, нужно %d: модуль не перезагрузился — "
                    "отключи модемы с rndis_host или перезагрузи машину" % (st["size"], size))
     return st
+
+
+def secure_boot():
+    for f in glob.glob("/sys/firmware/efi/efivars/SecureBoot-*"):
+        try:
+            with open(f, "rb") as fh:
+                return fh.read()[-1:] == b"\x01"
+        except OSError:
+            pass
+    return False
 
 
 def drop_legacy(log):
