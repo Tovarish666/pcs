@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""vmodem-api — веб-морда настоящего модема на адресе виртуального.
+"""Веб-морда настоящего модема на адресе виртуального (proxyveth, режим usb).
 
-    vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --socks-user user
-    vmodem-api --virt 64 --real 101 --socks 10.0.0.5:1080 --probe
+    python3 modem_web.py --virt 64 --real 101 --socks 10.0.0.5:1080 --socks-user user
+    python3 modem_web.py --virt 64 --real 101 --socks 10.0.0.5:1080 --probe
+
+Запускается юнитом proxyveth-web@N.
 
 Слушает 192.168.<virt>.1:80 и пересылает запросы настоящему модему
-192.168.<real>.1:80 через SOCKS5. Пароль прокси — в VMODEM_SOCKS_PASS или
+192.168.<real>.1:80 через SOCKS5. Пароль прокси — в PROXYVETH_SOCKS_PASS или
 в файле (--socks-pass-file): в аргументах его видно в `ps`.
 
 Почему не хватает NAT. Прошивка E3372 сверяет заголовок Host со своим
@@ -25,7 +27,7 @@
 
 Перезагрузка (--on-reboot). Настоящий модем после Control=1 пропадает с USB
 и возвращается, когда загрузится. Когда модему ушла перезагрузка, запускается
-заданная команда — vmodem вынимает USB до возвращения настоящего модема.
+заданная команда — proxyveth вынимает USB до возвращения настоящего модема.
 """
 
 import argparse
@@ -64,7 +66,7 @@ BLOCKED_POST = (
 BLOCKED_BODY = (b'<?xml version="1.0" encoding="UTF-8"?>\r\n'
                 b"<error><code>100003</code><message>No rights</message></error>\r\n")
 
-log = logging.getLogger("vmodem-api")
+log = logging.getLogger("proxyveth-web")
 
 
 # ── SOCKS5 ─────────────────────────────────────────────────────────────────
@@ -314,12 +316,12 @@ class Proxy:
             self.errors += 1
             log.error("%s %s — %s", method.decode("latin1"), path.decode("latin1"), e)
             await self.reply(cwriter, b"HTTP/1.1 502 Bad Gateway",
-                             b"vmodem-api: %s\r\n" % str(e).encode(), b"text/plain")
+                             b"proxyveth-web: %s\r\n" % str(e).encode(), b"text/plain")
         except (asyncio.TimeoutError, ValueError) as e:
             self.errors += 1
             log.error("%s %s — %s", method.decode("latin1"), path.decode("latin1"), e)
             await self.reply(cwriter, b"HTTP/1.1 504 Gateway Timeout",
-                             b"vmodem-api: %s\r\n" % str(e).encode(), b"text/plain")
+                             b"proxyveth-web: %s\r\n" % str(e).encode(), b"text/plain")
         except (ConnectionError, OSError):
             pass
         finally:
@@ -490,28 +492,28 @@ def listen_in(netns, host, port):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        prog="vmodem-api",
+        prog="proxyveth-web",
         description="Веб-морда настоящего модема на адресе виртуального.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Пароль прокси: VMODEM_SOCKS_PASS или --socks-pass-file.")
+        epilog="Пароль прокси: PROXYVETH_SOCKS_PASS или --socks-pass-file.")
     ap.add_argument("--virt", type=octet, required=True, help="октет виртуального модема (адрес 192.168.<virt>.1)")
     ap.add_argument("--real", type=octet, required=True, help="октет настоящего модема за прокси")
     ap.add_argument("--socks", required=True, help="SOCKS5 host:port")
-    ap.add_argument("--socks-user", default=os.environ.get("VMODEM_SOCKS_USER") or None)
+    ap.add_argument("--socks-user", default=os.environ.get("PROXYVETH_SOCKS_USER") or None)
     ap.add_argument("--socks-pass-file", help="файл с паролем прокси")
     ap.add_argument("--listen", help="что слушать (по умолчанию 192.168.<virt>.1:80)")
-    ap.add_argument("--netns", help="слушать внутри этого netns (/run/netns/vmN), остальное — отсюда")
+    ap.add_argument("--netns", help="слушать внутри этого netns (/run/netns/pvN), остальное — отсюда")
     ap.add_argument("--on-reboot", help="команда, когда модему ушла перезагрузка (Control=1)")
     ap.add_argument("--probe", action="store_true", help="разовая проверка и выход")
     ap.add_argument("--log-level", default="info", choices=("debug", "info", "warning", "error"))
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()),
-                        format="%(asctime)s [vmodem-api] %(levelname)s %(message)s",
+                        format="%(asctime)s [proxyveth-web] %(levelname)s %(message)s",
                         datefmt="%F %T")
 
     args.socks = parse_hostport(args.socks, "--socks")
-    args.socks_pass = os.environ.get("VMODEM_SOCKS_PASS")
+    args.socks_pass = os.environ.get("PROXYVETH_SOCKS_PASS")
     if args.socks_pass_file:
         try:
             with open(args.socks_pass_file) as f:
@@ -536,7 +538,7 @@ def main(argv=None):
         addr = server.sockets[0].getsockname()
         log.info("слушаю %s:%d → модем %s через SOCKS5 %s:%d",
                  addr[0], addr[1], proxy.real_ip, proxy.proxy[0], proxy.proxy[1])
-        # Порт пишем в stdout: тестам и vmodem он нужен, когда просили 0.
+        # Порт пишем в stdout: тестам он нужен, когда просили 0.
         print("listening %s:%d" % (addr[0], addr[1]), flush=True)
         async with server:
             await server.serve_forever()
