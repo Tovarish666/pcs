@@ -318,6 +318,19 @@ def test_source():
     check("table pull при source local без ссылки на Google — понятная ошибка", rc == 1 and "ссылки на Google-таблицу нет" in d["error"], d)
     rc, d = ok_json("table", "edit")
     check("table edit — только в терминале", rc == 1 and "терминале" in d["error"], d)
+    real_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO("n,real,proxy\n7,8,h.example:1080:u:p\n")
+        rc, d = ok_json("table", "put")
+        check("table put — копия со stdin (так сохраняет панель)", d["ok"] and d["data"]["ok"] == [7]
+              and open(cli.TABLE).read().startswith("n,real,proxy\n7,8,"), d)
+        sys.stdin = io.StringIO("что-то не то\n")
+        rc, d = ok_json("table", "put")
+        check("table put без годных строк — отказ, копия цела", rc == 1 and "годной" in d["error"]
+              and "7,8," in open(cli.TABLE).read(), d)
+    finally:
+        sys.stdin = real_stdin
+    open(cli.TABLE, "w").write(CSV)
     os.unlink(cli.TABLE)
     rc, d = ok_json("source", "local")
     check("source local без копии — пустая копия с шапкой", rc == 0 and open(cli.TABLE).read().startswith("n,real,proxy"), d)

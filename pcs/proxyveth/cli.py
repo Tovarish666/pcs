@@ -41,7 +41,7 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
 
   proxyveth mode [usb|gw] [--yes]       режим сервера; смена — снять всё своё и поднять в новом
   proxyveth source [URL|local]          источник таблицы; local — главной становится локальная копия
-  proxyveth table [show|pull|edit]      показать / подтянуть из Google / открыть копию в $EDITOR
+  proxyveth table [show|pull|edit|put]  показать / из Google / копия в $EDITOR / копия со stdin
   proxyveth lint                        проверить таблицу, ничего не трогая
   proxyveth sync [--force]              привести модемы к таблице (таймер делает это сам)
   proxyveth up|down|restart N|all       down и restart всех — с --yes
@@ -392,6 +392,22 @@ def cmd_table(a):
                 src, len(t["desired"]), len(t["disabled"]), len(t["invalid"])))
             show_problems(t["problems"])
             return 0, summary(t)
+    if act == "put":
+        # Таблица со stdin в локальную копию — так её сохраняет панель
+        text = sys.stdin.read()
+        if not text.strip() or "\0" in text:
+            raise Fail("таблица пустая — не сохраняю")
+        d, dis, inv, probs = table.lint(text, net.local_octets(), mp_tables=(mode == "usb"))
+        if not d and not dis:
+            raise Fail("в таблице ни одной годной строки (%s) — копию не трогаю" % (probs[0] if probs else "пусто"))
+        with held():
+            os.makedirs(ETC, mode=0o700, exist_ok=True)
+            wr(TABLE + ".tmp", text, 0o600)
+            os.replace(TABLE + ".tmp", TABLE)
+        show_problems(probs)
+        say("  копия сохранена: годных %d, выключено %d, отбраковано %d" % (len(d), len(dis), len(inv)))
+        return 0, {"changed": True, "ok": sorted(d), "disabled": sorted(dis), "invalid": sorted(inv),
+                   "problems": probs, "source": cfg.get("source") or None}
     # edit
     if a.json or not sys.stdin.isatty():
         raise Fail("table edit — только в терминале")
@@ -612,7 +628,7 @@ def parser():
     p.add_argument("url", nargs="?")
     p.add_argument("--force", action="store_true")
     p = sub.add_parser("table", add_help=False)
-    p.add_argument("action", nargs="?", choices=("show", "pull", "edit"))
+    p.add_argument("action", nargs="?", choices=("show", "pull", "edit", "put"))
     p.add_argument("--yes", action="store_true")
     p = sub.add_parser("sync", add_help=False)
     p.add_argument("--force", action="store_true")

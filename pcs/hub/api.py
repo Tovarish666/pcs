@@ -76,8 +76,9 @@ def delete_server(id, confirm):
     return srv.delete(s["id"])
 
 
-def run(id, part, args, timeout=300):
-    """Конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост (там только hivelink)."""
+def run(id, part, args, timeout=300, input=None):
+    """Конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост (там только hivelink).
+    input — текст на stdin команды (таблица proxyveth, пароль modlink): секреты не в командной строке."""
     if part not in PARTS:
         raise Fail("часть — одна из: %s" % ", ".join(PARTS))
     if not isinstance(args, (list, tuple)) or not all(isinstance(a, (str, int)) for a in args):
@@ -86,8 +87,8 @@ def run(id, part, args, timeout=300):
     if t == store.HOST:
         if part != "hivelink":
             raise Fail("на хосте есть только hivelink; %s — на серверах" % part)
-        return remote.local_part(part, list(args), timeout=timeout)
-    return remote.part(t, part, list(args), timeout=timeout)
+        return remote.local_part(part, list(args), timeout=timeout, input=input)
+    return remote.part(t, part, list(args), timeout=timeout, input=input)
 
 
 def dns_fix(target, dns=None):
