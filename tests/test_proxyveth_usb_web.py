@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Проверка agent/vmodem-api без модема, без прокси и без root.
+"""Проверка pcs/proxyveth/modem_web.py без модема, без прокси и без root.
 
 Поднимаем заглушку веб-морды Huawei и заглушку SOCKS5, между ними запускаем
-настоящий vmodem-api и смотрим, что видит модем и что получает клиент.
+настоящую веб-морду модема (proxyveth-web) и смотрим, что видит модем и что получает клиент.
 
-    python3 tests/test_api.py
+    python3 tests/test_proxyveth_usb_web.py
 """
 import asyncio
 import os
@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-API = os.path.join(HERE, os.pardir, "agent", "vmodem-api")
+API = os.path.join(HERE, os.pardir, "pcs", "proxyveth", "modem_web.py")
 VIRT, REAL = 64, 101
 REAL_IP = "192.168.%d.1" % REAL
 VIRT_IP = "192.168.%d.1" % VIRT
@@ -201,7 +201,7 @@ async def request(port, method="GET", path="/", body=b"", headers=(), raw=None):
 
 
 async def start_api(socks_port, password=PASSWORD, on_reboot=None):
-    env = dict(os.environ, VMODEM_SOCKS_PASS=password, PYTHONUNBUFFERED="1")
+    env = dict(os.environ, PROXYVETH_SOCKS_PASS=password, PYTHONUNBUFFERED="1")
     extra = ["--on-reboot", on_reboot] if on_reboot else []
     proc = await asyncio.create_subprocess_exec(
         sys.executable, API, "--virt", str(VIRT), "--real", str(REAL),
@@ -211,7 +211,7 @@ async def start_api(socks_port, password=PASSWORD, on_reboot=None):
     line = await asyncio.wait_for(proc.stdout.readline(), timeout=10)
     m = re.search(rb"listening 127\.0\.0\.1:(\d+)", line)
     if not m:
-        raise RuntimeError("vmodem-api не сказал, что слушает: %r" % line)
+        raise RuntimeError("proxyveth-web не сказал, что слушает: %r" % line)
     return proc, int(m.group(1))
 
 
@@ -227,7 +227,7 @@ async def main():
     flag = os.path.join(tempfile.mkdtemp(), "rebooted")
     proc, port = await start_api(socks.port, on_reboot="touch %s" % flag)
 
-    print("vmodem-api:")
+    print("веб-морда модема (proxyveth-web):")
     try:
         status, headers, body = await request(port, path="/api/webserver/SesTokInfo")
         check("сессия отдаётся", status == 200 and b"tok123" in body, (status, body[:80]))
@@ -303,18 +303,26 @@ async def main():
         bad_proc, bad_port = await start_api(socks.port, password="wrong")
         try:
             status, _, body = await request(bad_port, path="/api/webserver/SesTokInfo")
-            check("неверный пароль прокси → 502", status == 502 and b"vmodem-api" in body)
+            check("неверный пароль прокси → 502", status == 502 and b"proxyveth-web" in body, body[:80])
         finally:
             bad_proc.terminate()
             await bad_proc.wait()
 
-        env = dict(os.environ, VMODEM_SOCKS_PASS=PASSWORD)
+        env = dict(os.environ, PROXYVETH_SOCKS_PASS=PASSWORD)
         probe = await asyncio.create_subprocess_exec(
             sys.executable, API, "--virt", str(VIRT), "--real", str(REAL),
             "--socks", "127.0.0.1:%d" % socks.port, "--socks-user", USER, "--probe",
             env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, _ = await probe.communicate()
         check("--probe видит модем", probe.returncode == 0 and b"9GVDW17215000571" in out, out[:200])
+
+        gone = await asyncio.create_subprocess_exec(
+            sys.executable, API, "--virt", str(VIRT), "--real", str(REAL), "--socks", "127.0.0.1:1",
+            "--netns", "/run/netns/нет-такого", "--listen", "127.0.0.1:0",
+            env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        _, err = await asyncio.wait_for(gone.communicate(), 10)
+        check("netns модема пропал — выход с понятной ошибкой, без трассы",
+              gone.returncode == 1 and "не могу слушать".encode() in err and b"Traceback" not in err, err[-300:])
     finally:
         proc.terminate()
         await proc.wait()
