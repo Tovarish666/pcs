@@ -222,7 +222,14 @@ def setup(s, mode=None, sheet="", fresh=False):
             ui.ok("DNS сервера: %s" % " ".join(dnsfix.DEFAULT))
         except Fail as e:
             ui.warn(str(e))
-    if had:
+    if had and mode and fresh:
+        # Новый сервер: режим ещё не выбран, `proxyveth mode` сам его и подготовит
+        ui.hdr("proxyveth mode %s" % mode)
+        if remote.stream(s, "proxyveth mode %s --yes" % shlex.quote(mode)) != 0:
+            raise Fail("proxyveth mode %s на сервере %s не прошёл — см. выше" % (mode, s["id"]))
+        s["mode"] = mode
+        store.save(s)
+    elif had:
         ui.hdr("proxyveth setup")
         if remote.stream(s, "proxyveth setup") != 0:
             raise Fail("proxyveth setup на сервере %s не прошёл — см. выше" % s["id"])

@@ -356,8 +356,8 @@ s = store.load(2000)
 quiet = io.StringIO()
 with redirect_stdout(quiet):
     servers.setup(s, mode="gw", sheet="https://docs.google.com/x", fresh=True)
-check("новая ВМ: код → DNS → proxyveth setup → mode → modlink setup → таблица → sync", calls == [
-    "deliver", "pcs-node dns-fix", "proxyveth setup", "proxyveth mode gw --yes", "modlink setup",
+check("новая ВМ: код → DNS → mode (он же готовит сервер) → modlink setup → таблица → sync", calls == [
+    "deliver", "pcs-node dns-fix", "proxyveth mode gw --yes", "modlink setup",
     "proxyveth source https://docs.google.com/x", "proxyveth sync"], calls)
 calls.clear()
 with redirect_stdout(quiet):
