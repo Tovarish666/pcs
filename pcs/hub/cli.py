@@ -1,1001 +1,593 @@
-#!/usr/bin/env python3
-"""pcs — Proxy Control Service на хосте Proxmox: серверы под виртуальные модемы.
+"""pcs — хаб PCS на хосте Proxmox: серверы, меню, доступы, панель (docs/ARCHITECTURE.md, §6).
 
-    pcs                                   меню
-    pcs server create [параметры]         ВМ Ubuntu 24.04 → ОС настроена → агент vmodem
-                                          → (модемы по таблице) → (mobileproxy.space)
-    pcs server adopt VMID [--ip IP]       взять под управление существующую ВМ
-    pcs server list | use VMID | info [VMID] | update [VMID|--all] | delete VMID
-    pcs status                            все серверы и их модемы одной таблицей
-    pcs m [команда vmodem ...]            модемы активного сервера: status, sync, diag N,
-                                          rotate N, reboot N, source URL, proxy on, notify …
-    pcs mpspace install|auth|check        софт mobileproxy.space на сервере
-    pcs soft run URL                      свой софт установочным скриптом
-    pcs dns | passwd | ssh | exec 'cmd'   обслуживание сервера
-    pcs update                            обновить PCS с GitHub и агентов на серверах
-
-Везде: --server VMID — не активный сервер. Состояние — /etc/pcs (права 600).
+Здесь только разбор командной строки и печать человеку; дело делают
+servers, ops, remote, web, jobs. Панель зовёт те же функции через api.
 """
 import argparse
-import getpass
-import glob
-import hashlib
 import json
 import os
-import re
-import secrets
 import shlex
-import shutil
 import subprocess
 import sys
-import tempfile
-import time
-import urllib.request
-
-VERSION = "4.0.0"
-ROOT = os.path.dirname(os.path.realpath(__file__))
-ETC = os.environ.get("PCS_ETC", "/etc/pcs")
-SRV_DIR = os.path.join(ETC, "servers")
-KEY = os.path.join(ETC, "ssh", "id_ed25519")
-KNOWN = os.path.join(ETC, "ssh", "known_hosts")
-CM_DIR = "/run/pcs"
-LOG = "/var/log/pcs/pcs.log"
-def _source():
-    """Откуда PCS поставлен (install.sh пишет .source): обновляться оттуда же."""
-    src = {"PCS_REPO": "Tovarish666/pcs", "PCS_BRANCH": "main"}
-    try:
-        for line in open(os.path.join(ROOT, ".source")):
-            if "=" in line:
-                k, v = line.strip().split("=", 1)
-                src[k] = v
-    except OSError:
-        pass
-    return os.environ.get("PCS_REPO", src["PCS_REPO"]), os.environ.get("PCS_BRANCH", src["PCS_BRANCH"])
-
-
-REPO, BRANCH = _source()
-IMG_URL = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
-SUMS_URL = "https://cloud-images.ubuntu.com/noble/current/SHA256SUMS"
-IMG_PATH = "/var/lib/vz/template/iso/ubuntu-24.04-noble.img"
-AGENT_FILES = ("vmodem", "vmodem-api")
-
-TTY = sys.stdout.isatty()
-C = {k: (v if TTY and not os.environ.get("NO_COLOR") else "") for k, v in
-     dict(g="\033[32m", r="\033[31m", y="\033[33m", c="\033[36m", b="\033[1m", d="\033[2m", x="\033[0m").items()}
-
-
-class Fail(Exception):
-    pass
-
-
-def _log(msg):
-    try:
-        os.makedirs(os.path.dirname(LOG), exist_ok=True)
-        with open(LOG, "a") as f:
-            f.write("%s %s\n" % (time.strftime("%F %T"), msg))
-    except OSError:
-        pass
-
-
-def ok(m):
-    _log("OK   " + m)
-    print("  %s✓%s %s" % (C["g"], C["x"], m), flush=True)
-
-
-def warn(m):
-    _log("WARN " + m)
-    print("  %s⚠%s %s" % (C["y"], C["x"], m), flush=True)
-
-
-def step(m):
-    _log("STEP " + m)
-    print("  %s→%s %s" % (C["d"], C["x"], m), flush=True)
-
-
-def hdr(m):
-    _log("==== " + m)
-    print("\n%s── %s ──%s" % (C["b"], m, C["x"]), flush=True)
-
-
-def sh(*cmd, check=True, timeout=None, input=None):
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=input)
-    except FileNotFoundError:
-        raise Fail("нет программы %s" % cmd[0])
-    except subprocess.TimeoutExpired:
-        raise Fail("%s: не уложилось в %sс" % (cmd[0], timeout))
-    if check and r.returncode != 0:
-        raise Fail("%s: %s" % (" ".join(cmd[:4]), (r.stderr or r.stdout).strip()[:300]))
-    return r
-
-
-def ask(q, default="", secret=False):
-    if not TTY:
-        return default
-    if secret:
-        return getpass.getpass("  %s?%s %s: " % (C["c"], C["x"], q))
-    a = input("  %s?%s %s%s: " % (C["c"], C["x"], q, (" %s[%s]%s" % (C["d"], default, C["x"])) if default else ""))
-    return a.strip() or default
-
-
-def confirm(q, default=False):
-    if os.environ.get("PCS_YES"):
-        return True
-    if not TTY:
-        return default
-    a = ask(q + " (да/нет)", "да" if default else "нет").lower()
-    return a in ("да", "д", "yes", "y")
-
-
-# ── серверы ────────────────────────────────────────────────────────────────
-def srv_path(vmid):
-    return os.path.join(SRV_DIR, "%s.json" % vmid)
-
-
-def load_srv(vmid=None):
-    vmid = vmid or active_id()
-    if not vmid:
-        raise Fail("сервер не выбран: pcs server use VMID (список — pcs server list)")
-    try:
-        return json.load(open(srv_path(vmid)))
-    except OSError:
-        raise Fail("сервер %s PCS не знает: pcs server adopt %s" % (vmid, vmid))
-
-
-def save_srv(s):
-    os.makedirs(SRV_DIR, mode=0o700, exist_ok=True)
-    tmp = srv_path(s["id"]) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(s, f, indent=1, ensure_ascii=False)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, srv_path(s["id"]))
-
-
-def all_srv():
-    out = []
-    for f in sorted(glob.glob(os.path.join(SRV_DIR, "*.json")), key=lambda p: int(re.sub(r"\D", "", os.path.basename(p)) or 0)):
-        try:
-            out.append(json.load(open(f)))
-        except (OSError, ValueError):
-            pass
-    return out
-
-
-def active_id():
-    try:
-        return open(os.path.join(ETC, "active")).read().strip()
-    except OSError:
-        return ""
-
-
-def set_active(vmid):
-    os.makedirs(ETC, mode=0o700, exist_ok=True)
-    with open(os.path.join(ETC, "active"), "w") as f:
-        f.write(str(vmid) + "\n")
-
-
-def qm_status(vmid):
-    r = sh("qm", "status", str(vmid), check=False)
-    return r.stdout.split(":", 1)[1].strip() if r.returncode == 0 else "нет в Proxmox"
-
-
-# ── SSH ────────────────────────────────────────────────────────────────────
-def ensure_key():
-    if not os.path.exists(KEY):
-        os.makedirs(os.path.dirname(KEY), mode=0o700, exist_ok=True)
-        sh("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "pcs@%s" % os.uname().nodename, "-f", KEY)
-    return open(KEY + ".pub").read().strip()
-
-
-def ssh_base(ip, tty=False):
-    os.makedirs(CM_DIR, mode=0o700, exist_ok=True)
-    return ["ssh", "-i", KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", "UserKnownHostsFile=" + KNOWN, "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
-            "-o", "ControlMaster=auto", "-o", "ControlPath=%s/cm-%%C" % CM_DIR, "-o", "ControlPersist=120",
-            "-o", "LogLevel=ERROR"] + (["-t"] if tty else []) + ["root@" + ip]
-
-
-def ssh(s, cmd, check=True, timeout=None, input=None):
-    return sh(*ssh_base(s["ip"]), cmd, check=check, timeout=timeout, input=input)
-
-
-def ssh_stream(s, cmd, tty=False):
-    """Выполнить на сервере с живым выводом. → код возврата."""
-    return subprocess.call(ssh_base(s["ip"], tty=tty) + [cmd])
-
-
-def ssh_alive(ip):
-    return subprocess.call(ssh_base(ip) + ["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=30) == 0
-
-
-def forget_host(ip):
-    if os.path.exists(KNOWN):
-        sh("ssh-keygen", "-f", KNOWN, "-R", ip, check=False)
-    for f in glob.glob(os.path.join(CM_DIR, "cm-*")):
-        try:
-            os.unlink(f)
-        except OSError:
-            pass
-
-
-def wait_ssh(ip, limit=600, what="SSH"):
-    t0 = time.time()
-    said = 0
-    while time.time() - t0 < limit:
-        try:
-            if ssh_alive(ip):
-                return time.time() - t0
-        except subprocess.TimeoutExpired:
-            pass
-        if int(time.time() - t0) // 60 > said:
-            said = int(time.time() - t0) // 60
-            step("…жду %s на %s (%d мин)" % (what, ip, said))
-        time.sleep(5)
-    raise Fail("%s на %s не поднялся за %d с" % (what, ip, limit))
-
-
-def with_password(ip, password, cmd):
-    """Один раз зайти по паролю (чтобы положить ключ) — через SSH_ASKPASS, без sshpass."""
-    d = tempfile.mkdtemp()
-    ap = os.path.join(d, "askpass")
-    with open(ap, "w") as f:
-        f.write('#!/bin/sh\nprintf "%s\\n" "$PCS_PASS"\n')
-    os.chmod(ap, 0o700)
-    env = dict(os.environ, SSH_ASKPASS=ap, SSH_ASKPASS_REQUIRE="force", DISPLAY=":0", PCS_PASS=password)
-    try:
-        return subprocess.run(["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + KNOWN,
-                               "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no",
-                               "-o", "ConnectTimeout=10", "-o", "NumberOfPasswordPrompts=1", "root@" + ip, cmd],
-                              env=env, capture_output=True, text=True, timeout=60)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-
-
-# ── Proxmox ────────────────────────────────────────────────────────────────
-def used_ids():
-    out = set()
-    for f in glob.glob("/etc/pve/nodes/*/qemu-server/*.conf") + glob.glob("/etc/pve/nodes/*/lxc/*.conf"):
-        out.add(int(os.path.basename(f)[:-5]))
-    return out
-
-
-def next_id():
-    used = used_ids()
-    for base in range(1000, 100000, 1000):
-        if base not in used:
-            return base
-    return int(sh("pvesh", "get", "/cluster/nextid").stdout.strip())
-
-
-def host_net():
-    r = sh("ip", "-4", "route", "get", "1.1.1.1", check=False).stdout
-    gw = re.search(r"via (\S+)", r)
-    dev = re.search(r"dev (\S+)", r)
-    src = re.search(r"src (\S+)", r)
-    mask = "24"
-    if dev:
-        m = re.search(r"inet \S+/(\d+)", sh("ip", "-4", "-o", "addr", "show", dev.group(1), check=False).stdout)
-        mask = m.group(1) if m else "24"
-    return (gw.group(1) if gw else ""), (src.group(1) if src else ""), mask
-
-
-def storages():
-    return [l.split()[0] for l in sh("pvesm", "status", "--content", "images", check=False).stdout.splitlines()[1:] if l.strip()]
-
-
-def ensure_image():
-    name = os.path.basename(IMG_URL)
-    sums = urllib.request.urlopen(SUMS_URL, timeout=30).read().decode()
-    m = re.search(r"^([0-9a-f]{64}) \*?%s$" % re.escape(name), sums, re.M)
-    if not m:
-        raise Fail("нет суммы образа в %s" % SUMS_URL)
-
-    def digest(path):
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    if os.path.exists(IMG_PATH) and digest(IMG_PATH) == m.group(1):
-        ok("образ Ubuntu 24.04 на месте, сумма совпала")
-        return
-    step("качаю образ Ubuntu 24.04 (~600 МБ)")
-    os.makedirs(os.path.dirname(IMG_PATH), exist_ok=True)
-    sh("wget", "-q", "-O", IMG_PATH + ".part", IMG_URL, timeout=1800)
-    if digest(IMG_PATH + ".part") != m.group(1):
-        os.unlink(IMG_PATH + ".part")
-        raise Fail("образ скачался, но сумма не совпала")
-    os.replace(IMG_PATH + ".part", IMG_PATH)
-    ok("образ скачан и проверен")
-
-
-def ensure_snippets():
-    if "local" in sh("pvesm", "status", "--content", "snippets", check=False).stdout:
-        os.makedirs("/var/lib/vz/snippets", exist_ok=True)
-        return
-    cur = re.search(r"^dir: local\n(?:\s+.*\n)*?\s+content (\S+)", open("/etc/pve/storage.cfg").read(), re.M)
-    sh("pvesm", "set", "local", "--content", (cur.group(1) + ",snippets") if cur else "iso,vztmpl,backup,snippets")
-    os.makedirs("/var/lib/vz/snippets", exist_ok=True)
-
-
-def vm_mac(vmid):
-    m = re.search(r"^net0:.*?([0-9A-Fa-f:]{17})", sh("qm", "config", str(vmid)).stdout, re.M)
-    return m.group(1).lower() if m else ""
-
-
-def link_local(mac):
-    """IPv6 link-local по MAC (EUI-64) — так его строит systemd-networkd в Ubuntu."""
-    b = [int(x, 16) for x in mac.split(":")]
-    b[0] ^= 2
-    w = [b[0] << 8 | b[1], b[2] << 8 | 0xff, 0xfe << 8 | b[3], b[4] << 8 | b[5]]
-    return "fe80::" + ":".join("%x" % x for x in w)
-
-
-def vm_ip_via_ll(vmid, bridge):
-    """Пока guest agent не поставлен, ВМ уже отвечает по IPv6 link-local, а ключ PCS
-    cloud-init кладёт в первые секунды: спрашиваем её IPv4 прямо по SSH."""
-    mac = vm_mac(vmid)
-    if not mac:
-        return ""
-    r = subprocess.run(["ssh", "-i", KEY, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
-                        "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5", "-o", "LogLevel=ERROR",
-                        "root@%s%%%s" % (link_local(mac), bridge),
-                        "ip -4 -o addr show scope global | awk '{split($4,a,\"/\"); print a[1]; exit}'"],
-                       capture_output=True, text=True, timeout=20)
-    ip = r.stdout.strip()
-    return ip if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", ip) else ""
-
-
-def vm_ip(vmid, bridge="vmbr0"):
-    """Адрес основной сетевухи ВМ: guest agent (по MAC net0), таблица соседей,
-    SSH по IPv6 link-local."""
-    mac = vm_mac(vmid)
-    r = sh("qm", "guest", "cmd", str(vmid), "network-get-interfaces", check=False, timeout=15)
-    if r.returncode == 0:
-        try:
-            for i in json.loads(r.stdout):
-                if (i.get("hardware-address") or "").lower() == mac:
-                    for a in i.get("ip-addresses", []):
-                        if a.get("ip-address-type") == "ipv4":
-                            return a["ip-address"]
-        except ValueError:
-            pass
-    for line in sh("ip", "-4", "neigh", "show", check=False).stdout.splitlines():
-        if mac and mac in line.lower() and "FAILED" not in line:
-            return line.split()[0]
-    try:
-        return vm_ip_via_ll(vmid, bridge) if os.path.exists(KEY) else ""
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
-
-
-def user_data(name, password, pubkey, dns):
-    h = sh("openssl", "passwd", "-6", "-stdin", input=password).stdout.strip()
-    q = lambda v: "'" + v.replace("'", "''") + "'"
-    return """#cloud-config
-# pcs %(ver)s — сервер под виртуальные модемы
-hostname: %(name)s
-manage_etc_hosts: true
-disable_root: false
-ssh_pwauth: true
-users:
-  - name: root
-    lock_passwd: false
-    ssh_authorized_keys:
-      - %(key)s
-chpasswd:
-  expire: false
-  users:
-    - {name: root, password: %(hash)s, type: hash}
-timezone: Europe/Moscow
-package_update: true
-package_upgrade: true
-packages:
-  - qemu-guest-agent
-  - linux-image-extra-virtual
-  - linux-headers-virtual
-  - dkms
-  - dnsmasq-base
-  - udhcpc
-  - python3
-  - python3-yaml
-  - curl
-  - wget
-  - jq
-  - mc
-  - htop
-  - iptables
-  - ca-certificates
-write_files:
-  - path: /etc/ssh/sshd_config.d/10-pcs.conf
-    content: |
-      # 10-, а не 99-: sshd берёт первое значение, а образ кладёт «нет» в 60-cloudimg
-      PermitRootLogin yes
-      PasswordAuthentication yes
-      KbdInteractiveAuthentication no
-      UseDNS no
-  - path: /etc/systemd/resolved.conf.d/99-pcs.conf
-    content: |
-      [Resolve]
-      DNS=%(dns)s
-      FallbackDNS=9.9.9.9 1.0.0.1
-      Domains=~.
-runcmd:
-  - [systemctl, enable, --now, qemu-guest-agent]
-  - [systemctl, disable, --now, unattended-upgrades, apt-daily.timer, apt-daily-upgrade.timer]
-  - [systemctl, restart, systemd-resolved]
-  - [systemctl, restart, ssh]
-  - [touch, /var/lib/pcs-cloud-init-done]
-""" % dict(ver=VERSION, name=name, key=pubkey, hash=q(h), dns=" ".join(dns))
-
-
-# ── агент на сервере ───────────────────────────────────────────────────────
-def push_agent(s, setup=True):
-    for f in AGENT_FILES:
-        src = os.path.join(ROOT, "agent", f)
-        ssh(s, "cat > /usr/local/sbin/.%s.new && chmod 755 /usr/local/sbin/.%s.new && mv -f /usr/local/sbin/.%s.new /usr/local/sbin/%s"
-            % (f, f, f, f), input=open(src).read())
-    ver = ssh(s, "vmodem version").stdout.strip()
-    ok("агент vmodem %s на %s" % (ver, s["ip"]))
-    if setup:
-        step("vmodem setup (модули, dummy_hcd через dkms, sing-box, службы)")
-        if ssh_stream(s, "vmodem setup") != 0:
-            raise Fail("vmodem setup не прошёл — см. выше")
-    s["agent"] = ver
-    save_srv(s)
-
-
-def migrate_vmns(s):
-    """Прототип vmns (v2) → vmodem: модемы те же, таблица та же."""
-    r = ssh(s, "test -x /usr/local/sbin/vmns && cat /etc/vmns/vmns.json 2>/dev/null", check=False)
-    if r.returncode != 0:
-        return
-    src = ""
-    try:
-        src = json.loads(r.stdout or "{}").get("source", "")
-    except ValueError:
-        pass
-    hdr("Переезд с прототипа vmns на vmodem")
-    ssh(s, "systemctl disable --now vmns-sync.timer 2>/dev/null; "
-           "for n in $(ip netns list | awk '/^vm[0-9]+/{sub(/^vm/,\"\",$1); print $1}'); do vmns down $n >/dev/null 2>&1; done; "
-           "rm -f /etc/systemd/system/vmns-* /usr/local/sbin/vmns /etc/modprobe.d/vmns.conf /etc/modules-load.d/vmns.conf; "
-           "systemctl daemon-reload", timeout=600)
-    ok("модемы прототипа сняты, его службы убраны")
-    return src
-
-
-# ── команды: сервер ────────────────────────────────────────────────────────
-def cmd_server_create(a):
-    need_pve()
-    pub = ensure_key()
-    hdr("Новый сервер под виртуальные модемы")
-    vmid = int(a.id or ask("VM ID", str(next_id())))
-    if str(vmid) in {str(x) for x in used_ids()}:
-        if not a.replace:
-            raise Fail("ВМ %d уже есть (пересоздать: --replace)" % vmid)
-        if not confirm("Удалить ВМ %d со всеми дисками и создать заново?" % vmid):
-            raise Fail("отменено")
-        sh("qm", "stop", str(vmid), check=False)
-        sh("qm", "destroy", str(vmid), "--destroy-unreferenced-disks", "1", "--purge", "1", timeout=300)
-    name = a.name or ask("Имя", "mp%d" % vmid)
-    if not re.fullmatch(r"[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?", name):
-        raise Fail("недопустимое имя: %s" % name)
-    gw_def, src, mask = host_net()
-    cidr, gw = a.ip, a.gw
-    if not a.dhcp and not cidr:
-        cidr = ask("IP сервера с маской (Enter — DHCP; статика надёжнее для ЛК агрегатора), напр. %s/%s"
-                   % (re.sub(r"\.\d+$", ".60", src or "192.168.1.60"), mask), "")
-    if cidr:
-        if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+/\d+", cidr):
-            raise Fail("нужен формат IP/маска: %s" % cidr)
-        gw = gw or ask("Шлюз", gw_def) or gw_def
-    password = a.password or os.environ.get("PCS_PASSWORD") or (ask("Пароль root (Enter — сгенерировать)", secret=True) if TTY else "")
-    generated = not password
-    password = password or secrets.token_urlsafe(12)
-    dns = (a.dns or "1.1.1.1 8.8.8.8").split()
-    storage = a.storage or (("local-lvm" if "local-lvm" in storages() else (storages() or ["local"])[0]))
-
-    hdr("Образ")
-    ensure_image()
-    hdr("ВМ %d (%s): %d ядер, %d МБ, диск %d ГБ, %s" % (vmid, name, a.cores, a.ram, a.disk, cidr or "DHCP"))
-    sh("qm", "create", str(vmid), "--name", name, "--memory", str(a.ram), "--cores", str(a.cores),
-       "--cpu", "host", "--balloon", "0", "--net0", "virtio,bridge=%s" % a.bridge, "--ostype", "l26",
-       "--machine", "q35", "--scsihw", "virtio-scsi-single", "--agent", "enabled=1", "--serial0", "socket",
-       # без «QEMU Tablet» в lsusb: серверу мышь не нужна, а по ней видно виртуалку
-       "--tablet", "0",
-       "--onboot", "1", "--description", "pcs %s: сервер под виртуальные модемы" % VERSION)
-    sh("qm", "importdisk", str(vmid), IMG_PATH, storage, timeout=900)
-    disk = re.search(r"^unused\d+: (\S+)", sh("qm", "config", str(vmid)).stdout, re.M).group(1)
-    sh("qm", "set", str(vmid), "--scsi0", "%s,discard=on,ssd=1,iothread=1" % disk, "--boot", "order=scsi0")
-    sh("qm", "resize", str(vmid), "scsi0", "%dG" % a.disk)
-    ensure_snippets()
-    snip = "/var/lib/vz/snippets/pcs-%d.yaml" % vmid
-    with open(snip, "w") as f:
-        f.write(user_data(name, password, pub, dns))
-    os.chmod(snip, 0o600)
-    r = sh("qm", "set", str(vmid), "--ide2", "%s:cloudinit" % storage, check=False)
-    if r.returncode != 0:
-        sh("qm", "set", str(vmid), "--ide2", "local:cloudinit")
-    sh("qm", "set", str(vmid), "--cicustom", "user=local:snippets/pcs-%d.yaml" % vmid,
-       "--nameserver", " ".join(dns), "--ipconfig0", ("ip=%s,gw=%s" % (cidr, gw)) if cidr else "ip=dhcp")
-    sh("qm", "start", str(vmid))
-    ok("ВМ создана и запущена")
-
-    s = {"id": vmid, "name": name, "ip": cidr.split("/")[0] if cidr else "", "password": password,
-         "net": "static" if cidr else "dhcp", "created": time.strftime("%F %T"), "pcs": VERSION}
-    hdr("Первая загрузка: пакеты, обновление системы, ядро с USB-модулями")
-    t0 = time.time()
-    while not s["ip"]:
-        s["ip"] = vm_ip(vmid, a.bridge)
-        if time.time() - t0 > 900:
-            raise Fail("адрес ВМ не определился за 15 минут (qm terminal %d)" % vmid)
-        time.sleep(5)
-    forget_host(s["ip"])
-    save_srv(s)
-    ok("адрес %s" % s["ip"])
-    wait_ssh(s["ip"], 900)
-    step("жду cloud-init (apt upgrade идёт на ВМ, это несколько минут)")
-    ssh(s, "cloud-init status --wait >/dev/null 2>&1; test -f /var/lib/pcs-cloud-init-done", timeout=3600)
-    ok("cloud-init отработал за %d с" % (time.time() - t0))
-    need = ssh(s, "test -f /var/run/reboot-required && echo reboot; modinfo libcomposite >/dev/null 2>&1 || echo reboot",
-               check=False).stdout
-    if "reboot" in need:
-        step("перезагрузка на новое ядро с модулями USB")
-        boot = ssh(s, "cat /proc/sys/kernel/random/boot_id").stdout.strip()
-        ssh(s, "systemd-run --on-active=2 --collect systemctl reboot", check=False)
-        t1 = time.time()
-        while True:
-            time.sleep(5)
-            try:
-                if ssh_alive(s["ip"]) and ssh(s, "cat /proc/sys/kernel/random/boot_id", check=False).stdout.strip() not in ("", boot):
-                    break
-            except subprocess.TimeoutExpired:
-                pass
-            if time.time() - t1 > 600:
-                raise Fail("ВМ не вернулась после перезагрузки")
-        ok("ядро %s" % ssh(s, "uname -r").stdout.strip())
-    hdr("Агент vmodem")
-    push_agent(s)
-    set_active(vmid)
-    if a.sheet:
-        hdr("Модемы по таблице")
-        if ssh_stream(s, "vmodem source %s" % shlex.quote(a.sheet)) == 0:
-            ssh_stream(s, "vmodem sync")
-        else:
-            ssh_stream(s, "vmodem source --force %s" % shlex.quote(a.sheet))
-            warn("таблица пока не читается — модемы создадутся сами, когда откроется (pcs m status)")
-    if a.mpspace:
-        cmd_mpspace(argparse.Namespace(action="install", value=None, auth=a.auth, proxy=a.proxy, no_reboot=False, server=vmid))
-    hdr("Готово за %d мин" % ((time.time() - t0) // 60 + 1))
-    print_info(s, show_password=generated)
-    return 0
-
-
-def cmd_server_adopt(a):
-    need_pve()
-    pub = ensure_key()
-    vmid = a.vmid
-    old = {}
-    try:                                    # состояние старого PCS (v3): /etc/pcs/mp/<id>.conf
-        for line in open(os.path.join(ETC, "mp", "%s.conf" % vmid)):
-            if "=" in line and not line.startswith("#"):
-                k, v = line.rstrip("\n").split("=", 1)
-                old[k] = (shlex.split(v) or [""])[0]
-    except OSError:
-        pass
-    ip = a.ip or old.get("VM_IP") or vm_ip(vmid) or ask("IP ВМ %s" % vmid)
-    if not ip:
-        raise Fail("адрес ВМ неизвестен: --ip")
-    s = {"id": int(vmid), "name": sh("qm", "config", str(vmid)).stdout.split("name: ", 1)[-1].split("\n")[0],
-         "ip": ip, "password": a.password or old.get("VM_PASSWORD", ""), "net": old.get("VM_NET_MODE", "?"),
-         "created": "adopted %s" % time.strftime("%F %T"), "pcs": VERSION}
-    if not ssh_alive(ip):
-        pw = s["password"] or ask("Пароль root ВМ %s" % vmid, secret=True)
-        r = with_password(ip, pw, "mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
-                                  "grep -qxF %s /root/.ssh/authorized_keys 2>/dev/null || echo %s >> /root/.ssh/authorized_keys"
-                          % (shlex.quote(pub), shlex.quote(pub)))
-        if r.returncode != 0 or not ssh_alive(ip):
-            raise Fail("не зашёл по паролю: %s" % (r.stderr.strip() or "?"))
-        s["password"] = pw
-        ok("ключ PCS положен на ВМ")
-    save_srv(s)
-    src = migrate_vmns(s)
-    push_agent(s)
-    if src:
-        ssh_stream(s, "vmodem source %s && vmodem sync" % shlex.quote(src))
-    set_active(vmid)
-    ok("сервер %s (%s) под управлением PCS, активный" % (vmid, ip))
-    return 0
-
-
-def print_info(s, show_password=False):
-    ag = ""
-    try:
-        ag = ssh(s, "vmodem version; cat /etc/vmodem/config.json 2>/dev/null | python3 -c "
-                    "'import json,sys; print(json.load(sys.stdin).get(\"source\",\"\"))'", check=False, timeout=20).stdout.split("\n")
-    except Fail:
-        pass
-    print("""
-  Сервер %(id)s (%(name)s) — %(st)s
-    адрес           : %(ip)s   (SSH: pcs ssh, ключ PCS; root-пароль %(pw)s)
-    агент           : vmodem %(ag)s
-    таблица модемов : %(src)s
-    ЛК mobileproxy.space: Статический IP — внешний адрес, LocalIP %(ip)s, Root login root, SSH 22, OS Unix
-""" % dict(id=s["id"], name=s["name"], st=qm_status(s["id"]), ip=s["ip"],
-           pw=("«%s»" % s["password"]) if show_password else "в /etc/pcs/servers (pcs server info --password)",
-           ag=(ag[0] if ag else "?"), src=(ag[1] if len(ag) > 1 and ag[1] else "не задана")))
-
-
-def cmd_server_info(a):
-    print_info(load_srv(a.vmid), show_password=a.password)
-    return 0
-
-
-def cmd_server_list(a):
-    act = active_id()
-    known = {str(s["id"]) for s in all_srv()}
-    print("\n  %-3s %-7s %-14s %-16s %s" % ("", "ID", "имя", "адрес", "состояние"))
-    for s in all_srv():
-        print("  %-3s %-7s %-14s %-16s %s" % ("●" if str(s["id"]) == act else "", s["id"], s["name"], s["ip"], qm_status(s["id"])))
-    for line in sh("qm", "list", check=False).stdout.splitlines()[1:]:
-        f = line.split()
-        if f and f[0] not in known:
-            print("  %s%-3s %-7s %-14s %-16s %s%s" % (C["d"], "", f[0], f[1], "—", f[2], C["x"]))
-    print("\n  ● — активный. Взять существующую ВМ: pcs server adopt VMID")
-    return 0
-
-
-def cmd_server_use(a):
-    load_srv(a.vmid)
-    set_active(a.vmid)
-    ok("активный сервер: %s" % a.vmid)
-    return 0
-
-
-def cmd_server_update(a):
-    targets = all_srv() if a.all else [load_srv(a.vmid)]
-    bad = 0
-    for s in targets:
-        hdr("Сервер %s (%s)" % (s["id"], s["ip"]))
-        try:
-            push_agent(s)
-        except Fail as e:
-            warn(str(e))
-            bad += 1
-    return 1 if bad else 0
-
-
-def cmd_server_delete(a):
-    s = load_srv(a.vmid)
-    if not confirm("Удалить ВМ %s (%s) со всеми дисками? Модемы на ней пропадут" % (s["id"], s["name"])):
-        raise Fail("отменено")
-    sh("qm", "stop", str(s["id"]), check=False, timeout=120)
-    sh("qm", "destroy", str(s["id"]), "--destroy-unreferenced-disks", "1", "--purge", "1", timeout=300)
-    os.unlink(srv_path(s["id"]))
-    for f in glob.glob("/var/lib/vz/snippets/pcs-%s.yaml" % s["id"]):
-        os.unlink(f)
-    if active_id() == str(s["id"]):
-        os.unlink(os.path.join(ETC, "active"))
-    ok("сервер %s удалён" % s["id"])
-    return 0
-
-
-# ── команды: модемы и обслуживание ─────────────────────────────────────────
-def cmd_m(a):
-    s = load_srv(a.server)
-    args = " ".join(shlex.quote(x) for x in a.rest) or "status"
-    return ssh_stream(s, "vmodem " + args, tty=TTY)
-
-
-def cmd_status(a):
-    rows = []
-    for s in all_srv():
-        st = qm_status(s["id"])
-        line = {"s": s, "vm": st, "total": "—", "ok": "", "warn": "", "bad": "", "mode": "", "ver": "?"}
-        if st == "running":
-            try:
-                r = ssh(s, "vmodem version; vmodem status --fast --json; test -x /usr/local/bin/modem-interface-setup.sh && echo MP",
-                        check=False, timeout=25)
-                ver, _, rest = r.stdout.partition("\n")
-                data = json.loads(rest[:rest.rfind("]") + 1] or "[]")
-                v = lambda x: "ok" if x["local"] == "ok" and x["up"] == "ok" else ("bad" if x["local"] in ("broken", "absent") else "warn")
-                line.update(ver=ver.strip(), total=len(data), ok=sum(v(x) == "ok" for x in data),
-                            warn=sum(v(x) == "warn" for x in data), bad=sum(v(x) == "bad" for x in data),
-                            mode="mp.space" if rest.rstrip().endswith("MP") else "свой")
-            except (Fail, ValueError, subprocess.TimeoutExpired) as e:
-                line["total"] = "нет связи: %s" % str(e)[:40]
-        rows.append(line)
-    act = active_id()
-    print("\n  %-2s %-6s %-12s %-15s %-9s %-7s %-7s %-6s %s" % ("", "ID", "имя", "адрес", "ВМ", "агент", "модемы", "софт", "✓ ⚠ ✗"))
-    for l in rows:
-        s = l["s"]
-        print("  %-2s %-6s %-12s %-15s %-9s %-7s %-7s %-6s %s" % (
-            "●" if str(s["id"]) == act else "", s["id"], s["name"][:12], s["ip"], l["vm"][:9], l["ver"], l["total"],
-            l["mode"], ("%s%s%s %s%s%s %s%s%s" % (C["g"], l["ok"], C["x"], C["y"], l["warn"], C["x"], C["r"], l["bad"], C["x"]))
-            if l["ok"] != "" else ""))
-    if not rows:
-        print("  серверов нет: pcs server create или pcs server adopt VMID")
-    return 0
-
-
-def detached(s, unit, cmd):
-    """Долгая установка на сервере — отвязанно от SSH (сеть может моргнуть), вывод — вживую."""
-    boot = ssh(s, "cat /proc/sys/kernel/random/boot_id").stdout.strip()
-    ssh(s, "systemctl reset-failed %s 2>/dev/null; rm -f /var/lib/%s.rc; systemd-run --unit=%s --collect "
-           "sh -c %s" % (unit, unit, unit, shlex.quote("%s; echo $? > /var/lib/%s.rc" % (cmd, unit))))
-    stream = subprocess.Popen(ssh_base(s["ip"]) + ["journalctl -u %s -f -o cat -n all" % unit])
-    rc, t0 = None, time.time()
-    try:
-        while time.time() - t0 < 3 * 3600:
-            time.sleep(5)
-            try:
-                r = ssh(s, "cat /proc/sys/kernel/random/boot_id; cat /var/lib/%s.rc 2>/dev/null; systemctl is-active %s"
-                        % (unit, unit), check=False, timeout=20)
-            except (Fail, subprocess.TimeoutExpired):
-                continue                     # сеть моргнула или сервер перезагружается
-            lines = [x.strip() for x in r.stdout.split("\n")]
-            if lines[0] and lines[0] != boot:
-                break                        # перезагрузился — значит, дошло до конца
-            if len(lines) > 1 and lines[1].isdigit():
-                rc = int(lines[1])
-                break
-            if r.stdout.rstrip().endswith("inactive") and not (len(lines) > 1 and lines[1].isdigit()):
-                time.sleep(2)                # код мог дописаться чуть позже
-                rc_r = ssh(s, "cat /var/lib/%s.rc 2>/dev/null" % unit, check=False).stdout.strip()
-                rc = int(rc_r) if rc_r.isdigit() else None
-                break
-    finally:
-        time.sleep(1)
-        stream.terminate()
-    return rc
-
-
-def cmd_mpspace(a):
-    s = load_srv(a.server)
-    if a.action != "install":
-        return ssh_stream(s, "vmodem mpspace %s %s" % (a.action, shlex.quote(a.value) if a.value else ""))
-    hdr("mobileproxy.space на сервере %s (%s)" % (s["id"], s["ip"]))
-    auth = a.auth
-    if not auth and TTY:
-        print("  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже: pcs mpspace auth '<json>')")
-        auth = ask("auth.mp", "")
-    cmd = "vmodem mpspace install" + (" --auth %s" % shlex.quote(auth) if auth else "") + \
-          (" --proxy %s" % shlex.quote(a.proxy) if a.proxy else "") + (" --no-reboot" if a.no_reboot else "")
-    boot = ssh(s, "cat /proc/sys/kernel/random/boot_id").stdout.strip()
-    rc = detached(s, "pcs-mpspace", cmd)
-    if rc not in (0, None):
-        raise Fail("установка mobileproxy.space завершилась с кодом %s (лог на сервере: /var/log/vmodem/mpspace.log)" % rc)
-    if not a.no_reboot:
-        step("сервер перезагружается")
-        t0 = time.time()
-        while time.time() - t0 < 600:
-            time.sleep(5)
-            try:
-                if ssh_alive(s["ip"]) and ssh(s, "cat /proc/sys/kernel/random/boot_id", check=False).stdout.strip() not in ("", boot):
-                    break
-            except subprocess.TimeoutExpired:
-                pass
-        step("жду, пока модемы вернутся (таймер vmodem)")
-        time.sleep(45)
-    ssh_stream(s, "vmodem mpspace check; vmodem status --fast")
-    return 0
-
-
-def cmd_soft(a):
-    s = load_srv(a.server)
-    rc = detached(s, "pcs-soft", "vmodem soft run %s %s" % (shlex.quote(a.url), " ".join(map(shlex.quote, a.args))))
-    return rc or 0
-
-
-def cmd_dns(a):
-    s = load_srv(a.server)
-    return ssh_stream(s, "vmodem dns-fix" + (" --dns %s" % shlex.quote(a.dns) if a.dns else ""))
-
-
-def cmd_passwd(a):
-    s = load_srv(a.server)
-    pw = a.password or ask("Новый пароль root сервера %s (Enter — сгенерировать)" % s["id"], secret=True) or secrets.token_urlsafe(12)
-    ssh(s, "chpasswd", input="root:%s\n" % pw)
-    s["password"] = pw
-    save_srv(s)
-    ok("пароль root сменён и сохранён в /etc/pcs/servers/%s.json%s" % (s["id"], "" if a.password else ": %s" % pw))
-    return 0
-
-
-def cmd_ssh(a):
-    s = load_srv(a.server)
-    os.execvp("ssh", ssh_base(s["ip"], tty=True) + a.rest)
-
-
-def cmd_exec(a):
-    s = load_srv(a.server)
-    return ssh_stream(s, " ".join(a.rest))
-
-
-def cmd_update(a):
-    url = "https://codeload.github.com/%s/tar.gz/refs/heads/%s" % (REPO, BRANCH)
-    hdr("Обновление PCS из %s (%s)" % (REPO, BRANCH))
-    d = tempfile.mkdtemp()
-    try:
-        data = urllib.request.urlopen(url, timeout=120).read()
-        with open(os.path.join(d, "pcs.tgz"), "wb") as f:
-            f.write(data)
-        sh("tar", "xzf", os.path.join(d, "pcs.tgz"), "-C", d, "--strip-components=1")
-        for f in ("pcs", "agent/vmodem", "agent/vmodem-api"):
-            sh("python3", "-m", "py_compile", os.path.join(d, f))
-        dest = ROOT
-        shutil.rmtree(dest + ".prev", ignore_errors=True)
-        shutil.copytree(dest, dest + ".prev")
-        for item in os.listdir(d):
-            if item == "pcs.tgz":
-                continue
-            src, dst = os.path.join(d, item), os.path.join(dest, item)
-            if os.path.isdir(src):
-                shutil.rmtree(dst, ignore_errors=True)
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
-    ok("PCS обновлён: %s" % sh(os.path.join(ROOT, "pcs"), "version").stdout.strip())
-    if all_srv() and (a.agents or confirm("Обновить агентов на всех серверах?", True)):
-        return subprocess.call([os.path.join(ROOT, "pcs"), "server", "update", "--all"])
-    return 0
-
-
-def need_pve():
-    if os.geteuid() != 0:
-        raise Fail("нужен root")
-    if not shutil.which("qm"):
-        raise Fail("qm не найден — pcs работает на хосте Proxmox (на сервере Ubuntu есть vmodem)")
-
-
-# ── меню ───────────────────────────────────────────────────────────────────
-MENU = [
-    ("Создать сервер (ВМ Ubuntu 24.04, всё настроено)", ["server", "create"]),
-    ("Модемы: состояние", ["m", "status"]),
-    ("Модемы: привести к таблице (sync)", ["m", "sync"]),
-    ("Модемы: задать таблицу", ["m", "source", "?ссылка на Google-таблицу"]),
-    ("Модем: диагностика", ["m", "diag", "?номер модема"]),
-    ("Модем: сменить IP", ["m", "rotate", "?номер модема"]),
-    ("Модем: перезагрузить", ["m", "reboot", "?номер модема"]),
-    ("Поставить mobileproxy.space", ["mpspace", "install"]),
-    ("Прямые прокси на модемы (без агрегатора)", ["m", "proxy", "on"]),
-    ("Оповещения в Telegram", ["m", "notify", "telegram", "?токен бота", "?chat id"]),
-    ("Все серверы", ["status"]),
-    ("Выбрать активный сервер", ["server", "use", "?VM ID"]),
-    ("Взять существующую ВМ под управление", ["server", "adopt", "?VM ID"]),
-    ("Починить DNS на сервере", ["dns"]),
-    ("Сменить пароль root", ["passwd"]),
-    ("Обновить PCS и агентов", ["update"]),
-]
-
-
-def menu():
-    while True:
-        act = active_id()
-        s = None
-        try:
-            s = load_srv(act) if act else None
-        except Fail:
-            pass
-        print("\n%s  PCS %s — Proxy Control Service%s" % (C["b"], VERSION, C["x"]))
-        print("  активный сервер: %s\n" % ("%s %s @ %s (%s)" % (s["id"], s["name"], s["ip"], qm_status(s["id"])) if s else "не выбран"))
-        for i, (title, _) in enumerate(MENU, 1):
-            print("  %s%2d%s  %s" % (C["b"], i, C["x"], title))
-        print("  %s q%s  выход\n" % (C["b"], C["x"]))
-        ch = input("  » ").strip()
-        if ch in ("q", "й", ""):
-            return 0
-        if not ch.isdigit() or not 1 <= int(ch) <= len(MENU):
-            continue
-        argv = []
-        for x in MENU[int(ch) - 1][1]:
-            if x.startswith("?"):
-                v = ask(x[1:])
-                if not v:
-                    argv = None
-                    break
-                argv.append(v)
-            else:
-                argv.append(x)
-        if argv:
-            subprocess.call([os.path.join(ROOT, "pcs")] + argv)
-            input("\n  %sEnter — в меню%s" % (C["d"], C["x"]))
-
-
-def main():
-    if len(sys.argv) == 1:
-        if TTY:
-            return menu()
-        print(__doc__)
-        return 0
-    ap = argparse.ArgumentParser(prog="pcs", description="Proxy Control Service — серверы под виртуальные модемы")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    srv = sub.add_parser("server").add_subparsers(dest="scmd", required=True)
-    c = srv.add_parser("create")
-    c.add_argument("--id", type=int)
+import traceback
+
+from .. import VERSION
+from ..core import dns as dnsfix
+from ..core import util
+from ..core.util import Fail, sh
+from . import jobs, ops, pve, remote, servers, store, ui, web
+
+HELP = """pcs %s — хаб фермы мобильных прокси на хосте Proxmox
+
+  pcs                                   меню
+  pcs status [--json]                   хост и все серверы сразу
+  pcs server list | info [ID] [--password] | use ID|host
+  pcs server create [--mode usb|gw] [--sheet URL] [--mpspace] [--id N] [--name …]
+                    [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
+  pcs server adopt ID [--ip IP] | delete ID [--yes]
+  pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
+  pcs modlink …    [--server ID]
+  pcs hivelink …   [--server ID|--host]
+  pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
+  pcs passwd  [--server ID|--host]      пароль root (Enter — сгенерировать)
+  pcs key     [--server ID|--host] [--add PUBKEY | --rotate]
+  pcs ssh [ID] | pcs exec [ID] 'cmd'    консоль / команда на сервере
+  pcs ssh-port PORT [--server ID]       порт SSH сервера
+  pcs mpspace install|auth|check [--server ID]
+  pcs update [--host | --server ID | --all]   без флагов — хост из GitHub и все серверы
+  pcs web on|off|status|passwd          веб-панель :666
+  pcs doctor [--server ID|--host] | pcs job [ID] | pcs log | pcs version
+
+  Без --server — выбранный сервер (pcs server use ID). --json — ответ для программ.
+  Секреты не в командной строке: пароль root — PCS_PASSWORD или вопрос, auth.mp —
+  PCS_MP_AUTH или stdin, HTTP-прокси для mp.space — PCS_MP_PROXY.""" % VERSION
+
+PASSTHRU = ("proxyveth", "modlink", "hivelink")
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Fail("не понял аргументы (%s) — справка: pcs help" % message)
+
+
+# ── разбор ─────────────────────────────────────────────────────────────────
+def parser():
+    ap = Parser(prog="pcs", description="хаб PCS на хосте Proxmox", add_help=True)
+    sub = ap.add_subparsers(dest="cmd", parser_class=Parser)
+    sub.add_parser("status")
+    srv = sub.add_parser("server").add_subparsers(dest="scmd", parser_class=Parser)
+    srv.add_parser("list")
+    c = srv.add_parser("info")
+    c.add_argument("id", nargs="?")
+    c.add_argument("--password", action="store_true", help="показать пароль root (для ЛК mp.space)")
+    srv.add_parser("use").add_argument("id")
+    c = srv.add_parser("create", help="ВМ Ubuntu 24.04 под ключ")
+    c.add_argument("--id", type=int, help="VM ID (по умолчанию — свободная тысяча)")
     c.add_argument("--name")
-    c.add_argument("--cores", type=int, default=4)
-    c.add_argument("--ram", type=int, default=4096)
-    c.add_argument("--disk", type=int, default=40)
+    c.add_argument("--cores", type=int)
+    c.add_argument("--ram", type=int, help="ГБ (числа от 512 — мегабайты, как в PCS 4)")
+    c.add_argument("--disk", type=int, help="ГБ")
     c.add_argument("--storage")
-    c.add_argument("--bridge", default="vmbr0")
+    c.add_argument("--bridge")
     c.add_argument("--ip", help="статический адрес с маской, напр. 192.168.1.60/24")
     c.add_argument("--gw")
     c.add_argument("--dhcp", action="store_true")
     c.add_argument("--dns", help='"1.1.1.1 8.8.8.8"')
-    c.add_argument("--password", help="пароль root (лучше через PCS_PASSWORD)")
+    c.add_argument("--mode", choices=servers.MODES, help="режим proxyveth: usb (как USB-модемы) или gw")
     c.add_argument("--sheet", help="ссылка на Google-таблицу модемов — сразу создать модемы")
-    c.add_argument("--mpspace", action="store_true", help="сразу поставить mobileproxy.space")
-    c.add_argument("--auth", help="auth.mp из ЛК для --mpspace")
-    c.add_argument("--proxy", help="HTTP-прокси, если сайты mp.space не открываются")
-    c.add_argument("--replace", action="store_true")
+    c.add_argument("--mpspace", action="store_true", help="сразу поставить mobileproxy.space (auth.mp — PCS_MP_AUTH)")
+    c.add_argument("--replace", action="store_true", help="ВМ с этим ID уже есть — удалить и создать заново")
+    c.add_argument("--yes", action="store_true")
     c = srv.add_parser("adopt")
-    c.add_argument("vmid")
+    c.add_argument("id")
     c.add_argument("--ip")
-    c.add_argument("--password")
-    srv.add_parser("list")
-    srv.add_parser("use").add_argument("vmid")
-    c = srv.add_parser("info")
-    c.add_argument("vmid", nargs="?")
-    c.add_argument("--password", action="store_true", help="показать пароль root")
-    c = srv.add_parser("update")
-    c.add_argument("vmid", nargs="?")
-    c.add_argument("--all", action="store_true")
-    srv.add_parser("delete").add_argument("vmid")
-    c = sub.add_parser("m", help="модемы: команда vmodem на сервере")
-    c.add_argument("--server")
-    c.add_argument("rest", nargs=argparse.REMAINDER)
-    sub.add_parser("status")
-    c = sub.add_parser("mpspace")
-    c.add_argument("action", choices=("install", "auth", "check"))
-    c.add_argument("value", nargs="?")
-    c.add_argument("--server")
-    c.add_argument("--auth")
-    c.add_argument("--proxy")
-    c.add_argument("--no-reboot", action="store_true")
-    c = sub.add_parser("soft")
-    c.add_argument("run", choices=("run",))
-    c.add_argument("url")
-    c.add_argument("args", nargs="*")
-    c.add_argument("--server")
-    c = sub.add_parser("dns")
-    c.add_argument("--server")
-    c.add_argument("--dns")
-    c = sub.add_parser("passwd")
-    c.add_argument("--server")
-    c.add_argument("--password")
-    for name in ("ssh", "exec"):
+    c = srv.add_parser("delete")
+    c.add_argument("id")
+    c.add_argument("--yes", action="store_true")
+    for name in ("dns", "passwd", "key", "doctor"):
         c = sub.add_parser(name)
         c.add_argument("--server")
-        c.add_argument("rest", nargs=argparse.REMAINDER)
+        c.add_argument("--host", action="store_true")
+    sub.choices["dns"].add_argument("--dns")
+    g = sub.choices["key"].add_mutually_exclusive_group()
+    g.add_argument("--add", metavar="PUBKEY")
+    g.add_argument("--rotate", action="store_true")
+    c = sub.add_parser("ssh-port")
+    c.add_argument("port", type=int)
+    c.add_argument("--server")
+    c = sub.add_parser("mpspace")
+    c.add_argument("action", choices=("install", "auth", "check"))
+    c.add_argument("--server")
+    c.add_argument("--no-reboot", action="store_true")
     c = sub.add_parser("update")
-    c.add_argument("--agents", action="store_true")
-    sub.add_parser("version")
-    a = ap.parse_args()
-    if a.cmd == "version":
-        print(VERSION)
-        return 0
-    if os.geteuid() != 0:
-        print("  ✗ нужен root", file=sys.stderr)
-        return 1
-    fn = {("server", "create"): cmd_server_create, ("server", "adopt"): cmd_server_adopt,
-          ("server", "list"): cmd_server_list, ("server", "use"): cmd_server_use,
-          ("server", "info"): cmd_server_info, ("server", "update"): cmd_server_update,
-          ("server", "delete"): cmd_server_delete}.get((a.cmd, getattr(a, "scmd", None))) or {
-        "m": cmd_m, "status": cmd_status, "mpspace": cmd_mpspace, "soft": cmd_soft, "dns": cmd_dns,
-        "passwd": cmd_passwd, "ssh": cmd_ssh, "exec": cmd_exec, "update": cmd_update}[a.cmd]
+    g = c.add_mutually_exclusive_group()
+    g.add_argument("--host", action="store_true", help="только хост из GitHub")
+    g.add_argument("--server", action="append", help="код хоста — на этот сервер")
+    g.add_argument("--all", action="store_true", help="код хоста — на все серверы")
+    c = sub.add_parser("web")
+    c.add_argument("action", choices=("on", "off", "status", "passwd", "serve"))
+    c.add_argument("--user")
+    c.add_argument("rest", nargs=argparse.REMAINDER)
+    c = sub.add_parser("job")
+    c.add_argument("id", nargs="?")
+    c.add_argument("run_id", nargs="?")
+    sub.add_parser("log")
+    for p in list(sub.choices.values()) + list(srv.choices.values()):
+        p.add_argument("--json", action="store_true")
+    return ap
+
+
+def split_target(args, allow_host=False):
+    """--server ID / --server=ID / --host — откуда угодно в аргументах части; остальное — как есть."""
+    rest, server, host = [], None, False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--server" and i + 1 < len(args):
+            server = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--server="):
+            server = a.split("=", 1)[1]
+        elif a == "--host" and allow_host:
+            host = True
+        else:
+            rest.append(a)
+        i += 1
+    return rest, server, host
+
+
+# ── сквозные команды частей ────────────────────────────────────────────────
+def passthru(part, args):
+    rest, server, host = split_target(args, allow_host=(part == "hivelink"))
+    as_json = "--json" in rest
     try:
-        return fn(a)
+        t = store.target(server, host)
+        if not rest:
+            rest = ["help"] if not as_json else ["status", "--json"]
+        if t == store.HOST:
+            if part != "hivelink":
+                raise Fail("на хосте нет %s — он на серверах: --server ID" % part)
+            return subprocess.call([os.path.join(remote.ROOT, "bin", part)] + rest)
+        if not as_json and sys.stdout.isatty():
+            ui.info("%s на %s" % (part, store.label(t)))
+        return remote.stream(t, " ".join(shlex.quote(x) for x in [part] + rest),
+                             tty=sys.stdout.isatty() and sys.stdin.isatty() and not as_json)
     except Fail as e:
-        _log("FAIL " + str(e))
-        print("  %s✗%s %s" % (C["r"], C["x"], e), file=sys.stderr)
+        say_fail(e, as_json)
+        return 1
+
+
+def say_fail(e, as_json):
+    if as_json:
+        print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False))
+    else:
+        print("  %s✗%s %s" % (ui.C["r"], ui.C["x"], e), file=sys.stderr)
+    ui.log("FAIL " + str(e))
+
+
+def shell(cmd, args):
+    """pcs ssh [ID] [аргументы ssh] / pcs exec [ID] 'команда'."""
+    rest, server, host = split_target(args, allow_host=True)
+    if rest and (rest[0].isdigit() or rest[0] in ("host", "хост")) and (cmd == "ssh" or len(rest) > 1):
+        server, rest = rest[0], rest[1:]
+    try:
+        t = store.target(server, host)
+        if t == store.HOST:
+            if cmd == "ssh":
+                raise Fail("это и есть хост — консоль уже открыта")
+            return subprocess.call(["bash", "-lc", " ".join(rest)])
+        if cmd == "ssh":
+            os.execvp("ssh", remote.base(t, tty=True) + rest)
+        if not rest:
+            raise Fail("какую команду выполнить: pcs exec [ID] 'команда'")
+        return remote.stream(t, " ".join(rest))
+    except Fail as e:
+        say_fail(e, False)
+        return 1
+
+
+# ── команды ────────────────────────────────────────────────────────────────
+def c_status(a):
+    host = servers.host_overview()
+    rows = servers.overview_all()
+    if a.json:
+        return 0, {"host": host, "servers": [{k: v for k, v in d.items() if k != "info"} for d in rows]}
+    C = ui.C
+    hl = host.get("hivelink") or {}
+    print("\n  %sХост %s%s (%s) · PCS %s · hivelink: %s" % (
+        C["b"], host["name"], C["x"], host.get("ip") or "?", VERSION,
+        "не готов" if hl.get("error") else ("стоит" if hl else "—")))
+    print_rows(rows)
+    return 0, None
+
+
+STATE = {"running": ("g", "работает"), "stopped": ("d", "стоп"), "paused": ("y", "пауза"), "absent": ("r", "нет ВМ"),
+         "offline": ("r", "нет SSH"), "old": ("y", "старый код")}
+
+
+def print_rows(rows):
+    C = ui.C
+    act = store.active()
+    if not rows:
+        print("  серверов нет: pcs server create или pcs server adopt ID")
+        return
+    print("\n  %-2s %-6s %-14s %-15s %-11s %-5s %-14s %-10s %s" % ("", "ID", "имя", "адрес", "ВМ", "режим", "модемы",
+                                                                 "mp.space", "PCS"))
+    for d in rows:
+        col, st = STATE.get(d["state"], ("y", d["state"]))
+        m = d["modems"]
+        mod = ("%d/%d" % (m["ok"], m["total"]) + (" ⚠%d" % m["warn"] if m["warn"] else "")
+               + (" ✗%d" % m["broken"] if m["broken"] else "")) if m.get("total") else "—"
+        mp = d.get("mpspace") or {}
+        mps = ("работает" if mp.get("ok") else "сбой") if mp.get("installed") else ("—" if d["mpspace"] is None else "нет")
+        print("  %-2s %-6s %-14s %-15s %s%-11s%s %-5s %-14s %-10s %s" % (
+            "●" if str(d["id"]) == act else "", d["id"], (d.get("name") or "")[:14], d.get("ip") or "?",
+            C[col], st, C["x"], d.get("mode") or "—", mod, mps, d.get("version") or "?"))
+        if d.get("error") and d["state"] != "running":
+            print("  %s       %s%s" % (C["d"], d["error"][:100], C["x"]))
+    print("\n  ● — выбранный. Выбрать: pcs server use ID")
+
+
+def c_server_list(a):
+    known = store.all_servers()
+    vms = pve.qm_list() if pve.is_pve() else {}
+    rows = [{"id": s["id"], "name": s.get("name"), "ip": s.get("ip"), "mode": s.get("mode"),
+             "vm": (vms.get(str(s["id"])) or (None, "absent"))[1] if vms or pve.is_pve() else None} for s in known]
+    other = [{"id": int(k), "name": v[0], "vm": v[1]} for k, v in sorted(vms.items(), key=lambda x: int(x[0]))
+             if k not in {str(s["id"]) for s in known}]
+    if a.json:
+        return 0, {"servers": rows, "other_vms": other, "active": store.active() or None}
+    act = store.active()
+    print("\n  %-2s %-7s %-14s %-16s %-6s %s" % ("", "ID", "имя", "адрес", "режим", "ВМ"))
+    for r in rows:
+        print("  %-2s %-7s %-14s %-16s %-6s %s" % ("●" if str(r["id"]) == act else "", r["id"], (r["name"] or "")[:14],
+                                              r["ip"] or "?", r["mode"] or "—", r["vm"] or "?"))
+    for r in other:
+        print("  %s%-2s %-7s %-14s %-16s %-6s %s%s" % (ui.C["d"], "", r["id"], r["name"][:14], "—", "", r["vm"], ui.C["x"]))
+    if act == store.HOST:
+        print("\n  выбран хост")
+    print("\n  ● — выбранный (pcs server use ID). Серые — ВМ не под PCS: pcs server adopt ID")
+    return 0, None
+
+
+def c_server_info(a):
+    s = store.target(a.id)
+    if s == store.HOST:
+        raise Fail("это хост: pcs status")
+    if a.json:
+        d = servers.overview(s, timeout=25, wan=True)
+        if a.password:
+            d["password"] = s.get("password")
+        return 0, d
+    servers.print_info(s, show_password=a.password)
+    return 0, None
+
+
+def c_server_use(a):
+    sid = store.set_active(a.id)
+    ui.ok("выбран %s" % ("хост" if sid == store.HOST else "сервер %s" % sid))
+    return 0, {"active": sid}
+
+
+def ram_gb(v):
+    if v is None:
+        return None
+    return max(1, v // 1024) if v >= 512 else v
+
+
+def c_server_create(a):
+    p = {"id": a.id, "name": a.name, "cores": a.cores, "ram_gb": ram_gb(a.ram), "disk_gb": a.disk,
+         "storage": a.storage, "bridge": a.bridge, "ip": a.ip, "gw": a.gw, "dns": a.dns, "mode": a.mode,
+         "sheet": a.sheet, "mpspace": a.mpspace, "replace": a.replace,
+         "password": os.environ.get("PCS_PASSWORD", ""), "auth": os.environ.get("PCS_MP_AUTH", ""),
+         "proxy": os.environ.get("PCS_MP_PROXY", "")}
+    if ui.interactive() and not a.json:
+        p = ask_create(p, a)
+    p = servers.normalize(p)
+    if p["replace"] and p["id"] and not a.yes:
+        if not ui.confirm_id("ВМ %s будет удалена со всеми дисками и создана заново" % p["id"], p["id"]):
+            raise Fail("отменено")
+    pve.need_pve()
+    return 0, servers.create(p)
+
+
+def ask_create(p, a):
+    """Вопросы человеку — только о том, что не задано флагами."""
+    ui.hdr("Новый сервер: ВМ Ubuntu 24.04 под модемы")
+    p["id"] = p["id"] or int(ui.ask("VM ID", str(pve.next_id())))
+    p["name"] = p["name"] or ui.ask("Имя", "pcs%s" % p["id"])
+    if not p["mode"]:
+        p["mode"] = ui.ask("Режим proxyveth: usb (как USB-модемы, до ~40) или gw (шлюз, без предела)", "usb")
+    gw_def, src, mask = pve.host_net()
+    if not p["ip"] and not a.dhcp:
+        p["ip"] = ui.ask("IP сервера с маской (Enter — DHCP; статика надёжнее для ЛК), напр. %s/%s"
+                         % (".".join((src or "192.168.1.1").split(".")[:3] + ["60"]), mask), "")
+    if p["ip"] and not p["gw"]:
+        p["gw"] = ui.ask("Шлюз", gw_def)
+    if not p["password"]:
+        p["password"] = ui.ask("Пароль root (Enter — сгенерировать)", secret=True)
+    if not p["sheet"]:
+        p["sheet"] = ui.ask("Ссылка на Google-таблицу модемов (Enter — позже)", "")
+    if not a.mpspace:
+        p["mpspace"] = ui.confirm("Сразу поставить mobileproxy.space?", False)
+    if p["mpspace"] and not p["auth"]:
+        print("  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже: pcs mpspace auth)")
+        p["auth"] = ui.ask("auth.mp", "")
+    return p
+
+
+def c_server_adopt(a):
+    return 0, servers.adopt(a.id, ip=a.ip or "", password=os.environ.get("PCS_PASSWORD", ""))
+
+
+def c_server_delete(a):
+    s = store.load(a.id)
+    if not a.yes and not ui.confirm_id("Удалить ВМ %s (%s) со всеми дисками? Модемы на ней пропадут"
+                                       % (s["id"], s.get("name")), s["id"]):
+        raise Fail("отменено (в скриптах — --yes)")
+    return 0, servers.delete(s["id"])
+
+
+def c_dns(a):
+    t = store.target(a.server, a.host)
+    dns = dnsfix.parse_dns(a.dns) if a.dns else None
+    ui.step("DNS: %s" % store.label(t))
+    d = ops.dns_fix(t, dns)
+    for f in d.get("changed") or []:
+        ui.info("изменён %s" % f)
+    for f in d.get("foreign") or []:
+        ui.info("снят чужой DNS %s" % f)
+    ui.ok("DNS в порядке: %s (%s)" % (" ".join(d["dns"]), d.get("mode")))
+    return 0, d
+
+
+def c_passwd(a):
+    t = store.target(a.server, a.host)
+    pw = os.environ.get("PCS_PASSWORD") or ui.secret_twice("Новый пароль root, %s (Enter — сгенерировать)" % store.label(t))
+    d = ops.set_password(t, pw)
+    where = "/etc/pcs/servers/%s.json" % t["id"] if t != store.HOST else "нигде (это хост)"
+    ui.ok("пароль root сменён (%s); сохранён: %s%s" % (store.label(t), where,
+                                                      ("; новый: %s" % d["password"]) if d.get("password") else ""))
+    return 0, d
+
+
+def c_key(a):
+    t = store.target(a.server, a.host)
+    if a.rotate:
+        d = ops.rotate(t)
+        ui.ok("ключ хаба для сервера %s сменён: %s, старый снят" % (d["target"], d["fp"]))
+        return 0, d
+    if a.add:
+        d = ops.key_add(t, a.add)
+        (ui.ok if d.get("added") else ui.info)("%s %s: %s" % ("ключ добавлен" if d.get("added") else "ключ уже есть",
+                                                             d.get("fp"), store.label(t)))
+        return 0, d
+    keys, hub = ops.key_list(t), ops.hub_key()
+    if not a.json:
+        print("\n  Ключи root, %s:" % store.label(t))
+        for k in keys:
+            mark = " (хаб)" if k["fp"] == hub["fp"] or "pcs" in (k.get("comment") or "") else ""
+            print("    %s %s %s%s" % (k["type"], k["fp"], k.get("comment") or "", mark))
+        print("\n  Ключ хаба: %s\n  %s" % (hub["fp"], hub["pub"]))
+    return 0, {"keys": keys, "hub": hub}
+
+
+def c_ssh_port(a):
+    t = store.target(a.server)
+    d = ops.ssh_port(t, a.port)
+    ui.ok("SSH сервера %s — на порту %d (%s)" % (t["id"], a.port, d.get("via")))
+    return 0, d
+
+
+def c_mpspace(a):
+    s = store.target(a.server)
+    if s == store.HOST:
+        raise Fail("mp.space ставится на сервер, а не на хост: --server ID")
+    if a.action == "check":
+        d = remote.node(s, "mpspace", "check", timeout=60)
+        if not a.json:
+            if not d.get("installed"):
+                ui.warn("mobileproxy.space на сервере %s не стоит: pcs mpspace install" % s["id"])
+            for u, st in (d.get("units") or {}).items():
+                (ui.ok if st == "active" else ui.bad)("служба %s: %s" % (u, st))
+            if d.get("installed"):
+                (ui.ok if d.get("auth") else ui.bad)("auth.mp: %s" % ("порт %s" % d.get("port") if d.get("auth") else "не задан"))
+        return 0, d
+    if a.action == "auth":
+        raw = os.environ.get("PCS_MP_AUTH") or (ui.ask("auth.mp из ЛК ({\"auth\": \"…\", \"port\": …})")
+                                               if ui.interactive() else sys.stdin.readline().strip())
+        if not raw:
+            raise Fail("auth.mp пуст: вставь содержимое файла из ЛК (Мой прокси-бизнес → Сервера → ↓)")
+        d = remote.node(s, "mpspace", "auth", input=raw + "\n", timeout=60)
+        ui.ok("auth.mp записан на сервер %s (порт %s)" % (s["id"], d.get("port")))
+        return 0, d
+    auth = os.environ.get("PCS_MP_AUTH", "")
+    if not auth and ui.interactive() and not a.json:
+        print("  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже: pcs mpspace auth)")
+        auth = ui.ask("auth.mp", "")
+    lk = util.lock(os.path.join(remote.RUN, "srv-%s.lock" % s["id"]), wait=10, what="работа с сервером %s" % s["id"])
+    try:
+        return 0, servers.mpspace_install(s, auth, os.environ.get("PCS_MP_PROXY", ""), a.no_reboot)
+    finally:
+        lk.close()
+
+
+def c_update(a):
+    if a.host:
+        return 0, {"host": servers.update_host()}
+    if a.server or a.all:
+        r = servers.update_servers([store.norm_id(x) for x in a.server] if a.server else None)
+        if r["failed"]:
+            for k, v in r["failed"].items():
+                ui.bad("сервер %s: %s" % (k, v))
+            return 1, r
+        return 0, r
+    return 0, servers.update({"host": True, "servers": "all" if store.all_servers() else None})
+
+
+def c_web(a):
+    if a.action == "serve":
+        rc = web.serve(a.rest)
+        return (rc or 0), None
+    if a.action == "on":
+        d = web.on()
+        ui.ok("панель включена: http://%s:%d (порт открывает и закрывает пользователь)" % (servers.host_ip() or "хост", web.PORT))
+        return 0, d
+    if a.action == "off":
+        d = web.off()
+        ui.ok("панель выключена")
+        return 0, d
+    if a.action == "passwd":
+        util.need_root()
+        cur = (web.status().get("user") if os.path.exists(web.creds_path()) else None) or "admin"
+        user = a.user or os.environ.get("PCS_WEB_USER") or (ui.ask("Логин панели", cur) if ui.interactive() else cur)
+        pw = os.environ.get("PCS_WEB_PASS") or ui.secret_twice("Пароль панели (не короче 8)")
+        d = web.set_login(user, pw)
+        if web.status()["active"]:
+            sh("systemctl", "try-restart", "pcs-web.service", check=False)
+        ui.ok("вход в панель: %s, пароль сохранён хэшем в %s" % (user, web.creds_path()))
+        return 0, d
+    d = web.status()
+    if not a.json:
+        print("  панель: %s, автозапуск: %s, порт %d, логин: %s" % (
+            "работает" if d["active"] else d["state"], "да" if d["enabled"] else "нет", d["port"], d["user"] or "не задан"))
+    return 0, d
+
+
+def c_job(a):
+    if a.id == "run":
+        if not a.run_id:
+            raise Fail("pcs job run ID")
+        from .api import KINDS
+        return jobs.run(a.run_id, KINDS), None
+    if a.id:
+        d = jobs.get(a.id)
+        if not a.json:
+            print("\n  %s — %s (%s)" % (d["id"], d["title"], d["state"]))
+            for ln in d["log"][-60:]:
+                print("  │ " + ln)
+            if d.get("error"):
+                ui.bad(d["error"])
+        return 0, d
+    lst = jobs.recent()
+    if not a.json:
+        if not lst:
+            print("  фоновых заданий нет")
+        for d in lst:
+            print("  %s  %-8s %s%s" % (d["id"], d["state"], d["title"], ("  ✗ " + d["error"]) if d.get("error") else ""))
+    return 0, lst
+
+
+def c_log(a):
+    lines = []
+    try:
+        with open(ui.LOG, errors="replace") as f:
+            lines = f.readlines()[-40:]
+    except OSError:
+        pass
+    if not a.json:
+        print("".join(lines) if lines else "  журнал пуст: %s" % ui.LOG)
+    return 0, [ln.rstrip("\n") for ln in lines]
+
+
+def c_doctor(a):
+    """Проверка хоста и (если выбран) сервера — что мешает работать."""
+    bad = []
+
+    def chk(cond, text, fix=""):
+        if cond:
+            ui.ok(text)
+        else:
+            ui.bad(text + (" — " + fix if fix else ""))
+            bad.append(text)
+    ui.hdr("Хост")
+    for prog in ("qm", "pvesm", "wget", "ssh", "ssh-keygen", "openssl"):
+        chk(bool(__import__("shutil").which(prog)), "есть %s" % prog)
+    for h in ("cloud-images.ubuntu.com", "codeload.github.com"):
+        chk(sh("getent", "ahostsv4", h, check=False, timeout=15).returncode == 0, "DNS хоста: %s" % h, "pcs dns --host")
+    chk("local" in sh("pvesm", "status", "--content", "snippets", check=False).stdout,
+        "хранилище local умеет snippets", "поправит pcs server create")
+    chk(os.path.exists(store.key_path()), "ключ хаба %s" % store.key_path(), "создастся сам при create/adopt")
+    w = web.status()
+    chk(w["login_set"], "логин панели задан", "pcs web passwd")
+    ui.info("панель: %s" % ("работает" if w["active"] else w["state"]))
+    hl = remote.local_part("hivelink", ["status"], timeout=30)
+    (ui.ok if hl.get("ok") else ui.warn)("hivelink на хосте: %s" % ("в порядке" if hl.get("ok") else hl.get("error")))
+    t = store.target(a.server, a.host, default_host=True)
+    if t != store.HOST:
+        ui.hdr("Сервер %s (%s)" % (t["id"], t.get("ip")))
+        d = servers.overview(t, timeout=25)
+        chk(d["state"] == "running", "ВМ работает, SSH отвечает, pcs-node есть", d.get("error") or d["state"])
+        if d["state"] == "running":
+            chk(d.get("version") == VERSION, "код PCS той же версии, что на хосте (%s)" % (d.get("version")),
+                "pcs update --server %s" % t["id"])
+            r = remote.ssh(t, "for h in github.com docs.google.com mobileproxy.space; do getent ahostsv4 $h >/dev/null "
+                              "&& echo ok $h || echo FAIL $h; done; cloud-init status 2>/dev/null | head -1", check=False)
+            for ln in r.stdout.splitlines():
+                if ln.startswith(("ok ", "FAIL ")):
+                    chk(ln.startswith("ok"), "DNS сервера: %s" % ln.split()[1], "pcs dns --server %s" % t["id"])
+                elif ln.strip():
+                    ui.info(ln.strip())
+            if (d.get("info") or {}).get("proxyveth", {}).get("installed"):
+                ui.hdr("proxyveth doctor")
+                remote.stream(t, "proxyveth doctor")
+    ui.say()
+    (ui.ok if not bad else ui.bad)("проблем не найдено" if not bad else "проблем: %d" % len(bad))
+    return (1 if bad else 0), {"problems": bad}
+
+
+HANDLERS = {
+    ("status", None): c_status, ("server", "list"): c_server_list, ("server", "info"): c_server_info,
+    ("server", "use"): c_server_use, ("server", "create"): c_server_create, ("server", "adopt"): c_server_adopt,
+    ("server", "delete"): c_server_delete, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
+    ("ssh-port", None): c_ssh_port, ("mpspace", None): c_mpspace, ("update", None): c_update, ("web", None): c_web,
+    ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor,
+}
+
+
+def handler(a):
+    fn = HANDLERS.get((a.cmd, getattr(a, "scmd", None)))
+    if not fn:
+        raise Fail("какая команда? справка: pcs help")
+    return fn
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    as_json = "--json" in argv
+    try:
+        if not argv:
+            if ui.interactive():
+                util.need_root()
+                from .menu import Menu
+                return Menu().main()
+            print(HELP)
+            return 0
+        cmd = argv[0]
+        if cmd in ("help", "-h", "--help"):
+            print(HELP)
+            return 0
+        if cmd in ("version", "--version"):
+            print(json.dumps({"ok": True, "data": VERSION}) if as_json else VERSION)
+            return 0
+        if cmd in PASSTHRU:
+            util.need_root()
+            return passthru(cmd, argv[1:])
+        if cmd in ("ssh", "exec"):
+            util.need_root()
+            return shell(cmd, argv[1:])
+        a = parser().parse_args(argv)
+        fn = handler(a)
+        util.need_root()
+        ui.log("pcs %s" % " ".join(x if not x.startswith("ssh-") else "<ключ>" for x in argv))
+        return util.run_cli(fn, a, as_json=a.json)
+    except Fail as e:
+        say_fail(e, as_json)
         return 1
     except KeyboardInterrupt:
         return 130
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    except Exception as e:                           # noqa: BLE001 — без трасс человеку
+        ui.log("CRASH %s" % traceback.format_exc())
+        say_fail(Fail("внутренняя ошибка: %s: %s (подробности — %s)" % (type(e).__name__, e, ui.LOG)), as_json)
+        return 1
