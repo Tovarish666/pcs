@@ -1690,11 +1690,11 @@ def vmodem_down():
     """Снять модемы vmodem по-старому: таймер, юниты, гаджеты vmN, netns vmN.
     → номера снятых модемов."""
     sh("systemctl", "disable", "--now", "vmodem-sync.timer", check=False)    # чтобы не поднял обратно
-    sh("systemctl", "stop", "vmodem-sync.service", check=False)
     lk = None
     if os.path.isdir(at("/run/vmodem")):
-        lk = lock(at("/run/vmodem/lock"), wait=600, what="команда vmodem")   # идущий sync — дождаться
+        lk = lock(at("/run/vmodem/lock"), wait=600, what="команда vmodem")   # идущий sync — дождаться, не рвать
     try:
+        sh("systemctl", "stop", "vmodem-sync.service", "vmodem-reboot-*", check=False)
         groot = at(GROOT)
         try:
             ns = {int(x[2:]) for x in os.listdir(at("/run/netns")) if re.fullmatch(r"vm\d+", x)}
