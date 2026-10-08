@@ -95,6 +95,8 @@ def no_registration(code):
 
 
 class Api:
+    port = 80
+
     def __init__(self, n, src=None, timeout=5):
         self.host = "192.168.%d.1" % n
         self.src = src
@@ -102,7 +104,7 @@ class Api:
         self.cookie = self.token = None
 
     def _http(self, method, path, body=None, headers=None):
-        c = http.client.HTTPConnection(self.host, 80, timeout=self.timeout,
+        c = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout,
                                        source_address=(self.src, 0) if self.src else None)
         try:
             c.request(method, path, body=body, headers=headers or {})
