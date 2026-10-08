@@ -398,9 +398,11 @@ def test_migrate():
     usb.MDIR, usb.LIB, usb.ROOT = paths + "/usb", os.path.join(root, "var", "lib", "proxyveth"), root
     usb.sh = lambda *c, **k: usb_ran.append(c) or types.SimpleNamespace(stdout="", returncode=0)
     usb.setup = lambda cfg: setups.append(dict(cfg))
-    usb.build_dummy_hcd = lambda: builds.append(1)
+    order = []
+    usb.build_dummy_hcd = lambda: builds.append(1) or order.append("dkms")
     real_sync = cli.do_sync
-    cli.do_sync = lambda cfg, mode, mod, force=False: syncs.append((mode, cfg.get("source"))) or {"created": [201]}
+    cli.do_sync = lambda cfg, mode, mod, force=False: (syncs.append((mode, cfg.get("source"))), order.append("sync")) \
+        and {"created": [201]}
     try:
         check("vmodem найден", usb.vmodem_found())
         rc, d = ok_json("status")
@@ -443,7 +445,8 @@ def test_migrate():
         check("журнал vmodem сохранён в /var/log/proxyveth/vmodem-4",
               not os.path.exists(os.path.join(root, "var/log/vmodem"))
               and open(os.path.join(root, "var/log/proxyveth/vmodem-4/vmodem.log")).read() == "история\n")
-        check("dummy_hcd пересобран под своим именем dkms", builds == [1])
+        check("dummy_hcd пересобран под своим именем dkms — после того, как модемы подняты",
+              builds == [1] and order[-2:] == ["sync", "dkms"], order)
         check("чужое (mp.space, modlink, proxyveth-virt, /usr/local/bin/sing-box) не тронуто",
               all(open(os.path.join(root, f.lstrip("/"))).read() == "чужое\n" for f in foreign))
         check("модемы подняты по-новому сразу, не ждут таймер", syncs == [("usb", sheet)], syncs)

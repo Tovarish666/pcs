@@ -1235,8 +1235,13 @@ def setup(cfg):
         apt("linux-modules-extra-" + kver)
     if cfg["transport"] == "vudc":
         apt("linux-tools-generic", "linux-tools-" + kver)
-    if singbox.install():
-        log("поставил sing-box %s (%s)" % (singbox.VERSION, singbox.BIN))
+    try:
+        if singbox.install():
+            log("поставил sing-box %s (%s)" % (singbox.VERSION, singbox.BIN))
+    except Fail:
+        raise
+    except Exception as e:                 # сеть, GitHub — повторить setup позже
+        raise Fail("sing-box %s не скачался (%s) — проверь интернет сервера и повтори proxyveth setup" % (singbox.VERSION, e))
     if cfg["transport"] == "dummy" and sh("modinfo", "dummy_hcd", check=False).returncode != 0:
         log("собираю dummy_hcd под ядро %s (dkms, пару минут)" % kver)
         build_dummy_hcd()
@@ -1741,9 +1746,16 @@ def vmodem_purge():
         shutil.move(oldlog, dst)
     sh("systemctl", "daemon-reload", check=False)
     sh("udevadm", "control", "--reload", check=False)
-    if glob.glob(at("/usr/src/vmodem-dummy-hcd-*")):
-        try:
-            build_dummy_hcd()            # тот же модуль под своим именем dkms
-        except Fail as e:
-            log("⚠ dummy_hcd не пересобран под именем %s (%s) — работает старый пакет dkms vmodem-dummy-hcd" % (DKMS, e))
     log("vmodem 4.x удалён: юниты, файлы, свой sing-box 1.10")
+
+
+def vmodem_dkms():
+    """Тот же dummy_hcd под своим именем dkms. Загруженный модуль не трогается, поэтому
+    можно и при живых модемах — переезд зовёт это последним, чтобы модемы не ждали сборку."""
+    if not glob.glob(at("/usr/src/vmodem-dummy-hcd-*")):
+        return
+    try:
+        build_dummy_hcd()
+        log("dummy_hcd: пакет dkms теперь %s" % DKMS)
+    except Fail as e:
+        log("⚠ dummy_hcd не пересобран под именем %s (%s) — работает старый пакет dkms vmodem-dummy-hcd" % (DKMS, e))

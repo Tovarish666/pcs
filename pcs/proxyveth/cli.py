@@ -258,6 +258,8 @@ def cmd_setup(a):
         if migrated and cfg.get("source"):
             log("поднимаю модемы по-новому")
             res = do_sync(load_cfg(), mode, mod)
+        if migrated:
+            usb.vmodem_dkms()
         log("proxyveth %s: режим %s, таймер proxyveth-sync включён" % (VERSION, mode))
         return 0, {"mode": mode, "migrated": migrated, "sync": res}
 
@@ -288,6 +290,8 @@ def cmd_mode(a):
         ensure_timer()
         cfg = load_cfg()
         res = do_sync(cfg, new, newmod) if cfg.get("source") else None
+        if migrated:
+            usb.vmodem_dkms()
         log("режим сервера: %s" % new)
         return 0, {"mode": new, "previous": cur, "migrated": migrated, "sync": res}
 
