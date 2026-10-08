@@ -1,4 +1,5 @@
 """Команда hivelink — драйвер настоящих USB-модемов (docs/ARCHITECTURE.md, §6)."""
+import os
 import re
 import sys
 import time
@@ -79,7 +80,8 @@ def one_arg(args, name):
 def cmd_install(args):
     need_root()
     with held():
-        data = install.install()
+        # HIVELINK_SKIP_RNDIS_FIX=1 — без DKMS-сборки (приём на RNDIS останется ~1.3 Мбит)
+        data = install.install(skip_fix=os.environ.get("HIVELINK_SKIP_RNDIS_FIX") == "1")
     say("  hivelink установлен%s: udev + hivelink.timer (15 с), сеть модемов — %s"
         % (" (старый e3372-driver снят)" if data["migrated"] else "",
            "своя" if data["net"] == "on" else "у mp.space"))

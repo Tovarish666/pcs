@@ -83,13 +83,16 @@ def kbase(release):
 def upstream(release, version="", signature=""):
     """Версия апстрима, на которой собрано ядро. У Debian и Ubuntu uname — это ABI
     (6.1.0-25, 6.8.0-45), а настоящая версия — в /proc/version и /proc/version_signature."""
+    base = kbase(release)
+    same = lambda v: v.split(".")[:2] == base.split(".")[:2]      # noqa: E731 — та же серия x.y
     last = (signature.split() or [""])[-1]
-    if re.fullmatch(r"\d+\.\d+(\.\d+)?", last):            # Ubuntu 6.8.0-45.45-generic 6.8.12
+    if re.fullmatch(r"\d+\.\d+(\.\d+)?", last) and same(_norm(last)):   # Ubuntu 6.8.0-45.45-generic 6.8.12
         return _norm(last)
-    m = re.search(r"\b(?:Debian|PMX) (\d+\.\d+(?:\.\d+)?)", version)   # Debian 6.1.106-3 / PMX 6.8.12-4
-    if m:
-        return _norm(m.group(1))
-    return kbase(release)
+    # Debian 6.1.106-3 / PMX 6.8.12-4 — последнее вхождение: раньше стоит «gcc (Debian 12.2.0-14)»
+    for v in reversed(re.findall(r"\b(?:Debian|PMX) (\d+\.\d+(?:\.\d+)?)", version)):
+        if same(_norm(v)):
+            return _norm(v)
+    return base
 
 
 def kname(ver):
@@ -171,7 +174,7 @@ def source(ver, release, log):
     if os.path.exists(cache):
         return rd(cache)
     os.makedirs(WORK, exist_ok=True)
-    local = glob.glob("/lib/modules/%s/build/%s" % (release, REL)) + glob.glob("/usr/src/*/%s" % REL)
+    local = glob.glob("/lib/modules/%s/build/%s" % (release, REL))
     errs = []
     if local:
         log("исходник rndis_host.c найден локально: %s" % local[0])
@@ -342,17 +345,17 @@ def ensure(size, log):
         if remove(log):
             log("фикс rndis_host снят (rx_urb_size = 0)")
         return state()
-    if not dkms_ready(release) or not os.path.exists(MODPROBE):
+    built = False
+    if not dkms_ready(release):
         build(size, release, log)
-        common.put(MODPROBE, modprobe_text(size))
+        built = True
+    if common.put(MODPROBE, modprobe_text(size)) or built:
         sh("depmod", "-a", release, check=False)
-        initramfs(release, log)
+    initramfs(release, log)
+    # Тот же параметр с тем же размером (в том числе модуль старого e3372) — модемы не
+    # дёргаем: новый модуль загрузится сам при следующей перезагрузке.
+    if param() != size:
         reload(size, log)
-    else:
-        if common.put(MODPROBE, modprobe_text(size)):
-            sh("depmod", "-a", release, check=False)
-        if param() != size:
-            reload(size, log)
     st = state()
     if not st["dkms"]:
         raise Fail("на диске штатный rndis_host (%s) — DKMS не подменил модуль" % (st["file"] or "?"))

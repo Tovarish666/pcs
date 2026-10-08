@@ -17,7 +17,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from ..core.util import Fail, jload, jsave, sh, wr
+from ..core.util import Fail, jload, jsave, rd, sh, wr
 from . import common, hilink, rndis, route, usb
 from .common import log, log_once
 
@@ -230,15 +230,15 @@ def step_link(conf, st, mods):
         for k, v in IFACE_SYSCTL:
             path = "/proc/sys/net/ipv4/conf/%s/%s" % (ifn, k)
             try:
-                if os.path.exists(path) and open(path).read().strip() != v:
+                if os.path.exists(path) and rd(path) != v:
                     wr(path, v)
             except OSError:
                 pass
-        try:
-            if open("/sys/class/net/%s/operstate" % ifn).read().strip() == "down":
-                sh("ip", "link", "set", ifn, "up", check=False)
-        except OSError:
+        oper = rd("/sys/class/net/%s/operstate" % ifn)
+        if not oper:                    # интерфейс уже пропал
             continue
+        if oper == "down":
+            sh("ip", "link", "set", ifn, "up", check=False)
         key = "dhcp." + ifn
         if m["addr"]:
             st["cnt"].pop(key, None)

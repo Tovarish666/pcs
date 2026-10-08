@@ -452,16 +452,15 @@ def uninstall():
     except Fail as e:
         warnings.append("фикс rndis_host: %s" % e)
     if fl.get("networkd_started"):
-        # networkd запускал hivelink (хост Proxmox) — других .network у него нет
-        others = [f for f in os.listdir("/etc/systemd/network") if f.endswith(".network")] \
-            if os.path.isdir("/etc/systemd/network") else []
+        # networkd запускал hivelink (хост Proxmox, до него networkd не работал). Остановить,
+        # только если других .network у него так и не появилось.
+        others = [f for d in ("/etc/systemd/network", "/run/systemd/network") if os.path.isdir(d)
+                  for f in os.listdir(d) if f.endswith(".network")]
         if others:
-            warnings.append("systemd-networkd оставлен: в /etc/systemd/network есть %s" % ", ".join(others))
+            warnings.append("systemd-networkd оставлен работать: у него есть %s" % ", ".join(others))
         else:
             sh("systemctl", "disable", "--now", "systemd-networkd.service", "systemd-networkd.socket", check=False)
             log("systemd-networkd остановлен (его запускал hivelink)")
-    if fl.get("wait_online_disabled") and not fl.get("networkd_started"):
-        sh("systemctl", "enable", "systemd-networkd-wait-online.service", check=False)
     for p in (common.ETC, common.VAR, common.CACHE, common.RUN):
         shutil.rmtree(p, ignore_errors=True)
     for w in warnings:

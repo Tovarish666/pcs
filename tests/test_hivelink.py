@@ -241,14 +241,19 @@ print("исходник ядра для DKMS:")
 K = [("6.8.0-45-generic", "", "", "6.8.0", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.8.tar.xz"),
      ("6.8.0-45-generic", "", "Ubuntu 6.8.0-45.45-generic 6.8.12", "6.8.12",
       "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.8.12.tar.xz"),
-     ("6.1.0-25-amd64", "Linux version 6.1.0-25-amd64 (debian-kernel@lists.debian.org) #1 SMP PREEMPT_DYNAMIC "
-      "Debian 6.1.106-3 (2024-08-26)", "", "6.1.106", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.106.tar.xz"),
+     ("6.1.0-25-amd64", "Linux version 6.1.0-25-amd64 (debian-kernel@lists.debian.org) (gcc-12 (Debian 12.2.0-14) "
+      "12.2.0, GNU ld (GNU Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC Debian 6.1.106-3 (2024-08-26)", "",
+      "6.1.106", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.106.tar.xz"),
      ("6.1.0-25-amd64", "", "", "6.1.0", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz"),
      ("6.12.48+deb13-amd64", "", "", "6.12.48", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.48.tar.xz"),
-     ("6.8.12-4-pve", "Linux version 6.8.12-4-pve (build@proxmox) #1 SMP PREEMPT_DYNAMIC PMX 6.8.12-4", "",
+     ("6.8.12-4-pve", "Linux version 6.8.12-4-pve (build@proxmox) (gcc (Debian 12.2.0-14) 12.2.0, GNU ld (GNU "
+      "Binutils for Debian) 2.40) #1 SMP PREEMPT_DYNAMIC PMX 6.8.12-4 (2024-11-06T15:04Z)", "",
       "6.8.12", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.8.12.tar.xz"),
      ("6.14.0-1-pve", "", "", "6.14.0", "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.14.tar.xz"),
-     ("5.15.0-100-generic", "", "", "5.15.0", "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.15.tar.xz")]
+     ("5.15.0-100-generic", "", "", "5.15.0", "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.15.tar.xz"),
+     ("6.12.48+deb13-amd64", "Linux version 6.12.48+deb13-amd64 (gcc-14 (Debian 14.2.0-19) 14.2.0) #1 SMP "
+      "PREEMPT_DYNAMIC Debian 6.12.48-1 (2025-09-20)", "", "6.12.48",
+      "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.48.tar.xz")]
 for rel, ver, sig, want_v, url in K:
     v = rndis.upstream(rel, ver, sig)
     check("%s%s → %s, %s" % (rel, " (" + (sig or ver).split()[-1 if sig else -2] + ")" if sig or ver else "",
