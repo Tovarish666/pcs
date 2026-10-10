@@ -77,7 +77,7 @@ def delete_server(id, confirm):
 
 
 def run(id, part, args, timeout=300, input=None):
-    """Конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост (там только hivelink).
+    """Конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост (там hivelink и modlink).
     input — текст на stdin команды (таблица proxyveth, пароль modlink): секреты не в командной строке."""
     if part not in PARTS:
         raise Fail("часть — одна из: %s" % ", ".join(PARTS))
@@ -85,8 +85,8 @@ def run(id, part, args, timeout=300, input=None):
         raise Fail("args — список строк")
     t = _target(id)
     if t == store.HOST:
-        if part != "hivelink":
-            raise Fail("на хосте есть только hivelink; %s — на серверах" % part)
+        if part not in remote.HOST_PARTS:
+            raise Fail("на хосте есть hivelink и modlink; %s — на серверах" % part)
         return remote.local_part(part, list(args), timeout=timeout, input=input)
     return remote.part(t, part, list(args), timeout=timeout, input=input)
 

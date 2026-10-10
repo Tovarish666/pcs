@@ -21,6 +21,7 @@ from ..core.util import Fail, sh
 from . import node, pve, remote, store, ui
 
 MODES = ("usb", "gw")
+HOST_BIN = ("pcs", "hivelink", "modlink")     # команды в /usr/local/bin хоста
 DEFAULTS = {"id": None, "name": "", "cores": 4, "ram_gb": 4, "disk_gb": 40, "storage": "", "bridge": "vmbr0",
             "ip": "", "gw": "", "dns": None, "password": "", "mode": "usb", "sheet": "", "mpspace": False,
             "auth": "", "proxy": "", "replace": False}
@@ -73,7 +74,7 @@ def host_overview():
             "ip": host_ip(), "cpu": {"cores": os.cpu_count() or 0, "load": list(os.getloadavg())},
             "ram": node.mem(), "disk": node.disk("/var/lib/vz" if os.path.isdir("/var/lib/vz") else "/"),
             "hivelink": hl.get("data") if hl.get("ok") else {"installed": False, "error": hl.get("error")},
-            "dns": dnsfix.current()}
+            "modlink": node.modlink_info(), "dns": dnsfix.current()}
 
 
 # ── создание ───────────────────────────────────────────────────────────────
@@ -374,12 +375,13 @@ def update_host():
     shutil.rmtree(dest + ".prev", ignore_errors=True)
     os.rename(dest, dest + ".prev")
     os.rename(dest + ".new", dest)
-    for c in ("pcs", "hivelink"):
+    for c in HOST_BIN:
         link("/usr/local/bin/" + c, os.path.join(dest, "bin", c))
     ui.ok("PCS на хосте: %s → %s (прежний — в %s.prev)" % (VERSION, ver, dest))
-    hl = subprocess.run([os.path.join(dest, "bin", "hivelink"), "install"], capture_output=True, text=True)
-    if hl.returncode != 0:
-        ui.warn("hivelink install на хосте: %s" % ((hl.stderr or hl.stdout).strip().splitlines() or ["?"])[-1].lstrip(" ✗"))
+    for part, args in (("hivelink", ["install"]), ("modlink", ["setup"])):
+        r = subprocess.run([os.path.join(dest, "bin", part)] + args, capture_output=True, text=True)
+        if r.returncode != 0:
+            ui.warn("%s %s на хосте: %s" % (part, args[0], ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1].lstrip(" ✗")))
     sh("systemctl", "try-restart", "pcs-web.service", check=False)
     return ver
 

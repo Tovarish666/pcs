@@ -20,11 +20,15 @@ HTTP API, решения и грабли. Его можно отдать нов�
   - `proxyveth` — прокси → интерфейс;
   - `modlink` — интерфейс → прокси;
   - `hivelink` — драйвер настоящих модемов (на хосте стоит всегда, в ВМ — по запросу).
+
+  На самом хосте стоят `hivelink` и `modlink`: настоящие модемы, воткнутые в хост, сразу
+  становятся прокси, а из них — виртуальные модемы в ВМ этого же хоста (§9.6).
 - **Как управлять.** Терминал (команды и меню `pcs`) и веб-панель на порту 666.
-- **Состояние на 08.10.2026.** Всё собрано в ветке `unify`, PR #3 в `main`.
+- **Состояние на 10.10.2026.** PCS 5 — в `main` (PR #3). Сверху — PR #4 (панель при
+  повторной установке) и защита строк modlink + modlink на хосте (§9.5, §9.6).
   - Проверено на стенде: установка на хост, создание ВМ в обоих режимах, переезд со
     старого vmodem 4.1, трафик, DNS, modlink, hivelink, вход в панель и её API.
-  - Тесты: около 980 проверок, все зелёные.
+  - Тесты: около 1020 проверок, все зелёные.
 - **Сейчас всё рассчитано на один хост Proxmox.** Следующий этап — **связать несколько
   хостов через API** (см. §19). HTTP API панели уже есть (§13), но рассчитан на
   браузер: вход по паролю, cookie, CSRF. Для связи машина-машина нужны токены (§19).
@@ -171,11 +175,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
 2. Проверяет, что код компилируется. Кладёт его в `/opt/pcs`, прежний — в `/opt/pcs.prev`
    (откат — переименовать обратно). Пишет `/opt/pcs/.source` (`PCS_REPO`, `PCS_BRANCH`):
    отсюда же берёт код `pcs update`.
-3. Ставит команды `/usr/local/bin/pcs` и `/usr/local/bin/hivelink`.
+3. Ставит команды `/usr/local/bin/pcs`, `/usr/local/bin/hivelink` и `/usr/local/bin/modlink`.
 4. Спрашивает логин и пароль панели (или берёт `PCS_WEB_USER`, `PCS_WEB_PASS`), сохраняет
-   хэшем и включает `pcs-web.service` на порту 666. Если вход уже задан — не спрашивает.
+   хэшем и включает `pcs-web.service` на порту 666. Если вход уже задан — не спрашивает,
+   но панель всё равно включает (`pcs web on`).
 5. Ставит hivelink на хост (`hivelink install`). Первая установка тяжёлая: ставятся
    `proxmox-headers-*`, `build-essential`, `dkms`, собирается модуль — несколько минут.
+6. Ставит modlink на хост (`modlink setup`: sing-box 1.14.2, юниты `modlink` и
+   `modlink-sb`). Строк нет — sing-box стоит, демон работает. `pcs update --host` делает
+   то же самое.
 
 ### Серверы
 
@@ -208,7 +216,7 @@ pcs server create [--mode usb|gw] [--sheet URL] [--mpspace] [--id N] [--name …
                   [--storage …] [--bridge vmbr0] [--dns "…"] [--replace] [--yes]
 pcs server adopt ID [--ip IP] | delete ID [--yes]
 pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
-pcs modlink …    [--server ID]
+pcs modlink …    [--server ID|--host]
 pcs hivelink …   [--server ID|--host]
 pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
 pcs passwd  [--server ID|--host]      пароль root (Enter — сгенерировать)
@@ -551,6 +559,7 @@ proxyveth version
 | `modem_ip` | веб-интерфейс Huawei | HiLink API: реконнект, ребут, проверка |
 | `reconnect_port` | порт триггера; `auto` — следующий за `port` | `GET http://<ip>:<порт>/reconnect` |
 | `interval_min` | автореконнект, минут (0 — выкл) | таймер в демоне |
+| `protect` | защита строки (по умолчанию **вкл**; у старых строк без поля — тоже вкл), §9.5 | правила sing-box |
 
 - Порты прокси и триггеров не пересекаются ни между строками, ни с занятыми на машине.
   Пример: на ВМ с mp.space порт 10000 занят им, и первая строка получила 10001.
@@ -565,10 +574,16 @@ proxyveth version
   - direct-outbound с `inet4_bind_address = lan_ip`;
   - правило inbound → свой outbound.
 
-  Перед правилами строк:
-  - имена резолвятся только в IPv4;
-  - частные адреса и IPv6 — `reject`: иначе через прокси были бы видны службы самого
-    сервера (127.0.0.1, порты proxyveth и mp.space) и его LAN, а IPv6 ушёл бы мимо модема.
+  Перед правилами строк (порядок важен):
+  1. `sniff` — только для строк с защитой: домен узнаётся по SNI/Host, даже если клиент
+     пришёл с голым IP;
+  2. имена резолвятся только в IPv4;
+  3. IPv6 — `reject` у всех (ушёл бы мимо модема);
+  4. строкам **без** защиты — `route` на свой `modem_ip/32` (веб и DNS своего модема);
+  5. частные адреса (`ip_is_private`) и CGNAT `100.64.0.0/10` — `reject` у всех: иначе
+     через прокси были бы видны службы самого сервера (127.0.0.1, порты proxyveth,
+     mp.space, Proxmox на хосте) и его LAN;
+  6. строкам с защитой — `reject` для сайтов операторов и опасных портов (§9.5).
 
   Последнее правило — `reject`.
 - **`modlink.service`** (`modlink daemon`):
@@ -589,12 +604,15 @@ proxyveth version
 ```
 modlink list [--show-pass]
 modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
-            [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled]
-modlink set ID поле=значение …       (password=- — со stdin)
+            [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled] [--no-protect]
+modlink set ID поле=значение …       (password=- — со stdin; protect=on|off)
 modlink del ID --yes | enable ID | disable ID
+modlink protect                      что закрывает защита и у каких строк снята
+modlink protect ID|all on|off        включить / снять защиту
 modlink apply                        конфиг → sing-box check → запись → перезапуск
 modlink status | test ID | reconnect ID | reboot ID | log ID [-n N]
 modlink export [--ip IP|auto] [--save]   IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
+modlink export --table [--ip IP]     строки таблицы proxyveth: виртуальные модемы из этих настоящих (§9.6)
 modlink from-ifaces [--add]          строки по интерфейсам 192.168.N.100 (основной канал пропускается)
 modlink migrate [--from DIR] [--dry-run] [--force] [--stop-panel]   из modlink-linux
 modlink setup | uninstall --yes [--purge] | daemon | version
@@ -618,7 +636,62 @@ modlink setup | uninstall --yes [--purge] | daemon | version
 | `reconnect ID` | `{id, ok, ip, same, dt}` |
 | `log ID` | `{id, lines}` |
 | `export` | `{ip, lines}` |
+| `export --table` | `{ip, lines (CSV с шапкой n,real,proxy,enabled), warnings}` |
+| `protect` | `{domains, ports, port_ranges, cidrs, always, off: [id]}` |
+| `protect ID\|all on\|off` | `{protect, changed: [id]}` |
 | `from-ifaces` | `{suggest, added}` |
+
+### 9.5 Защита строки (`protect`)
+
+Мобильная сеть узнаёт абонента по IP. Личный кабинет оператора, оплата с баланса,
+подписки и веб модема (SMS, USSD через HiLink) открываются **без пароля**. Через прокси
+всё это получил бы любой клиент. Поэтому у каждой строки есть галочка «защита»:
+в панели — колонка «защита» (активна / не активна), в терминале — `modlink protect`.
+
+| | защита **активна** (по умолчанию) | защита **не активна** (ген1, для себя) |
+|---|---|---|
+| сайты и ЛК операторов: mts.ru, megafon.ru, beeline.ru, tele2.ru, t2.ru, yota.ru, sbermobile.ru, vtbmobile.ru, gpbmobile.ru, motivtelecom.ru, danycom.ru, letai.ru, volnamobile.ru, win-mobile.ru (с поддоменами) | закрыты, и по имени, и по SNI/Host при голом IP | открыты |
+| порты 23, 25, 135, 137–139, 445, 465, 587, 1900, 2525, 6881–6889 (telnet, почта, SMB, SSDP, торренты) | закрыты | открыты |
+| веб своего модема (`modem_ip`) | закрыт | **открыт** — только `modem_ip/32` |
+| остальные частные адреса, 127/8, CGNAT 100.64/10, IPv6 | закрыты | закрыты |
+
+- **Свои дополнения** — `/etc/modlink/protect.json`:
+  `{"domains": ["lk.example.ru"], "cidrs": ["10.200.0.0/16"], "ports": [8291]}`.
+  Испорченный файл — `modlink apply` откажет с понятной ошибкой.
+- Правки вступают в силу после `modlink apply`. После обновления кода конфиг сам
+  пересобирается (`resync`): у старых строк защита включается.
+- `sniff` у защищённых строк задерживает протоколы, где первым говорит сервер (SSH, SMTP),
+  примерно на 0,3 с: sing-box ждёт первые байты от клиента. SSH работает.
+- **Проверено на стенде (10.10.2026)**, трафик из ВМ 2000 через modlink хоста:
+  с защитой — ЛК МТС/Мегафона закрыт по имени, по CONNECT и по голому IP, веб модема,
+  соседние ВМ, сам хост и 127.0.0.1 закрыты; без защиты — ЛК и веб модема открыты,
+  соседи, хост и 127.0.0.1 по-прежнему закрыты.
+
+### 9.6 modlink на хосте и виртуальные модемы из настоящих
+
+Настоящие модемы можно воткнуть прямо в хост Proxmox. Цепочка в пределах одного хоста:
+
+```
+модем USB ─ hivelink (хост) ─ 192.168.N.100 ─ modlink (хост, защита снята)
+          ─ прокси 192.168.88.254:порт ─ proxyveth в ВМ этого хоста ─ виртуальный модем ─ mp.space
+```
+
+- modlink на хост ставят `install.sh` и `pcs update --host`. Управление:
+  `pcs modlink … --host`, меню «Прокси — modlink» с выбранным хостом, в панели — строка
+  «modlink» на странице хоста → «Открыть» (`#/host/modlink`, та же таблица, что у ВМ).
+- **Строке-поставщику защита нужна снятой.** proxyveth ходит через прокси к
+  `192.168.real.1`: туда идут DNS виртуального модема (`tcp`, detour proxy) и проверка
+  HiLink. С защитой эти запросы получат `reject`, и модем будет с предупреждением.
+  `modem_ip` должен быть ровно `192.168.N.1`.
+- `modlink export --table` (в панели — кнопка «Для proxyveth») печатает готовые строки
+  `n,real,proxy,enabled`. N = real = номер настоящего модема, IP — основной адрес хоста
+  (тот, что видят ВМ на vmbr0); другой адрес — `--ip`. Про строки с включённой защитой и
+  с неверным `modem_ip` выводятся предупреждения. Строки вставляются в таблицу proxyveth
+  ВМ (вкладка proxyveth → таблица или `proxyveth table put`).
+- Прокси хоста слушает `0.0.0.0` с логином и паролем. Порт открыт и наружу, если роутер
+  пробрасывает его на хост.
+- Автоматизации «одной кнопкой» (хост → таблица ВМ) пока нет: строки переносятся
+  вручную. Это следующий шаг, если понадобится.
 
 ---
 
@@ -864,13 +937,13 @@ curl -s -b $J -H "X-CSRF: $T" -H 'Content-Type: application/json' \
 | `GET /api/servers/{id}/proxyveth` | состояние модемов и источник | `?wan=1` — с внешними IP; `?only=status` → `{status: конверт proxyveth status, source: конверт proxyveth source}` |
 | `GET /api/servers/{id}/proxyveth/table` | локальная копия таблицы | → `{csv, meta}` |
 | `POST /api/servers/{id}/proxyveth/table` | сохранить копию (`table put`) | `{csv, make_main?}`; `make_main` — сразу `source local` → `{saved, source?}` |
-| `GET /api/servers/{id}/modlink` | таблица и состояние modlink | `?only=status` → `{list: {rows (без паролей, password_set), pending}, status}` |
-| `POST /api/servers/{id}/modlink/save` | правки разом и apply | `{del: [id], set: [{id, fields}], add: [{lan_ip, name?, login?, password?, port?, modem_ip?, reconnect_port?, interval_min?, enabled?}], apply?: true}` → `{steps: [{what, ok, error, data}], applied}`. Набранный пароль идёт на сервер через stdin |
-| `POST /api/servers/{id}/modlink/reveal` | пароль одной строки | `{id}` → `{id, password}` |
-| `POST /api/servers/{id}/modlink/export` | строки для клиента | → `{text}` |
+| `GET /api/targets/{id\|host}/modlink` | таблица и состояние modlink (ВМ или хост) | `?only=status` → `{list: {rows (без паролей, password_set), pending}, status}` |
+| `POST /api/targets/{id\|host}/modlink/save` | правки разом и apply | `{del: [id], set: [{id, fields}], add: [{lan_ip, name?, login?, password?, port?, modem_ip?, reconnect_port?, interval_min?, enabled?, protect?}], apply?: true}` → `{steps: [{what, ok, error, data}], applied}`. Набранный пароль идёт на сервер через stdin; `protect: false` → `set ID protect=0` / `add --no-protect` |
+| `POST /api/targets/{id\|host}/modlink/reveal` | пароль одной строки | `{id}` → `{id, password}` |
+| `POST /api/targets/{id\|host}/modlink/export` | строки для клиента; `{table: true}` — строки таблицы proxyveth | → `{text, warnings}` |
 | `POST /api/servers` | создать ВМ (задание) | `{name, cores=4, ram_gb=8, disk_gb=40, mode: usb\|gw, sheet?: "https://…", mpspace?: bool}` → `{job}` |
 | `POST /api/servers/{id}/delete` | удалить ВМ | `{confirm: "<id>"}`, иначе 403 → `{job}` или `{result}` |
-| `POST /api/run` | любая команда части на сервере или хосте | `{target: id\|"host", part: proxyveth\|modlink\|hivelink, args: [...], confirm?}`. С `--yes`/`--force` нужен `confirm` = номер сервера, иначе 403. На хосте — только hivelink. → конверт команды |
+| `POST /api/run` | любая команда части на сервере или хосте | `{target: id\|"host", part: proxyveth\|modlink\|hivelink, args: [...], confirm?}`. С `--yes`/`--force` нужен `confirm` = номер сервера, иначе 403. На хосте — hivelink и modlink. → конверт команды |
 | `POST /api/targets/{id\|host}/dns` | DNS-фикс | `{dns?: "1.1.1.1 8.8.8.8"}` |
 | `POST /api/targets/{id\|host}/passwd` | пароль root | `{password}` |
 | `POST /api/targets/{id\|host}/key` | ключ SSH | `{pubkey}` или `{rotate: true}` |
@@ -923,7 +996,7 @@ servers()                        # [{"id", "name", "ip", "state", "mode", "modem
 server(id)                       # то же + версии частей
 create_server(params) -> job_id  # params: name, cores, ram_gb, disk_gb, mode, sheet, mpspace
 delete_server(id, confirm)       # confirm == id
-run(id, part, args, timeout=300, input=None) -> конверт   # id=None — хост (только hivelink); input — stdin
+run(id, part, args, timeout=300, input=None) -> конверт   # id=None — хост (hivelink, modlink); input — stdin
 dns_fix(target, dns=None)        # target: id или "host"
 set_password(target, password)
 set_key(target, pubkey=None, rotate=False)

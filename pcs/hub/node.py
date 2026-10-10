@@ -150,6 +150,15 @@ def disk(path="/"):
         return {"total": 0, "used": 0}
 
 
+def modlink_info(root="/", run=sh):
+    """modlink стоит — есть его юнит или таблица (после modlink setup таблицы может ещё не быть)."""
+    d = {"installed": os.path.exists(at(root, "etc/systemd/system/modlink.service"))
+         or os.path.exists(at(root, "etc/modlink/proxies.json"))}
+    if d["installed"]:
+        d["state"] = units_state(("modlink", "modlink-sb"), run)
+    return d
+
+
 def info(wan=False, root="/", run=sh):
     up = rd(at(root, "proc/uptime")).split()
     d = {"version": VERSION, "hostname": socket.gethostname(), "ip": primary_ip(run),
@@ -157,11 +166,9 @@ def info(wan=False, root="/", run=sh):
          "cpu": {"cores": os.cpu_count() or 0, "load": list(os.getloadavg()) if hasattr(os, "getloadavg") else []},
          "ram": mem(root), "disk": disk(root),
          "proxyveth": proxyveth_info(root, run), "mpspace": mpspace_info(root, run),
-         "modlink": {"installed": os.path.exists(at(root, "etc/modlink/proxies.json"))},
+         "modlink": modlink_info(root, run),
          "hivelink": {"installed": os.path.isdir(at(root, "etc/hivelink"))},
          "dns": dnsfix.current(root)}
-    if d["modlink"]["installed"]:
-        d["modlink"]["state"] = units_state(("modlink", "modlink-sb"), run)
     if wan:
         d["wan"] = wan_ip(run)
     return d

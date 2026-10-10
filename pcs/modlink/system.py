@@ -181,7 +181,7 @@ def apply(log, binary=None):
     """Таблица → конфиг sing-box → sing-box check → запись → перезапуск modlink-sb; демон перечитывает."""
     binary = binary or singbox.BIN
     rows = store.load()["proxies"]
-    cfg = store.config(rows)
+    cfg = store.config(rows, store.guard_extra())
     check_config(cfg, binary)
     en = [r for r in rows if r["enabled"]]
     own = {p for r in applied_rows() for p in (r["port"], r["reconnect_port"])}
@@ -230,7 +230,7 @@ def resync(log, binary=None):
     rows = applied_rows()
     if not rows:
         return False
-    cfg = store.config(rows)
+    cfg = store.config(rows, store.guard_extra())
     if jload(P.singbox, None) == cfg:
         if any(r["enabled"] for r in rows) and active(SB) != "active":
             systemctl("enable", "--now", SB)

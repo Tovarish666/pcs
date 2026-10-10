@@ -138,7 +138,7 @@ class Rec:
 
 
 rc = Rec()
-code, r = Panel(rc).handle("POST", "/api/servers/2000/modlink/save", {}, {
+code, r = Panel(rc).handle("POST", "/api/targets/2000/modlink/save", {}, {
     "del": [7], "set": [{"id": 8, "fields": {"name": "x y", "enabled": False, "password": "gen"}}],
     "add": [{"lan_ip": "192.168.9.100", "password": "S3cret!x"}]})
 args = [c[2] for c in rc.calls]
@@ -148,7 +148,19 @@ add = next(c for c in rc.calls if c[2][0] == "add")
 check("набранный пароль новой строки — через stdin, не в аргументах",
       "S3cret!x" not in " ".join(add[2]) and add[2][add[2].index("--password") + 1] == "-" and add[3] == "S3cret!x\n", add)
 check("порты по умолчанию — auto", add[2][add[2].index("--port") + 1] == "auto")
+check("новая строка с защитой — без --no-protect", "--no-protect" not in add[2])
+rc = Rec()
+code, r = Panel(rc).handle("POST", "/api/targets/host/modlink/save", {}, {
+    "set": [{"id": 8, "fields": {"protect": False}}], "add": [{"lan_ip": "192.168.3.100", "protect": False}]})
+args = [c[2] for c in rc.calls]
+check("modlink на хосте: id=None; защита снимается set protect=0 и add --no-protect",
+      r["ok"] and all(c[0] is None for c in rc.calls) and ["set", "8", "protect=0"] in args
+      and any(x[0] == "add" and "--no-protect" in x for x in args), rc.calls)
+code, r = Panel(Rec()).handle("POST", "/api/targets/2000/modlink/save", {}, {"set": [{"id": 8, "fields": {"protect": "может"}}]})
+check("защита: не 1/0 — 400", code == 400, r)
 code, r = Panel(Rec()).handle("GET", "/api/servers/2000/modlink", {}, None)
+check("старый адрес /api/servers/N/modlink — 404 (без алиасов)", code == 404, r)
+code, r = Panel(Rec()).handle("GET", "/api/targets/2000/modlink", {}, None)
 check("list: pending виден, пароль не уходит в браузер", r["data"]["list"]["data"]["pending"] is True
       and "password" not in r["data"]["list"]["data"]["rows"][0], r)
 code, r = Panel(Rec(with_input=False)).handle("POST", "/api/servers/2000/proxyveth/table", {}, {"csv": "n,real,proxy\n"})
@@ -321,17 +333,17 @@ check("--force с номером ВМ — выполнено", d["ok"] and d["da
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["diag", "207"]})
 check("диагностика модема: шаги и итог", d["ok"] and len(d["data"]["steps"]) == 5 and d["data"]["verdict"])
 
-r, d = G("/api/servers/2000/modlink")
+r, d = G("/api/targets/2000/modlink")
 ml = d["data"]["list"]["data"]["rows"]
 check("modlink: строки §8 без паролей", len(ml) == 5 and all("password" not in x for x in ml)
       and {"id", "enabled", "name", "login", "port", "lan_ip", "modem_ip", "reconnect_port", "interval_min"} <= set(ml[0]))
 check("modlink: состояние строк из status", d["data"]["status"]["ok"] and d["data"]["status"]["data"]["rows"][0]["state"] == "ok")
-r, d = P("/api/servers/2000/modlink/reveal", {"id": 201})
+r, d = P("/api/targets/2000/modlink/reveal", {"id": 201})
 check("пароль — только по явному запросу", d["ok"] and d["data"]["password"] == fake_api.S[2000]["modlink"][0]["password"])
-r, d = P("/api/servers/2000/modlink/export")
+r, d = P("/api/targets/2000/modlink/export")
 check("экспорт для клиента: IP:PORT:LOGIN:PASS<TAB>ссылка", d["ok"] and d["data"]["text"].startswith("192.168.88.7:20201:u201:")
       and "\thttp://192.168.88.7:21201/reconnect" in d["data"]["text"], d)
-r, d = P("/api/servers/2000/modlink/save", {"set": [{"id": 202, "fields": {"name": "новое имя", "password": "gen"}}],
+r, d = P("/api/targets/2000/modlink/save", {"set": [{"id": 202, "fields": {"name": "новое имя", "password": "gen"}}],
                                             "add": [{"lan_ip": "192.168.206.100", "modem_ip": "192.168.206.1",
                                                      "password": "Typed-pw1"}],
                                             "del": [205]})
@@ -339,8 +351,18 @@ ids = [x["id"] for x in fake_api.S[2000]["modlink"]]
 new = next(x for x in fake_api.S[2000]["modlink"] if x["id"] == 206)
 check("modlink: правки, удаление, добавление (id = N) и apply", d["ok"] and d["data"]["applied"] and 205 not in ids
       and new["password"] == "Typed-pw1" and fake_api.S[2000]["ml_pending"] is False, d)
-r, d = P("/api/servers/2000/modlink/save", {"set": [{"id": 202, "fields": {"port": "70000"}}]})
+r, d = P("/api/targets/2000/modlink/save", {"set": [{"id": 202, "fields": {"port": "70000"}}]})
 check("modlink: кривой порт — 400 до сервера", r.status == 400)
+check("modlink: у строк есть защита (protect)", all("protect" in x for x in ml))
+r, d = P("/api/targets/host/modlink/export", {"table": True})
+check("modlink хоста → строки для proxyveth и предупреждения", d["ok"] and d["data"]["text"].startswith("n,real,proxy,enabled\n")
+      and isinstance(d["data"]["warnings"], list), d)
+r, d = G("/api/targets/host/modlink")
+check("modlink на хосте: строки настоящих модемов хоста", d["ok"] and d["data"]["list"]["ok"]
+      and [x["id"] for x in d["data"]["list"]["data"]["rows"]] == [1, 2], d)
+r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
+check("modlink на хосте: снять защиту и применить", d["ok"] and d["data"]["applied"]
+      and fake_api.HML["modlink"][0]["protect"] is False, d)
 r, d = P("/api/run", {"target": 2000, "part": "modlink", "args": ["test", "201"]})
 check("modlink test: прокси и HiLink", d["ok"] and d["data"]["proxy"]["ok"] and d["data"]["hilink"]["ok"])
 
