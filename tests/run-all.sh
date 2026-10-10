@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Всё, что проверяется без root, без ВМ и без сети.
+# Всё, что проверяется без root, без ВМ и без сети (кроме скачивания sing-box для
+# проверки конфигов — без сети эти проверки пропускаются, а не падают).
+# Каждый tests/test_*.py подхватывается сам: печатает «итого: ok N, fail M», код 0/1.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 rc=0
 echo "── синтаксис ──"
-for f in pcs agent/vmodem agent/vmodem-api tests/*.py; do
+while IFS= read -r f; do
     python3 -m py_compile "$f" || { echo "  FAIL $f"; rc=1; }
-done
-bash -n install.sh || rc=1
+done < <(find pcs bin tests -type f \( -name '*.py' -o -path 'bin/*' \) | sort)
+for f in install.sh; do bash -n "$f" || { echo "  FAIL $f"; rc=1; }; done
 [[ $rc -eq 0 ]] && echo "  ok   всё компилируется"
-for t in tests/test_agent.py tests/test_api.py tests/test_pcs.py; do
+for t in tests/test_*.py; do
     echo; echo "── ${t#tests/} ──"
     python3 "$t" || rc=1
 done

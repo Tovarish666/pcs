@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCS — вход</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+</head>
+<body>
+<div class="login-wrap">
+  <form id="login" class="login-card" autocomplete="on">
+    <div><h1>PCS</h1><div class="muted">Вход в панель</div></div>
+    <label>Логин <input name="user" autocomplete="username" required autofocus></label>
+    <label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit" class="primary">Войти</button>
+    <p id="msg" class="err" role="alert"></p>
+  </form>
+</div>
+<script src="/static/login.js"></script>
+</body>
+</html>
