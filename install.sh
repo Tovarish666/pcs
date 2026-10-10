@@ -75,7 +75,9 @@ ask() {   # ask "вопрос" [тихо] → ответ на stdout; без т�
 }
 if [[ -f /etc/pcs/web.json && -z "${PCS_WEB_PASS:-}" ]]; then
     ok "вход в панель уже задан (сменить: pcs web passwd)"
-    systemctl try-restart pcs-web.service 2>/dev/null || true
+    # Включить и перезапустить на новом коде; раньше здесь был try-restart — он не
+    # трогает остановленную службу, и после повторной установки панели не было
+    "$DEST/bin/pcs" web on >/dev/null || warn "панель не включилась — см. выше; потом: pcs web on"
 else
     user="${PCS_WEB_USER:-}"
     pass="${PCS_WEB_PASS:-}"
