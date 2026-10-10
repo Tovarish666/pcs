@@ -788,6 +788,9 @@ e3372-driver один в один.
 
 - `/etc/sysctl.d/90-pcs.conf`: `kernel.panic=10`, `kernel.panic_on_oops=1`, `ip_forward=1`.
   Если ядро упадёт, сервер перезагрузится сам, а модемы поднимет таймер.
+- **На хосте Proxmox** (есть `/etc/pve`) — `kernel.panic_on_oops=0`, явно: oops драйвера
+  (модемы, dkms) не должен перезагружать хост со всеми ВМ. Прежние версии писали туда 1 —
+  `pcs update --host` перепишет файл и снимет значение сразу (`sysctl -p`).
 - `/etc/systemd/networkd.conf.d/10-pcs.conf`: `ManageForeignRoutingPolicyRules=no`,
   `ManageForeignRoutes=no`. Иначе любой `netplan apply` стирает маршрутизацию модемов и mp.space.
 

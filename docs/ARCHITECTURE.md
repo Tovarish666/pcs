@@ -222,7 +222,8 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
   - интерфейс хоста с адресом 192.168.X.100 — не модем, если он не USB-модем.
 - **База машины — `pcs.core.net.ensure_base()`**, её зовёт `setup` каждой части:
   - один файл `/etc/sysctl.d/90-pcs.conf` (`kernel.panic=10`, `kernel.panic_on_oops=1`,
-    `ip_forward=1`); rp_filter части выставляют на своих интерфейсах;
+    `ip_forward=1`; на хосте Proxmox — `panic_on_oops=0`, чтобы oops драйвера не ронял все ВМ);
+    rp_filter части выставляют на своих интерфейсах;
   - drop-in `/etc/systemd/networkd.conf.d/10-pcs.conf` с
     `ManageForeignRoutingPolicyRules=no`, `ManageForeignRoutes=no` — иначе любой
     `netplan apply` стирает маршрутизацию модемов.

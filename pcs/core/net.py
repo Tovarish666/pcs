@@ -22,18 +22,25 @@ from .util import rd, sh, wr
 SYSCTL = "/etc/sysctl.d/90-pcs.conf"
 SYSCTL_TEXT = ("# PCS: упало ядро — перезагрузка через 10 с, а не висеть до ручного reset\n"
                "kernel.panic = 10\nkernel.panic_on_oops = 1\nnet.ipv4.ip_forward = 1\n")
+# На хосте Proxmox oops драйвера (модемы, dkms) не должен ронять хост: с ним легли бы все ВМ.
+# Явный 0 — чтобы снять 1, которую сюда писали прежние версии.
+SYSCTL_HOST_TEXT = ("# PCS (хост Proxmox): упало ядро — перезагрузка через 10 с; oops хост не роняет\n"
+                    "kernel.panic = 10\nkernel.panic_on_oops = 0\nnet.ipv4.ip_forward = 1\n")
+PVE = "/etc/pve"
 NETWORKD = "/etc/systemd/networkd.conf.d/10-pcs.conf"
 NETWORKD_TEXT = ("# PCS: networkd при перезапуске (любой netplan apply) не стирает чужие\n"
                  "# правила и маршруты — то есть маршрутизацию модемов и mp.space\n"
                  "[Network]\nManageForeignRoutingPolicyRules=no\nManageForeignRoutes=no\n")
 
 
-def ensure_base(log=print):
+def ensure_base(log=print, pve=None):
     """Общая база любой машины с модемами: sysctl PCS и networkd без уборки чужого.
+    pve — это хост Proxmox (по умолчанию — есть /etc/pve): там без panic_on_oops.
     Идемпотентно; networkd перезапускается, только если drop-in поменялся."""
-    if rd(SYSCTL) != SYSCTL_TEXT.strip():
+    text = SYSCTL_HOST_TEXT if (os.path.isdir(PVE) if pve is None else pve) else SYSCTL_TEXT
+    if rd(SYSCTL) != text.strip():
         os.makedirs(os.path.dirname(SYSCTL), exist_ok=True)
-        wr(SYSCTL, SYSCTL_TEXT)
+        wr(SYSCTL, text)
         sh("sysctl", "-q", "-p", SYSCTL, check=False)
     if rd(NETWORKD) != NETWORKD_TEXT.strip():
         os.makedirs(os.path.dirname(NETWORKD), exist_ok=True)
