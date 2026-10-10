@@ -2,15 +2,19 @@
 
   modlink list [--show-pass]              таблица прокси
   modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
-              [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled]
+              [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled] [--no-protect]
   modlink set ID поле=значение …          поля: enabled name login password port lan_ip
-                                          modem_ip reconnect_port interval_min
+                                          modem_ip reconnect_port interval_min protect
   modlink del ID --yes | enable ID | disable ID
+  modlink protect [ID|all on|off]         защита строки: ЛК операторов, опасные порты, веб модема
+                                          (без аргументов — что закрыто и у каких строк)
   modlink apply                           конфиг sing-box → sing-box check → перезапуск
   modlink status
   modlink test ID                         внешний IP через этот прокси + HiLink
   modlink reconnect ID | reboot ID | log ID [-n N]
   modlink export [--ip IP|auto] [--save]  IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
+  modlink export --table [--ip IP]        таблица proxyveth: виртуальные модемы из этих настоящих
+                                          (IP по умолчанию — свой основной адрес: ВМ этого хоста)
   modlink from-ifaces [--add]             строки по интерфейсам 192.168.N.100 сервера
   modlink migrate [--from DIR] [--dry-run] [--force] [--stop-panel]   из modlink-linux
   modlink setup | uninstall --yes [--purge] | daemon | version
@@ -67,12 +71,16 @@ def parser():
     c.add_argument("--reconnect-port", default="auto")
     c.add_argument("--interval", default="0")
     c.add_argument("--disabled", action="store_true")
+    c.add_argument("--no-protect", action="store_true")
     c = sub.add_parser("set")
     c.add_argument("id")
     c.add_argument("pairs", nargs="+")
     c = sub.add_parser("del")
     c.add_argument("id")
     c.add_argument("--yes", action="store_true")
+    c = sub.add_parser("protect")
+    c.add_argument("id", nargs="?")
+    c.add_argument("state", nargs="?", choices=("on", "off"))
     for name in ("enable", "disable", "test", "reconnect", "reboot"):
         sub.add_parser(name).add_argument("id")
     c = sub.add_parser("log")
@@ -83,6 +91,7 @@ def parser():
     c = sub.add_parser("export")
     c.add_argument("--ip")
     c.add_argument("--save", action="store_true")
+    c.add_argument("--table", action="store_true")
     c = sub.add_parser("from-ifaces")
     c.add_argument("--add", action="store_true")
     c = sub.add_parser("migrate")
@@ -115,13 +124,14 @@ def hint_apply():
 
 def row_line(r, show=False):
     iv = "%dм" % r["interval_min"] if r["interval_min"] else "—"
-    return "  %-5d %-4s %-14s %-6d %-7d %-16s %-15s %-12s %-14s %s" % (
+    return "  %-5d %-4s %-14s %-6d %-7d %-16s %-15s %-12s %-14s %-5s %s" % (
         r["id"], "да" if r["enabled"] else "нет", r["name"][:14], r["port"], r["reconnect_port"],
-        r["lan_ip"], r["modem_ip"] or "—", r["login"][:12], r["password"] if show else "••••", iv)
+        r["lan_ip"], r["modem_ip"] or "—", r["login"][:12], r["password"] if show else "••••", iv,
+        "да" if r.get("protect", True) else "НЕТ")
 
 
-HEAD = "  %-5s %-4s %-14s %-6s %-7s %-16s %-15s %-12s %-14s %s" % (
-    "ID", "вкл", "имя", "порт", "триггер", "lan_ip", "modem_ip", "логин", "пароль", "авто")
+HEAD = "  %-5s %-4s %-14s %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
+    "ID", "вкл", "имя", "порт", "триггер", "lan_ip", "modem_ip", "логин", "пароль", "авто", "защита")
 
 
 # ── команды ────────────────────────────────────────────────────────────────
@@ -143,7 +153,8 @@ def cmd_add(a):
         doc = store.load()
         r = store.add(doc, a.lan_ip, name=a.name, login=a.login, password=secret(a.password),
                       port=a.port, modem_ip=a.modem_ip, reconnect_port=a.reconnect_port,
-                      interval_min=store.as_interval(a.interval), enabled=not a.disabled)
+                      interval_min=store.as_interval(a.interval), enabled=not a.disabled,
+                      protect=not a.no_protect)
         dup = [x["id"] for x in doc["proxies"] if x["lan_ip"] == r["lan_ip"] and x["id"] != r["id"]]
         store.save(doc)
     say("  + строка %d: %s, порт %d, триггер %d, логин %s" % (r["id"], r["name"], r["port"], r["reconnect_port"], r["login"]))
@@ -196,6 +207,40 @@ def cmd_enable(a, on=True):
     say("  строка %d: %s" % (r["id"], "включена" if on else "выключена"))
     hint_apply()
     return 0, {"row": store.masked(r)}
+
+
+def cmd_protect(a):
+    """Без аргументов — что закрывает защита и у каких строк она снята; ID|all on|off — переключить."""
+    if a.id is not None and a.state is None:
+        raise Fail("modlink protect %s on|off" % a.id)
+    if a.id is None:
+        doc = store.load()
+        g = store.guard_lists(store.guard_extra())
+        off = [r["id"] for r in doc["proxies"] if not r["protect"]]
+        say("  защита строки (по умолчанию включена) закрывает:")
+        say("    сайты и ЛК операторов: %s" % ", ".join(g["domains"]))
+        say("    порты: %s, %s" % (", ".join(map(str, g["ports"])), ", ".join(x.replace(":", "–") for x in g["port_ranges"])))
+        if g["cidrs"]:
+            say("    сети: %s" % ", ".join(g["cidrs"]))
+        say("    веб своего модема (modem_ip)")
+        say("  у всех строк закрыты: %s" % ", ".join(g["always"]))
+        say("  свои дополнения: %s {\"domains\": [], \"cidrs\": [], \"ports\": []}" % P.guard)
+        say("  без защиты: %s" % (", ".join(map(str, off)) if off else "нет таких строк"))
+        return 0, dict(g, off=off)
+    on = a.state == "on"
+    with edit():
+        doc = store.load()
+        ids = [r["id"] for r in doc["proxies"]] if a.id == "all" else [store.find(doc, a.id)["id"]]
+        changed = [rid for rid in ids if store.find(doc, rid)["protect"] != on]
+        for rid in changed:
+            store.set_fields(doc, rid, [("protect", on)])
+        store.save(doc)
+    say("  защита %s: %s" % ("включена" if on else "СНЯТА", ", ".join(map(str, changed)) if changed else "уже так"))
+    if not on and changed:
+        say("  ⚠ без защиты клиенту открыты ЛК оператора и веб модема — только для своих (ген1)")
+    if changed:
+        hint_apply()
+    return 0, {"protect": on, "changed": changed}
 
 
 def cmd_apply(a):
@@ -269,7 +314,30 @@ def cmd_log(a):
     return 0, {"id": rid, "lines": lines}
 
 
+def primary_ip():
+    m = re.search(r"src (\d+\.\d+\.\d+\.\d+)", util.sh("ip", "-4", "route", "get", "1.1.1.1", check=False).stdout)
+    if not m:
+        raise Fail("свой основной адрес не узнал — укажи: modlink export --table --ip IP")
+    return m.group(1)
+
+
+def cmd_export_table(a):
+    rows = store.load()["proxies"]
+    ip = store.as_ipv4(a.ip if a.ip and a.ip != "auto" else primary_ip(), "IP")
+    lines, warn = store.table_lines(rows, ip)
+    if not util.QUIET[0]:
+        for ln in lines:
+            print(ln)
+        for w in warn:
+            print("  ⚠ " + w, file=sys.stderr)
+        if len(lines) < 2:
+            print("  строк для proxyveth нет (нужны включённые с lan_ip 192.168.N.x)", file=sys.stderr)
+    return 0, {"ip": ip, "lines": lines, "warnings": warn}
+
+
 def cmd_export(a):
+    if a.table:
+        return cmd_export_table(a)
     rows = store.load()["proxies"]
     ip = a.ip if a.ip and a.ip != "auto" else (None if a.ip == "auto" else system.ext_ip_saved())
     if not ip:
@@ -350,7 +418,7 @@ def cmd_daemon(a):
     return Daemon().run(), None
 
 
-CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enable": cmd_enable,
+CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enable": cmd_enable, "protect": cmd_protect,
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
         "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log,
         "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,

@@ -260,7 +260,7 @@ class Menu:
         items = [
             ("1", "Серверы            список, создать, взять, удалить, обновить", self.m_servers),
             ("2", "Модемы             proxyveth на выбранном сервере", self.m_modems),
-            ("3", "Прокси             modlink на выбранном сервере", self.m_proxies),
+            ("3", "Прокси             modlink на выбранном (хост или ВМ)", self.m_proxies),
             ("4", "Софт               mp.space, hivelink", self.m_soft),
             ("5", "Сеть и доступ      DNS, пароль root, ключ SSH, порт SSH, консоль", self.m_access),
             ("6", "Диагностика        сводка, doctor, журнал", self.m_diag),
@@ -361,32 +361,47 @@ class Menu:
 
     # Прокси
     def m_proxies(self):
+        def where():
+            return "хосте" if self.sel == store.HOST else "сервере %s" % self.sel
+
         def ml(*args):
-            return lambda: self.run(["modlink"] + list(args) + ["--server", self.need_server()])
+            return lambda: self.run(["modlink"] + list(args) + self.tgt())
 
         def with_id(verb, danger=False):
             def go():
-                self.need_server()
+                self.tgt()
                 i = self.ask("ID прокси (из списка)", r"\d+", hint="число")
                 if not i:
                     return
-                if danger and not self.confirm_server("modlink %s %s на сервере %s" % (verb, i, self.sel)):
+                if danger and not self.confirm_server("modlink %s %s на %s" % (verb, i, where())):
                     return
                 # подтверждение уже было — modlink без терминала ждёт --yes
-                self.run(["modlink", verb, i] + (["--yes"] if verb == "del" else []) + ["--server", self.sel])
+                self.run(["modlink", verb, i] + (["--yes"] if verb == "del" else []) + self.tgt())
             return go
 
         def add():
-            self.need_server()
-            ip = self.ask("Адрес интерфейса модема на сервере (lan-ip)", r"\d+\.\d+\.\d+\.\d+", hint="192.168.N.100")
+            self.tgt()
+            ip = self.ask("Адрес интерфейса модема (lan-ip)", r"\d+\.\d+\.\d+\.\d+", hint="192.168.N.100")
             if ip:
-                self.run(["modlink", "add", "--lan-ip", ip, "--password", "gen", "--port", "auto",
-                          "--server", self.sel])
+                self.run(["modlink", "add", "--lan-ip", ip, "--password", "gen", "--port", "auto"] + self.tgt())
+
+        def protect():
+            self.tgt()
+            i = self.ask("ID прокси или all", r"\d+|all", hint="число или all")
+            if not i:
+                return
+            st = self.ask("Защита: on — включить, off — снять", r"on|off", hint="on или off")
+            if st == "off" and not self.confirm_server(
+                    "Снять защиту (%s на %s): клиенту откроются ЛК оператора, веб модема и опасные порты"
+                    % ("у всех строк" if i == "all" else "строка " + i, where())):
+                return
+            if st:
+                self.run(["modlink", "protect", i, st] + self.tgt())
 
         self.loop("Прокси — modlink", [
             ("1", "Список", ml("list")),
             ("2", "Состояние", ml("status")),
-            ("3", "Предложить по интерфейсам сервера (from-ifaces)", ml("from-ifaces")),
+            ("3", "Предложить по интерфейсам (from-ifaces)", ml("from-ifaces")),
             ("4", "Добавить прокси", add),
             ("5", "Проверить прокси", with_id("test")),
             ("6", "Включить", with_id("enable")),
@@ -394,6 +409,8 @@ class Menu:
             ("8", "Удалить", with_id("del", danger=True)),
             ("9", "Применить (apply)", ml("apply")),
             ("10", "Строки для клиента (export, с паролями)", ml("export")),
+            ("11", "Защита: что закрыто и у кого снята", ml("protect")),
+            ("12", "Защита: включить / снять", protect),
         ])
 
     # Софт

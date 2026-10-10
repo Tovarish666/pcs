@@ -15,7 +15,7 @@ from .. import VERSION
 from ..core import dns as dnsfix
 from ..core import util
 from ..core.util import Fail, sh
-from . import jobs, ops, pve, remote, servers, store, ui, web
+from . import jobs, node, ops, pve, remote, servers, store, ui, web
 
 HELP = """pcs %s — хаб фермы мобильных прокси на хосте Proxmox
 
@@ -26,7 +26,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
                     [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
   pcs server adopt ID [--ip IP] | delete ID [--yes]
   pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
-  pcs modlink …    [--server ID]
+  pcs modlink …    [--server ID|--host]
   pcs hivelink …   [--server ID|--host]
   pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
   pcs passwd  [--server ID|--host]      пароль root (Enter — сгенерировать)
@@ -119,7 +119,7 @@ def parser():
 
 def split_target(args, allow_host=True):
     """--server ID / --server=ID / --host — откуда угодно в аргументах части; остальное — как есть.
-    --host — всегда флаг хаба: для proxyveth и modlink это ошибка, а не «молча на выбранный сервер»."""
+    --host — всегда флаг хаба: для proxyveth это ошибка, а не «молча на выбранный сервер»."""
     rest, server, host = [], None, False
     i = 0
     while i < len(args):
@@ -147,7 +147,7 @@ def passthru(part, args):
         if not rest:
             rest = ["help"] if not as_json else ["status", "--json"]
         if t == store.HOST:
-            if part != "hivelink":
+            if part not in remote.HOST_PARTS:
                 raise Fail("на хосте нет %s — он на серверах: --server ID" % part)
             return subprocess.call([os.path.join(remote.ROOT, "bin", part)] + rest)
         if not as_json and sys.stdout.isatty():
@@ -515,6 +515,10 @@ def c_doctor(a):
     ui.info("панель: %s" % ("работает" if w["active"] else w["state"]))
     hl = remote.local_part("hivelink", ["status"], timeout=30)
     (ui.ok if hl.get("ok") else ui.warn)("hivelink на хосте: %s" % ("в порядке" if hl.get("ok") else hl.get("error")))
+    ml = node.modlink_info()
+    chk(ml["installed"], "modlink на хосте", "pcs update --host (или modlink setup)")
+    if ml["installed"]:
+        ui.info("modlink: демон %(modlink)s, sing-box %(modlink-sb)s" % ml["state"])
     t = store.target(a.server, a.host, default_host=True)
     if t != store.HOST:
         ui.hdr("Сервер %s (%s)" % (t["id"], t.get("ip")))

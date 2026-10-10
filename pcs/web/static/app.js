@@ -342,10 +342,13 @@
         if (r && r.ok) showText("hivelink на хосте", JSON.stringify(r.data, null, 1));
       }),
       btn("Обновить", (e) => act(e.target, rHl.res, () => run("host", "hivelink", ["install"]), "Применено")));
+    const ml = el("span", {class: "muted"});
+    const rMl = actRow("modlink", "прокси из настоящих модемов хоста (hivelink → интерфейсы → прокси)", ml,
+      link("Открыть", "#/host/modlink"));
     const rUp = actRow("Обновить PCS", "одна версия кода на хосте и всех серверах", ver,
       btn("Обновить", (e) => act(e.target, rUp.res, () => POST("/api/targets/host/update", {}), "Применено", rUp.jobs)));
     const rTerm = actRow("Терминал хоста", "консоль root на хосте Proxmox", link("Открыть", "#/host/term"));
-    const acts = el("div", {class: "acts"}, rDns.el, rPw.el, rKey.el, rHl.el, rUp.el, rTerm.el);
+    const acts = el("div", {class: "acts"}, rDns.el, rPw.el, rKey.el, rHl.el, rMl.el, rUp.el, rTerm.el);
 
     const root = el("div", {}, banner, head, cards, el("h2", {text: "Виртуальные машины"}), list,
       el("h2", {text: "Хост"}), acts);
@@ -363,6 +366,9 @@
           real + " " + plural(real, "настоящий модем", "настоящих модема", "настоящих модемов")].join(" · ")}));
       hl.textContent = h.installed === false ? "не установлен" : ["установлен", h.version, real + " " + plural(real, "модем", "модема", "модемов")].filter(Boolean).join(" · ");
       ver.textContent = "версия " + (host.version || (S.session && S.session.version) || "—");
+      const m = host.modlink || {};
+      ml.textContent = m.installed === false ? "не установлен — pcs update --host" : m.state
+        ? "демон " + m.state.modlink + " · sing-box " + m.state["modlink-sb"] : "";
       let ok = 0, total = 0, probs = 0, up = 0;
       for (const s of list_) {
         const c = counts(s);
@@ -677,9 +683,11 @@
   const ML_COLS = [["enabled", "вкл", "строка активна"], ["name", "имя", "метка"], ["login", "логин"], ["password", "пароль"],
     ["port", "порт", "порт прокси (постоянный)"], ["lan_ip", "LAN IP", "адрес интерфейса модема на сервере"],
     ["modem_ip", "IP модема", "веб-интерфейс Huawei (HiLink)"], ["reconnect_port", "реконнект", "порт триггера: GET http://IP:порт/reconnect"],
-    ["interval_min", "мин", "автореконнект, минут (0 — выкл)"]];
+    ["interval_min", "мин", "автореконнект, минут (0 — выкл)"],
+    ["protect", "защита", "закрыты ЛК и сайты операторов, опасные порты (почта, SMB, торренты) и веб модема; снять — только для своих (ген1)"]];
 
   function mlTab(id) {
+    const where = id === "host" ? "хост" : "ВМ " + id;
     const statusLine = el("div", {class: "muted"});
     const tbl = el("div", {class: "tbl-wrap"});
     const res = el("span", {class: "res"});
@@ -708,6 +716,19 @@
       if (k === "enabled") {
         return el("input", {type: "checkbox", checked: !!v, onchange: (e) => isNew ? (r.fields[k] = e.target.checked) : setEdit(r, k, e.target.checked)});
       }
+      if (k === "protect") {
+        const on = v !== false;
+        const box = el("input", {type: "checkbox", checked: on, title: on ? "защита активна" : "защита НЕ активна",
+          onchange: (e) => {
+            if (!e.target.checked && !window.confirm("Снять защиту строки " + (isNew ? "(новой)" : r.id) + "? Клиенту прокси откроются " +
+                "личный кабинет оператора (вход по SIM без пароля), веб модема и опасные порты. Только для своих (ген1).")) {
+              e.target.checked = true; return;
+            }
+            if (isNew) r.fields[k] = e.target.checked; else setEdit(r, k, e.target.checked);
+            draw(); markDirty();
+          }});
+        return el("label", {class: "guard" + (on ? "" : " off")}, box, el("span", {text: on ? "активна" : "не активна"}));
+      }
       return el("input", {value: v == null ? "" : String(v), class: cls, placeholder: isNew && /port/.test(k) ? "auto" : isNew && k === "password" ? "gen" : "",
         oninput: (e) => isNew ? (r.fields[k] = e.target.value) : setEdit(r, k, e.target.value)});
     }
@@ -724,7 +745,7 @@
         btn("↺", () => { setEdit(r, "password", "gen"); draw(); }, "icon", "сгенерировать новый пароль"));
     }
     async function reveal(r) {
-      const x = await POST("/api/servers/" + id + "/modlink/reveal", {id: r.id});
+      const x = await POST("/api/targets/" + id + "/modlink/reveal", {id: r.id});
       if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
       revealed[r.id] = x.data.password;
       draw();
@@ -739,7 +760,7 @@
         const lines = L ? L.map((l) => typeof l === "string" ? l : JSON.stringify(l)).join("\n")
           : typeof x.data === "string" ? x.data : JSON.stringify(x.data, null, 1);
         out.textContent = "";
-        showText("Журнал реконнектов · строка " + r.id + " · ВМ " + id, lines || "пусто");
+        showText("Журнал реконнектов · строка " + r.id + " · " + where, lines || "пусто");
         return;
       }
       out.textContent = "строка " + r.id + " · " + what + ": " + mlResult(args[0], x.data);
@@ -772,7 +793,7 @@
     }
 
     async function load() {
-      const r = await GET("/api/servers/" + id + "/modlink");
+      const r = await GET("/api/targets/" + id + "/modlink");
       if (!r.ok) { err = r.error; draw(); return; }
       const L = r.data.list, St = r.data.status;
       err = L.ok ? null : L.error;
@@ -799,12 +820,12 @@
       markDirty();
     }
     async function pollStatus() {
-      const r = await GET("/api/servers/" + id + "/modlink?only=status");
+      const r = await GET("/api/targets/" + id + "/modlink?only=status");
       if (r.ok) applyStatus(r.data.status);
     }
 
     const bAdd = btn("Добавить", () => {
-      added.push({tmp: ++seq, fields: {enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "", reconnect_port: "", interval_min: "0"}});
+      added.push({tmp: ++seq, fields: {enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "", reconnect_port: "", interval_min: "0", protect: true}});
       draw(); markDirty();
     });
     const bIf = btn("Из интерфейсов", async (e) => {
@@ -812,7 +833,7 @@
       if (!r || !r.ok) return;
       const sug = rowsOf(r.data);
       if (!sug.length) { setRes(res, "ok", "новых интерфейсов 192.168.N.100 нет — всё уже в таблице"); return; }
-      modal("Строки по интерфейсам · ВМ " + id, el("div", {},
+      modal("Строки по интерфейсам · " + where, el("div", {},
         el("p", {text: "modlink добавит строки (логин, пароль и порты — сам). В силу вступят после «Применить»."}),
         el("pre", {text: sug.map((x) => [x.lan_ip, x.modem_ip, x.iface, x.name].filter(Boolean).join("  ")).join("\n")})), [
         {text: "Отмена"},
@@ -828,19 +849,26 @@
         del: [...deleted],
         set: Object.entries(edits).filter(([k]) => !deleted.has(Number(k)) && !deleted.has(k)).map(([k, f]) => ({id: Number(k), fields: f})),
         add: added.map((a) => a.fields), apply: true};
-      const r = await act(e.target, res, () => POST("/api/servers/" + id + "/modlink/save", payload), "Применено");
+      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/save", payload), "Применено");
       if (r && !r.ok && r.data && r.data.steps) {
         out.textContent = r.data.steps.map((s) => (s.ok ? "✓ " : "✗ ") + s.what + (s.error ? ": " + s.error : "")).join("   ");
       }
       await load();
     }, "primary", "сохранить правки и modlink apply (sing-box check → перезапуск)");
     const bExp = btn("Экспорт для клиента", async (e) => {
-      const r = await act(e.target, res, () => POST("/api/servers/" + id + "/modlink/export", {}), "Готово");
-      if (r && r.ok) showText("Экспорт для клиента · ВМ " + id, r.data.text || "пусто");
+      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {}), "Готово");
+      if (r && r.ok) showText("Экспорт для клиента · " + where, r.data.text || "пусто");
     }, "", "IP:PORT:LOGIN:PASS и ссылка реконнекта — с паролями");
+    const bTbl = btn("Для proxyveth", async (e) => {
+      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {table: true}), "Готово");
+      if (r && r.ok) showText("Строки для таблицы proxyveth · " + where,
+        (r.data.warnings.length ? r.data.warnings.map((w) => "⚠ " + w).join("\n") + "\n\n" : "") + (r.data.text || "пусто") +
+        "\n\nВставьте строки в таблицу proxyveth ВМ этого хоста (вкладка proxyveth → таблица). У строк-поставщиков защита снята:" +
+        " proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink.");
+    }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
 
     const root = el("div", {}, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
-      el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
+      el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, bTbl, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
     let loaded = false;
     const pl = poller(15000, pollStatus);
     return {
@@ -1084,6 +1112,15 @@
     return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {page: true})), update() { document.title = "Задание — PCS"; }};
   }
 
+  function pageHostMl() {
+    const host = (S.ov && S.ov.host) || {};
+    const pl = el("div", {class: "plaque host"}, el("div", {}, el("div", {class: "big", text: "Хост " + (host.name || "") + " · modlink"}),
+      el("div", {class: "line", text: "прокси из настоящих модемов хоста: hivelink → интерфейсы 192.168.N.100 → modlink"})));
+    const t = mlTab("host");
+    return {kind: "hostml", el: el("div", {}, pl, t.el), show: () => t.show(), dispose: () => t.dispose(),
+      update() { document.title = "Хост — modlink — PCS"; }};
+  }
+
   function pageHostTerm() {
     const host = (S.ov && S.ov.host) || {};
     const pl = el("div", {class: "plaque host"}, el("div", {}, el("div", {class: "big", text: "Хост " + (host.name || "")}),
@@ -1100,6 +1137,7 @@
     if (p[0] === "create") return {kind: "create"};
     if (p[0] === "job" && p[1]) return {kind: "job", id: p[1]};
     if (p[0] === "host" && p[1] === "term") return {kind: "hostterm"};
+    if (p[0] === "host" && p[1] === "modlink") return {kind: "hostml"};
     return {kind: "host"};
   }
   function route() {
@@ -1107,7 +1145,7 @@
     if (S.page && S.page.kind === "vm" && r.kind === "vm" && S.page.id === r.id) { S.page.show(r.tab); renderTree(); return; }
     if (S.page && S.page.dispose) S.page.dispose();
     const page = r.kind === "vm" ? pageVm(r.id) : r.kind === "create" ? pageCreate() : r.kind === "job" ? pageJob(r.id)
-      : r.kind === "hostterm" ? pageHostTerm() : pageHost();
+      : r.kind === "hostterm" ? pageHostTerm() : r.kind === "hostml" ? pageHostMl() : pageHost();
     S.page = page;
     $("#main").replaceChildren(page.el);
     if (page.update) page.update();

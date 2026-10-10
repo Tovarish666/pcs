@@ -25,6 +25,7 @@ _jobs = {}
 _jid = itertools.count(1)
 S = {}                # id -> сервер (с модемами, таблицей, modlink)
 H = {}                # хост
+HML = {}              # modlink на самом хосте (настоящие модемы хоста)
 
 
 def _now():
@@ -69,7 +70,7 @@ def _modlink(sid, ns, count):
         rows.append({"id": n, "enabled": i != 3, "name": "m%d" % n, "login": "u%d" % n,
                      "password": _pw("ml-%s-%s" % (sid, n), 12), "port": 20000 + n,
                      "lan_ip": "192.168.%d.100" % n, "modem_ip": "192.168.%d.1" % n,
-                     "reconnect_port": 21000 + n, "interval_min": 0 if i % 3 else 10})
+                     "reconnect_port": 21000 + n, "interval_min": 0 if i % 3 else 10, "protect": i != 1})
     return rows
 
 
@@ -102,7 +103,13 @@ def reset():
                   "cpu": {"cores": 32, "load": 2.4},
                   "ram": {"total_gb": 128, "used_gb": 71.3},
                   "disk": {"total_gb": 1863, "used_gb": 412},
-                  "hivelink": {"installed": True, "version": VERSION, "modems": 3, "ok": 3}})
+                  "hivelink": {"installed": True, "version": VERSION, "modems": 3, "ok": 3},
+                  "modlink": {"installed": True, "state": {"modlink": "active", "modlink-sb": "active"}}})
+        HML.clear()
+        HML.update({"id": "host", "ip": "88.87.69.240", "modlink": [], "ml_log": {}, "ml_pending": False,
+                    "ml_applied": {}, "modems": [{"n": n, "iface": "enx0c5b8f279a6%d" % n} for n in (1, 2, 3)]})
+        HML["modlink"] = _modlink("host", [1, 2], 2)
+        HML["ml_applied"] = {r["id"]: dict(r) for r in HML["modlink"]}
 
 
 reset()
@@ -389,8 +396,10 @@ def run(sid, part, args, input=None):
 
 
 def _host_run(part, args):
+    if part == "modlink":
+        return _ml(HML, args, None)
     if part != "hivelink":
-        raise Fail("%s на хосте не ставится — только на серверах" % part)
+        raise Fail("на хосте есть hivelink и modlink; %s — на серверах" % part)
     if args[:1] == ["status"]:
         return {"installed": True, "version": VERSION,
                 "modems": [{"n": 1, "iface": "enx0c5b8f279a64", "state": "ok", "imei": "86xxxxxxxxx0412"},
@@ -535,6 +544,8 @@ def _ml(srv, a, inp):
                                  "text": "IP %s" % _ml_ip(r["id"])} if r["interval_min"] else None})
         return {"sb": "active", "daemon": "active", "unit": "modlink-sb.service", "pending": pend, "rows": out}
     if cmd == "add":
+        noprot = "--no-protect" in a
+        a = [x for x in a if x != "--no-protect"]
         opts = dict(zip(a[1::2], a[2::2]))
         if "--lan-ip" not in opts:
             raise Fail("нужен --lan-ip")
@@ -552,7 +563,7 @@ def _ml(srv, a, inp):
                "port": _ml_free(srv, "port", 20000) if port == "auto" else int(port),
                "lan_ip": opts["--lan-ip"], "modem_ip": opts.get("--modem-ip", ""),
                "reconnect_port": _ml_free(srv, "reconnect_port", 21000) if rport == "auto" else int(rport),
-               "interval_min": int(opts.get("--interval", 0))}
+               "interval_min": int(opts.get("--interval", 0)), "protect": not noprot}
         if any(r["port"] == row["port"] for r in srv["modlink"]):
             raise Fail("порт %d уже занят строкой modlink" % row["port"])
         srv["modlink"].append(row)
@@ -566,6 +577,10 @@ def _ml(srv, a, inp):
                 raise Fail("нет поля %s" % k)
             if k == "password" and v == "gen":
                 v = _pw("gen%s%s" % (r["id"], time.time()))
+            if k in ("enabled", "protect"):
+                if v not in ("0", "1", "on", "off"):
+                    raise Fail("%s: нужно 1/0" % k)
+                v = v in ("1", "on")
             if k in ("port", "reconnect_port", "interval_min"):
                 v = int(v)
                 if k == "port" and any(x["port"] == v and x is not r for x in srv["modlink"]):
@@ -573,6 +588,19 @@ def _ml(srv, a, inp):
             r[k] = v
         srv["ml_pending"] = True
         return {"id": r["id"], "pending": True}
+    if cmd == "protect":
+        if len(a) == 1:
+            return {"domains": ["beeline.ru", "megafon.ru", "mts.ru", "t2.ru", "tele2.ru", "yota.ru"],
+                    "ports": [23, 25, 445, 465, 587], "port_ranges": ["6881:6889"], "cidrs": [],
+                    "off": [r["id"] for r in srv["modlink"] if not r["protect"]]}
+        ids = [r["id"] for r in srv["modlink"]] if a[1] == "all" else [_ml_find(srv, a[1])["id"]]
+        on = a[2] == "on"
+        changed = [r["id"] for r in srv["modlink"] if r["id"] in ids and r["protect"] != on]
+        for r in srv["modlink"]:
+            if r["id"] in ids:
+                r["protect"] = on
+        srv["ml_pending"] = srv["ml_pending"] or bool(changed)
+        return {"protect": on, "changed": changed}
     if cmd in ("enable", "disable"):
         _ml_find(srv, a[1])["enabled"] = cmd == "enable"
         srv["ml_pending"] = True
@@ -611,6 +639,12 @@ def _ml(srv, a, inp):
             time.strftime("%F %T", time.localtime(time.time() - 600 * k)), 110 + k, 20 + k, 111 + k, 21 + k)
             for k in (3, 2, 1)]
         return {"id": r["id"], "lines": base + srv["ml_log"].get(r["id"], [])}
+    if cmd == "export" and "--table" in a:
+        lines = ["n,real,proxy,enabled"] + ["%d,%d,%s:%d:%s:%s,1" % (r["id"], r["id"], srv["ip"], r["port"], r["login"],
+                                                                      r["password"]) for r in srv["modlink"] if r["enabled"]]
+        return {"ip": srv["ip"], "lines": lines,
+                "warnings": ["строка %d: защита включена — DNS и HiLink виртуального модема не пройдут: modlink protect %d off"
+                             % (r["id"], r["id"]) for r in srv["modlink"] if r["enabled"] and r["protect"]]}
     if cmd == "export":
         ip = srv["ip"]
         return {"ip": ip, "lines": ["%s:%d:%s:%s\thttp://%s:%d/reconnect" % (

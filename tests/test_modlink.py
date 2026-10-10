@@ -169,7 +169,54 @@ check("частные адреса и IPv6 закрыты до правил ст
       rules.index({"ip_is_private": True, "action": "reject"}) < rules.index({"inbound": ["in-201"], "action": "route", "outbound": "out-201"})
       and {"ip_cidr": ["::/0"], "action": "reject"} in rules)
 txt = json.dumps(cfg)
-check("ни sniff, ни domain_strategy, ни address-DNS", not re.search(r"sniff|domain_strategy|\"address\"", txt))
+check("ни domain_strategy, ни address-DNS", not re.search(r"domain_strategy|\"address\"", txt))
+
+print("защита строки (protect):")
+check("по умолчанию защита включена (и у старых строк без поля)", all(r["protect"] for r in rows))
+check("sniff только для защищённых и до resolve",
+      rules[0] == {"inbound": ["in-201", "in-202"], "action": "sniff"} and rules[1]["action"] == "resolve")
+dom = next((x for x in rules if x.get("domain_suffix")), {})
+check("ЛК операторов закрыты у защищённых", dom.get("inbound") == ["in-201", "in-202"] and dom.get("action") == "reject"
+      and {"mts.ru", "megafon.ru", "beeline.ru", "t2.ru", "yota.ru"} <= set(dom.get("domain_suffix", [])), dom)
+prt = next((x for x in rules if x.get("port")), {})
+check("опасные порты закрыты (25, 445, торренты)", 25 in prt.get("port", []) and 445 in prt.get("port", [])
+      and prt.get("port_range") == ["6881:6889"] and prt.get("action") == "reject", prt)
+check("CGNAT 100.64/10 закрыт у всех", {"ip_cidr": ["100.64.0.0/10"], "action": "reject"} in rules)
+open_rows = [dict(rows[0], protect=False), rows[1]]
+cfg2 = store.config(open_rows)
+r2 = cfg2["route"]["rules"]
+check("без защиты: ни sniff, ни ЛК, ни портов для этой строки",
+      all("in-201" not in x.get("inbound", []) for x in r2 if x.get("action") in ("sniff",) or x.get("domain_suffix") or x.get("port")))
+mw = {"inbound": ["in-201"], "ip_cidr": ["192.168.201.1/32"], "action": "route", "outbound": "out-201"}
+check("без защиты: веб своего модема открыт — раньше запрета частных", mw in r2
+      and r2.index(mw) < r2.index({"ip_is_private": True, "action": "reject"}), r2[:5])
+check("без защиты: частные, IPv6 и CGNAT всё равно закрыты",
+      {"ip_is_private": True, "action": "reject"} in r2 and {"ip_cidr": ["::/0"], "action": "reject"} in r2
+      and {"ip_cidr": ["100.64.0.0/10"], "action": "reject"} in r2)
+check("все строки без защиты — sniff не нужен", not any(x.get("action") == "sniff" for x in
+                                                        store.config([dict(r, protect=False) for r in rows])["route"]["rules"]))
+check("protect принимает on/off/да/нет", store.norm(dict(rows[0], protect="off"))["protect"] is False
+      and store.norm(dict(rows[0], protect="да"))["protect"] is True)
+check("protect: мусор — понятная ошибка", "protect" in (fails(store.norm, dict(rows[0], protect="может")) or ""))
+gx = os.path.join(store.P.etc, "protect.json")
+check("protect.json нет — дополнений нет", store.guard_extra(gx) == {"domains": [], "cidrs": [], "ports": []})
+os.makedirs(store.P.etc, exist_ok=True)
+json.dump({"domains": [".LK.Example.RU"], "cidrs": ["10.200.0.0/16"], "ports": ["8291"]}, open(gx, "w"))
+ext = store.guard_extra(gx)
+check("protect.json: домены, сети и порты читаются", ext == {"domains": ["lk.example.ru"], "cidrs": ["10.200.0.0/16"],
+                                                               "ports": [8291]}, ext)
+cfg3 = store.config(rows, ext)
+d3 = next(x for x in cfg3["route"]["rules"] if x.get("domain_suffix"))
+check("дополнения попадают в правила", "lk.example.ru" in d3["domain_suffix"] and d3["ip_cidr"] == ["10.200.0.0/16"]
+      and 8291 in next(x for x in cfg3["route"]["rules"] if x.get("port"))["port"])
+json.dump({"domains": ["не домен"]}, open(gx, "w"))
+check("protect.json с мусором — Fail", "не годится" in (fails(store.guard_extra, gx) or ""))
+os.unlink(gx)
+ok, msg = sb_check(cfg2)
+if ok is not None:
+    check("sing-box check: строка без защиты", ok, msg)
+    ok, msg = sb_check(cfg3)
+    check("sing-box check: с дополнениями protect.json", ok, msg)
 ok, msg = sb_check(cfg)
 if ok is not None:
     check("sing-box %s check: конфиг принят" % singbox.VERSION, ok, msg)
@@ -184,6 +231,17 @@ lines = store.export_lines(rows, "203.0.113.5")
 check("формат IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect",
       lines[0] == "203.0.113.5:10000:modem201:pw:1\thttp://203.0.113.5:10001/reconnect", lines)
 check("выключенные не экспортируются", len(lines) == 2)
+from pcs.core import table as ptable  # noqa: E402
+feed = [dict(rows[0], protect=False, password="p,w:1"), rows[1], rows[2],
+        store.norm(dict(rows[0], id=1001, lan_ip="10.0.0.5", port=10010, reconnect_port=10011, protect=False))]
+tl, tw = store.table_lines(feed, "192.168.88.254")
+good, _, bad, probs = ptable.lint("\n".join(tl) + "\n")
+check("export --table: строки таблицы proxyveth, proxyveth их принимает (и пароль с «,» и «:»)",
+      tl[0] == "n,real,proxy,enabled" and sorted(good) == [201, 202] and not bad
+      and good[201]["host"] == "192.168.88.254" and good[201]["pw"] == "p,w:1" and good[201]["real"] == 201, (tl, probs))
+check("export --table: предупреждения — защита у 202, не 192.168.N.x у 1001",
+      any("строка 202" in w and "protect 202 off" in w for w in tw) and any("строка 1001" in w for w in tw)
+      and not any("строка 201" in w for w in tw), tw)
 
 # ── интерфейсы ─────────────────────────────────────────────────────────────
 print("from-ifaces:")
@@ -587,8 +645,29 @@ rc, out, err = run_cli("status", "--json")
 check("status --json: строки и состояния служб", rc == 0 and json.loads(out)["data"]["rows"][0]["state"] == "pending", out)
 rc, out, err = run_cli("log", "201", "--json")
 check("log --json", rc == 0 and json.loads(out)["data"] == {"id": 201, "lines": []}, out)
+rc, out, err = run_cli("add", "--lan-ip", "192.168.202.100", "--no-protect", "--json")
+check("add --no-protect — строка без защиты", rc == 0 and json.loads(out)["data"]["row"]["protect"] is False, out)
+rc, out, err = run_cli("protect", "--json")
+d = json.loads(out)["data"] if rc == 0 else {}
+check("protect без аргументов: списки и строки без защиты", d.get("off") == [202] and "mts.ru" in d.get("domains", [])
+      and 25 in d.get("ports", []), out)
+rc, out, err = run_cli("protect", "all", "on", "--json")
+check("protect all on — включает только тем, у кого снята", rc == 0 and json.loads(out)["data"]["changed"] == [202], out)
+rc, out, err = run_cli("protect", "201", "off")
+check("protect ID off — снята и предупреждение", rc == 0 and not store.find(store.load(), 201)["protect"]
+      and "только для своих" in out and "modlink apply" in out, out)
+rc, out, err = run_cli("set", "201", "protect=on")
+check("set protect=on", rc == 0 and store.find(store.load(), 201)["protect"], err)
+rc, out, err = run_cli("export", "--table", "--ip", "192.168.88.254", "--json")
+d = json.loads(out)["data"] if rc == 0 else {}
+check("export --table --json: строки и предупреждения", d.get("lines", [""])[0] == "n,real,proxy,enabled"
+      and len(d["lines"]) == 3 and d["warnings"], out)
+rc, out, err = run_cli("protect", "201")
+check("protect ID без on/off — подсказка", rc == 1 and "on|off" in err, err)
+rc, out, err = run_cli("list")
+check("list: колонка «защита»", rc == 0 and "защита" in out, out)
 rc, out, err = run_cli()
-check("без аргументов — справка", rc == 0 and "modlink list" in out)
+check("без аргументов — справка", rc == 0 and "modlink list" in out and "modlink protect" in out)
 
 print("без shell:")
 src = ""

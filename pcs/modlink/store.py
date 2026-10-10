@@ -4,7 +4,9 @@
 Строка — ровно поля из docs/ARCHITECTURE.md §8. Порт и триггер у строки постоянные:
 не зависят от её места в списке (в modlink-linux зависели — и съезжали при правке).
 """
+import csv
 import hashlib
+import io
 import ipaddress
 import os
 import re
@@ -16,7 +18,7 @@ import unicodedata
 from ..core.util import Fail, jload, jsave
 
 FIELDS = ("id", "enabled", "name", "login", "password", "port", "lan_ip", "modem_ip",
-          "reconnect_port", "interval_min")
+          "reconnect_port", "interval_min", "protect")
 BASE_PORT = 10000
 FIRST_FREE_ID = 1001          # id не по номеру модема (второй прокси на модем, чужая сеть)
 MAX_INTERVAL = 7 * 24 * 60
@@ -38,6 +40,7 @@ class Paths:
         self.proxies = self.etc + "/proxies.json"
         self.singbox = self.etc + "/singbox.json"
         self.config = self.etc + "/config.json"
+        self.guard = self.etc + "/protect.json"
         self.legacy = self.etc + "/legacy"
         self.applied = self.lib + "/applied.json"
         self.state = self.run + "/state.json"
@@ -145,6 +148,7 @@ def norm(r):
             "modem_ip": as_ipv4(r.get("modem_ip", ""), "modem_ip", empty_ok=True),
             "reconnect_port": as_port(r.get("reconnect_port"), "reconnect_port"),
             "interval_min": as_interval(r.get("interval_min", 0)),
+            "protect": as_bool(r.get("protect", True), "protect"),
         }
     except Fail as e:
         raise Fail("строка %d: %s" % (rid, e))
@@ -296,7 +300,7 @@ def resolve_ports(doc, row, port, rport, skip_id=None, mine=()):
 
 
 def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip=None,
-        reconnect_port="auto", interval_min=0, enabled=True):
+        reconnect_port="auto", interval_min=0, enabled=True, protect=True):
     lan_ip = as_ipv4(lan_ip, "lan_ip")
     rid = new_id(doc, lan_ip)
     n = modem_n(lan_ip)
@@ -306,7 +310,7 @@ def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip
            "password": gen_password() if password in (None, "", "gen") else password,
            "lan_ip": lan_ip,
            "modem_ip": default_modem_ip(lan_ip) if modem_ip is None else modem_ip,
-           "interval_min": interval_min}
+           "interval_min": interval_min, "protect": protect}
     resolve_ports(doc, row, port, reconnect_port)
     row = norm(row)
     check_all(doc["proxies"] + [row])
@@ -314,7 +318,8 @@ def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip
     return row
 
 
-SET_ALIASES = {"interval": "interval_min", "rport": "reconnect_port", "lan": "lan_ip", "modem": "modem_ip"}
+SET_ALIASES = {"interval": "interval_min", "rport": "reconnect_port", "lan": "lan_ip", "modem": "modem_ip",
+               "guard": "protect"}
 
 
 def set_fields(doc, rid, pairs, mine=()):
@@ -350,21 +355,91 @@ def delete(doc, rid):
     return r
 
 
+# ── защита (protect=1 у строки, так по умолчанию) ─────────────────────────
+# Мобильная сеть узнаёт абонента по IP: личный кабинет оператора, оплата с баланса,
+# подписки и веб модема открываются без пароля. Клиент прокси получил бы всё это.
+GUARD_DOMAINS = (
+    "mts.ru", "megafon.ru", "beeline.ru", "tele2.ru", "t2.ru", "yota.ru",      # большая четвёрка
+    "sbermobile.ru", "vtbmobile.ru", "gpbmobile.ru", "motivtelecom.ru",       # виртуальные и местные
+    "danycom.ru", "letai.ru", "volnamobile.ru", "win-mobile.ru",
+)
+GUARD_PORTS = (23, 25, 135, 137, 138, 139, 445, 465, 587, 1900, 2525)   # telnet, почта, SMB/NetBIOS, SSDP
+GUARD_RANGES = ("6881:6889",)                                           # BitTorrent
+ALWAYS_CIDRS = ("100.64.0.0/10",)   # CGNAT: внутренняя сеть оператора и Tailscale; частные — ip_is_private
+
+
+def guard_extra(path=None):
+    """/etc/modlink/protect.json — что закрыть сверх списка: {"domains": [], "cidrs": [], "ports": []}.
+    Нет файла — пусто; испорчен — Fail (apply не пройдёт, пока не исправят)."""
+    path = path or P.guard
+    doc = jload(path, None)
+    if doc is None:
+        if os.path.exists(path):
+            raise Fail("%s не читается — исправь или удали" % path)
+        return {"domains": [], "cidrs": [], "ports": []}
+    if not isinstance(doc, dict):
+        raise Fail("%s: нужен объект {domains, cidrs, ports}" % path)
+    out = {"domains": [], "cidrs": [], "ports": []}
+    for d in doc.get("domains") or []:
+        d = str(d).strip().lower().lstrip(".")
+        if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d):
+            raise Fail("%s: домен «%s» — не годится" % (path, d))
+        out["domains"].append(d)
+    for c in doc.get("cidrs") or []:
+        try:
+            out["cidrs"].append(str(ipaddress.ip_network(str(c).strip(), strict=False)))
+        except ValueError:
+            raise Fail("%s: «%s» — не адрес или сеть" % (path, c))
+    for p in doc.get("ports") or []:
+        out["ports"].append(as_port(p, "%s: порт" % path))
+    return out
+
+
+def guard_lists(extra=None):
+    """Что закрывает защита: встроенное + protect.json."""
+    extra = extra or {"domains": [], "cidrs": [], "ports": []}
+    return {"domains": sorted(set(GUARD_DOMAINS) | set(extra["domains"])),
+            "cidrs": sorted(set(extra["cidrs"])),
+            "ports": sorted(set(GUARD_PORTS) | set(extra["ports"])),
+            "port_ranges": list(GUARD_RANGES),
+            "always": ["частные адреса (10/8, 172.16/12, 192.168/16, 127/8, 169.254/16)"] + list(ALWAYS_CIDRS)
+            + ["IPv6"]}
+
+
 # ── конфиг sing-box (формат 1.12+, проверяется sing-box check 1.14) ─────────
-def config(rows):
+def config(rows, extra=None):
     """mixed-inbound на каждую включённую строку, direct-outbound с inet4_bind_address = lan_ip,
     правило «inbound → свой outbound», остальное — reject.
 
-    Сверх того до правил строк: имена резолвятся только в IPv4 (bind — IPv4, а IPv6 ушёл бы
-    мимо модема с адресом сервера), а частные адреса и IPv6 закрыты — иначе через прокси
-    видны локальные службы сервера и его сеть.
+    Всегда, у любой строки: имена резолвятся только в IPv4 (bind — IPv4, а IPv6 ушёл бы мимо
+    модема с адресом сервера); IPv6, частные адреса и CGNAT закрыты — иначе через прокси видны
+    службы самого сервера и его сеть.
+    Защита строки (protect, по умолчанию вкл): сверх того закрыты ЛК и сайты операторов
+    (домен узнаётся и по SNI/Host, когда клиент пришёл с голым IP), опасные порты и веб модема.
+    Без защиты веб своего модема (modem_ip) открыт — для себя, ген1.
     """
+    g = guard_lists(extra)
+    en = sorted((x for x in rows if x["enabled"]), key=lambda x: x["port"])
+    tag = (lambda r, k: "%s-%d" % (k, r["id"]))
+    guarded = [tag(r, "in") for r in en if r["protect"]]
+    rules = []
+    if guarded:
+        rules.append({"inbound": guarded, "action": "sniff"})
+    rules += [{"action": "resolve", "strategy": "ipv4_only"},
+              {"ip_cidr": ["::/0"], "action": "reject"}]
+    for r in en:
+        if not r["protect"] and r["modem_ip"]:
+            rules.append({"inbound": [tag(r, "in")], "ip_cidr": [r["modem_ip"] + "/32"],
+                          "action": "route", "outbound": tag(r, "out")})
+    rules += [{"ip_is_private": True, "action": "reject"},
+              {"ip_cidr": list(ALWAYS_CIDRS), "action": "reject"}]
+    if guarded:
+        rules.append(dict({"inbound": guarded, "domain_suffix": g["domains"]},
+                          **({"ip_cidr": g["cidrs"]} if g["cidrs"] else {}), action="reject"))
+        rules.append({"inbound": guarded, "port": g["ports"], "port_range": g["port_ranges"], "action": "reject"})
     ins, outs = [], []
-    rules = [{"action": "resolve", "strategy": "ipv4_only"},
-             {"ip_is_private": True, "action": "reject"},
-             {"ip_cidr": ["::/0"], "action": "reject"}]
-    for r in sorted((x for x in rows if x["enabled"]), key=lambda x: x["port"]):
-        i, o = "in-%d" % r["id"], "out-%d" % r["id"]
+    for r in en:
+        i, o = tag(r, "in"), tag(r, "out")
         ins.append({"type": "mixed", "tag": i, "listen": "0.0.0.0", "listen_port": r["port"],
                     "users": [{"username": r["login"], "password": r["password"]}]})
         outs.append({"type": "direct", "tag": o, "inet4_bind_address": r["lan_ip"]})
@@ -379,6 +454,30 @@ def config(rows):
 def export_lines(rows, ip):
     return ["%s:%d:%s:%s\thttp://%s:%d/reconnect" % (ip, r["port"], r["login"], r["password"], ip, r["reconnect_port"])
             for r in sorted(rows, key=lambda x: x["port"]) if r["enabled"]]
+
+
+def table_lines(rows, ip):
+    """Таблица proxyveth (n,real,proxy,enabled) из строк modlink: настоящий модем N → виртуальный N.
+    → (строки CSV с шапкой, предупреждения). proxyveth ходит через прокси к 192.168.real.1
+    (DNS и HiLink) — у строки-поставщика защита снята, а modem_ip — ровно этот адрес."""
+    buf, warn = io.StringIO(), []
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(["n", "real", "proxy", "enabled"])
+    for r in sorted(rows, key=lambda x: x["id"]):
+        if not r["enabled"]:
+            continue
+        n = modem_n(r["lan_ip"])
+        if not n:
+            warn.append("строка %d: lan_ip %s — не 192.168.N.x, номер модема не узнать; пропустил" % (r["id"], r["lan_ip"]))
+            continue
+        if r["protect"]:
+            warn.append("строка %d: защита включена — DNS и HiLink виртуального модема (192.168.%d.1 через прокси) "
+                        "не пройдут: modlink protect %d off" % (r["id"], n, r["id"]))
+        elif r["modem_ip"] != "192.168.%d.1" % n:
+            warn.append("строка %d: modem_ip %s, а виртуальному модему нужен 192.168.%d.1: modlink set %d modem_ip=192.168.%d.1"
+                        % (r["id"], r["modem_ip"] or "пуст", n, r["id"], n))
+        w.writerow([n, n, "%s:%d:%s:%s" % (ip, r["port"], r["login"], r["password"]), 1])
+    return buf.getvalue().splitlines(), warn
 
 
 # ── интерфейсы сервера ─────────────────────────────────────────────────────

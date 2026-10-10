@@ -102,6 +102,25 @@ check("адрес прокси закреплён за основным кана
 check("ушедшая прокси — правило снято",
       ("ip", "rule", "del", "priority", "32765", "to", "10.9.9.9", "lookup", "90") in ran)
 
+print("база машины (sysctl):")
+wrote, ran2 = {}, []
+real = (net.rd, net.wr, net.sh, net.os.makedirs)
+net.rd = lambda p: ""
+net.wr = lambda p, t, *a, **k: wrote.__setitem__(p, t)
+net.sh = lambda *c, **k: (ran2.append(c), types.SimpleNamespace(stdout="", returncode=0))[1]
+net.os.makedirs = lambda *a, **k: None
+try:
+    net.ensure_base(log=lambda m: None, pve=False)
+    vm = wrote.get(net.SYSCTL, "")
+    net.ensure_base(log=lambda m: None, pve=True)
+    host = wrote.get(net.SYSCTL, "")
+finally:
+    net.rd, net.wr, net.sh, net.os.makedirs = real
+check("ВМ: kernel.panic=10 и panic_on_oops=1", "kernel.panic = 10" in vm and "kernel.panic_on_oops = 1" in vm, vm)
+check("хост Proxmox: panic_on_oops явно 0 (oops драйвера не роняет все ВМ)",
+      "kernel.panic = 10" in host and "kernel.panic_on_oops = 0" in host and "ip_forward = 1" in host, host)
+check("sysctl применяется сразу (sysctl -p)", ("sysctl", "-q", "-p", net.SYSCTL) in ran2, ran2)
+
 print("вывод команд:")
 
 

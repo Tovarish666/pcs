@@ -16,7 +16,8 @@ from pcs.core.util import Fail
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 DANGER = ("--yes", "--force")            # только с подтверждением номером сервера
-ML_FIELDS = ("enabled", "name", "login", "password", "port", "lan_ip", "modem_ip", "reconnect_port", "interval_min")
+ML_FIELDS = ("enabled", "name", "login", "password", "port", "lan_ip", "modem_ip", "reconnect_port", "interval_min",
+             "protect")
 _CTL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -107,10 +108,10 @@ class Panel:
             ("GET", r"/api/servers/(\d+)/proxyveth", self.proxyveth),
             ("GET", r"/api/servers/(\d+)/proxyveth/table", self.pv_table),
             ("POST", r"/api/servers/(\d+)/proxyveth/table", self.pv_table_save),
-            ("GET", r"/api/servers/(\d+)/modlink", self.modlink),
-            ("POST", r"/api/servers/(\d+)/modlink/save", self.ml_save),
-            ("POST", r"/api/servers/(\d+)/modlink/reveal", self.ml_reveal),
-            ("POST", r"/api/servers/(\d+)/modlink/export", self.ml_export),
+            ("GET", r"/api/targets/(host|\d+)/modlink", self.modlink),        # modlink — и на ВМ, и на хосте
+            ("POST", r"/api/targets/(host|\d+)/modlink/save", self.ml_save),
+            ("POST", r"/api/targets/(host|\d+)/modlink/reveal", self.ml_reveal),
+            ("POST", r"/api/targets/(host|\d+)/modlink/export", self.ml_export),
             ("POST", r"/api/servers", self.create),
             ("POST", r"/api/servers/(\d+)/delete", self.delete),
             ("POST", r"/api/run", self.run),
@@ -246,7 +247,7 @@ class Panel:
 
     def modlink(self, sid, query, body):
         """list (без паролей) + status. pending — правки есть, но `modlink apply` ещё не было."""
-        sid = int(sid)
+        sid = target(sid)
         if query.get("only") == "status":
             return ok({"status": self._run(sid, "modlink", ["status"])})
         r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]))
@@ -264,7 +265,7 @@ class Panel:
 
     def ml_reveal(self, sid, query, body):
         """Пароль одной строки: `modlink list --show-pass`, запасной путь — export."""
-        sid = int(sid)
+        sid = target(sid)
         rid = str(body.get("id", "")).strip()
         if not rid.isdigit():
             raise Bad("номер строки modlink")
@@ -286,14 +287,17 @@ class Panel:
         return err("modlink не отдал пароль строки %s" % rid)
 
     def ml_export(self, sid, query, body):
-        e = self._run(int(sid), "modlink", ["export"])
+        """Экспорт для клиента; table — строки таблицы proxyveth (виртуальные из этих настоящих)."""
+        table = bool(body.get("table"))
+        e = self._run(target(sid), "modlink", ["export", "--table"] if table else ["export"])
         if not e["ok"]:
             return e
-        return ok({"text": "\n".join(_export_lines(e["data"]))})
+        d = e["data"] if isinstance(e["data"], dict) else {}
+        return ok({"text": "\n".join(_export_lines(e["data"])), "warnings": d.get("warnings") or []})
 
     def ml_save(self, sid, query, body):
         """Правки таблицы modlink разом: удалить, поменять, добавить, затем apply."""
-        sid = int(sid)
+        sid = target(sid)
         steps, fail = [], False
 
         def step(what, args, inp=None):
@@ -455,6 +459,8 @@ def _ml_val(k, v):
     v = _s(v, k, 200).strip()
     if k in ("port", "reconnect_port") and v != "auto" and not (v.isdigit() and 0 < int(v) < 65536):
         raise Bad("%s: порт 1–65535 или auto" % k)
+    if k == "protect" and v not in ("0", "1"):
+        raise Bad("защита: 1 или 0")
     if k == "interval_min" and not (v.isdigit() and int(v) < 100000):
         raise Bad("интервал: минуты, 0 — выключен")
     if k in ("lan_ip", "modem_ip") and v and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", v):
@@ -484,6 +490,8 @@ def _ml_add(row):
         elif not (k == "password" or v == "auto"):
             v = _ml_val(k, v)
         a += [flag, v]
+    if row.get("protect") is False:
+        a.append("--no-protect")
     return a, secret
 
 

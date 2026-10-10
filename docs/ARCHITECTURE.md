@@ -222,7 +222,8 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
   - интерфейс хоста с адресом 192.168.X.100 — не модем, если он не USB-модем.
 - **База машины — `pcs.core.net.ensure_base()`**, её зовёт `setup` каждой части:
   - один файл `/etc/sysctl.d/90-pcs.conf` (`kernel.panic=10`, `kernel.panic_on_oops=1`,
-    `ip_forward=1`); rp_filter части выставляют на своих интерфейсах;
+    `ip_forward=1`; на хосте Proxmox — `panic_on_oops=0`, чтобы oops драйвера не ронял все ВМ);
+    rp_filter части выставляют на своих интерфейсах;
   - drop-in `/etc/systemd/networkd.conf.d/10-pcs.conf` с
     `ManageForeignRoutingPolicyRules=no`, `ManageForeignRoutes=no` — иначе любой
     `netplan apply` стирает маршрутизацию модемов.
@@ -265,11 +266,14 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
 | `modem_ip` | веб-интерфейс Huawei | HiLink API: реконнект, ребут, проверка |
 | `reconnect_port` | порт триггера | `GET http://<ip>:<порт>/reconnect` |
 | `interval_min` | автореконнект, минут (0 — выкл) | таймер в демоне modlink |
+| `protect` | защита строки, по умолчанию вкл: закрыты ЛК и сайты операторов, опасные порты, веб модема | правила sing-box (`sniff`, `domain_suffix`, `port`) |
 
 Устройство modlink:
 - sing-box (`modlink-sb.service`): на каждую строку mixed-inbound `0.0.0.0:port` с
   `users` и direct-outbound с `inet4_bind_address = lan_ip`. Правило «inbound → свой
-  outbound», остальное — `reject`.
+  outbound», остальное — `reject`. У всех строк закрыты частные адреса, CGNAT и IPv6;
+  строке без защиты открыт только её `modem_ip` (нужен proxyveth: DNS и HiLink через прокси).
+- modlink стоит и на хосте Proxmox (рядом с hivelink): `pcs modlink … --host`.
 - Демон `modlink.service`: триггеры реконнекта, таймеры, клиент HiLink, журнал реконнектов.
 
 Пароли в `export` и в панели видны только по явному запросу.
@@ -292,7 +296,7 @@ servers()                           # [{"id", "name", "ip", "state", "mode", "mo
 server(id)                          # то же + версии частей
 create_server(params) -> job_id     # params: name, cores, ram_gb, disk_gb, mode, sheet, mpspace(bool)
 delete_server(id, confirm)          # confirm должен совпасть с id
-run(id, part, args) -> dict         # конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост
+run(id, part, args) -> dict         # конверт {"ok", "data"|"error"} от `<part> <args> --json` на сервере; id=None — хост (hivelink, modlink)
 dns_fix(target, dns=None) -> dict   # target: id сервера или "host"
 set_password(target, password) -> dict
 set_key(target, pubkey=None, rotate=False) -> dict

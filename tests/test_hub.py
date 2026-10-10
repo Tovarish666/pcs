@@ -160,13 +160,20 @@ check("аргументы экранированы — из таблицы мо�
       net.cmds[-1][1] == "proxyveth source 'https://x?a=1&b=2; rm -rf /' --json", net.cmds[-1])
 env = api.run(2000, "modlink", ["weird"])
 check("не JSON — конверт с ошибкой, без исключения", env["ok"] is False and "сломалось" in env["error"], env)
-for args, why in (((None, "proxyveth", ["status"]), "на хосте только hivelink"), ((2000, "bash", ["-c", "id"]), "чужая часть"),
+for args, why in (((None, "proxyveth", ["status"]), "на хосте нет proxyveth"), ((2000, "bash", ["-c", "id"]), "чужая часть"),
                   ((2000, "proxyveth", "status"), "args не список"), ((3000, "proxyveth", []), "неизвестный сервер")):
     try:
         api.run(*args)
         check("run: отказ — %s" % why, False)
     except Fail:
         check("run: отказ — %s" % why, True)
+seen, real_lp = [], remote.local_part
+remote.local_part = lambda name, args, timeout=300, input=None: (seen.append((name, list(args))), {"ok": True, "data": {}})[1]
+try:
+    api.run(None, "modlink", ["protect", "all", "on"])
+finally:
+    remote.local_part = real_lp
+check("run: modlink на хосте — локально, не по SSH", seen == [("modlink", ["protect", "all", "on"])], seen)
 try:
     api.run(1000, "proxyveth", ["status"])
     check("run: нет SSH — Fail", False)
@@ -396,14 +403,18 @@ try:
           streamed[-1][:2] == (2000, "modlink add --lan-ip 192.168.201.100 --name 'мой модем'"), streamed[-1])
     cli.passthru("hivelink", ["install", "--host"])
     check("hivelink --host — на самом хосте", called[-1][0].endswith("bin/hivelink") and called[-1][1:] == ["install"])
+    cli.passthru("modlink", ["list", "--host"])
+    check("modlink --host — на самом хосте (настоящие модемы хоста)",
+          called[-1][0].endswith("bin/modlink") and called[-1][1:] == ["list"], called[-1])
     err = io.StringIO()
     real_err, sys.stderr = sys.stderr, err
     try:
-        rc = cli.passthru("modlink", ["list", "--host"])
+        rc = cli.passthru("proxyveth", ["status", "--host"])
         rc2 = cli.passthru("proxyveth", ["status", "--server", "4242"])
     finally:
         sys.stderr = real_err
-    check("modlink --host — отказ, неизвестный сервер — отказ", rc == 1 and rc2 == 1 and "4242" in err.getvalue(), err.getvalue())
+    check("proxyveth --host — отказ, неизвестный сервер — отказ", rc == 1 and rc2 == 1 and "4242" in err.getvalue()
+          and "proxyveth" in err.getvalue(), err.getvalue())
     out = io.StringIO()
     with redirect_stdout(out):
         rc = cli.passthru("proxyveth", ["status", "--json", "--server", "4242"])

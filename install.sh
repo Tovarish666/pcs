@@ -4,8 +4,9 @@
 #
 #      bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 #
-#  Кладёт код в /opt/pcs, команды pcs и hivelink в /usr/local/bin, спрашивает
-#  логин и пароль веб-панели (порт 666) и включает её, ставит hivelink на хост.
+#  Кладёт код в /opt/pcs, команды pcs, hivelink и modlink в /usr/local/bin, спрашивает
+#  логин и пароль веб-панели (порт 666) и включает её, ставит на хост hivelink
+#  (настоящие модемы → интерфейсы) и modlink (интерфейсы → прокси).
 #  Серверы (ВМ Ubuntu) дальше создаёт сам pcs: pcs server create или меню pcs.
 #
 #  PCS_REPO=owner/repo PCS_BRANCH=main   откуда брать (pcs update берёт оттуда же)
@@ -57,10 +58,10 @@ if [[ -d "$DEST" ]]; then
     mv "$DEST" "${DEST}.prev"
 fi
 mv "${DEST}.new" "$DEST"
-for c in pcs hivelink; do ln -sfn "$DEST/bin/$c" "/usr/local/bin/$c"; done
+for c in pcs hivelink modlink; do ln -sfn "$DEST/bin/$c" "/usr/local/bin/$c"; done
 install -d -m 700 /etc/pcs
 install -d -m 755 /var/lib/pcs /var/log/pcs
-ok "PCS $("$DEST/bin/pcs" version) → ${DEST} (из ${from}), команды: pcs, hivelink"
+ok "PCS $("$DEST/bin/pcs" version) → ${DEST} (из ${from}), команды: pcs, hivelink, modlink"
 
 # ── веб-панель: логин и пароль ─────────────────────────────────────────────
 ask() {   # ask "вопрос" [тихо] → ответ на stdout; без терминала — пусто
@@ -75,7 +76,9 @@ ask() {   # ask "вопрос" [тихо] → ответ на stdout; без т�
 }
 if [[ -f /etc/pcs/web.json && -z "${PCS_WEB_PASS:-}" ]]; then
     ok "вход в панель уже задан (сменить: pcs web passwd)"
-    systemctl try-restart pcs-web.service 2>/dev/null || true
+    # Включить и перезапустить на новом коде; раньше здесь был try-restart — он не
+    # трогает остановленную службу, и после повторной установки панели не было
+    "$DEST/bin/pcs" web on >/dev/null || warn "панель не включилась — см. выше; потом: pcs web on"
 else
     user="${PCS_WEB_USER:-}"
     pass="${PCS_WEB_PASS:-}"
@@ -103,6 +106,13 @@ if "$DEST/bin/hivelink" install; then
     ok "hivelink на хосте"
 else
     warn "hivelink на хост не встал (см. выше) — PCS работает и без него; потом: hivelink install"
+fi
+
+# ── modlink на хост: прокси из настоящих модемов хоста ────────────────────
+if "$DEST/bin/modlink" setup; then
+    ok "modlink на хосте (строки: modlink from-ifaces --add && modlink apply)"
+else
+    warn "modlink на хост не встал (см. выше) — потом: modlink setup"
 fi
 
 ok "дальше: pcs   (меню)   или   pcs server create --mode usb|gw"
