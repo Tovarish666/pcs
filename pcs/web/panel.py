@@ -121,6 +121,7 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/key", self.key),
             ("POST", r"/api/targets/(host|\d+)/mpspace", self.mpspace),
             ("POST", r"/api/targets/(host|\d+)/update", self.update),
+            ("GET", r"/api/jobs", self.jobs),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
@@ -370,6 +371,11 @@ class Panel:
         args = [_s(a, "аргумент", 2000) for a in args if a != "--json"]
         if any(a in DANGER for a in args) and str(body.get("confirm", "")).strip() != str(t):
             raise Bad("опасное действие: подтвердите номером сервера (%s)" % t, 403)
+        long_ = getattr(self.api, "is_long", None)
+        if long_ and long_(part, args):
+            # долгая команда — заданием: запрос не висит минутами и не теряется при обрыве связи
+            self.forget()
+            return ok({"job": self.api.run_job(None if t == "host" else t, part, args)})
         e = self._run(t, part, args)
         if args[0] in ("mode", "sync", "up", "down", "install", "uninstall"):
             self.forget()
@@ -445,6 +451,10 @@ class Panel:
 
     def job(self, jid, query, body):
         return ok(self.api.job(jid))
+
+    def jobs(self, query, body):
+        fn = getattr(self.api, "jobs_recent", None)
+        return ok(fn() if fn else [])
 
 
 # ── мелочи ──────────────────────────────────────────────────────────────────

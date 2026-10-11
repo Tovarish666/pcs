@@ -12,6 +12,7 @@ import sys
 import traceback
 
 from .. import VERSION
+from ..core import bg
 from ..core import dns as dnsfix
 from ..core import util
 from ..core.util import Fail, sh
@@ -36,7 +37,9 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs mpspace install|auth|check [--server ID]
   pcs update [--host | --server ID | --all]   без флагов — хост из GitHub и все серверы
   pcs web on|off|status|passwd          веб-панель :666
-  pcs doctor [--server ID|--host] | pcs job [ID] | pcs log | pcs version
+  pcs doctor [--server ID|--host] | pcs log | pcs version
+  pcs job [ID] [--server ID]            долгое (update, установка, перенос…) идёт в фоне: обрыв
+                                        связи ему не мешает; здесь — список, журнал, «смотреть дальше»
   pcs host-setup                        хост после установки/обновления: команды, hivelink, modlink
 
   Без --server — выбранный сервер (pcs server use ID). --json — ответ для программ.
@@ -113,6 +116,7 @@ def parser():
     c = sub.add_parser("job")
     c.add_argument("id", nargs="?")
     c.add_argument("run_id", nargs="?")
+    c.add_argument("--server")
     sub.add_parser("log")
     for p in list(sub.choices.values()) + list(srv.choices.values()):
         p.add_argument("--json", action="store_true")
@@ -157,7 +161,8 @@ def passthru(part, args):
             return subprocess.call([os.path.join(remote.ROOT, "bin", part)] + rest)
         if not as_json and sys.stdout.isatty():
             ui.info("%s на %s" % (part, store.label(t)))
-        return remote.stream(t, " ".join(shlex.quote(x) for x in [part] + rest),
+        # номер сервера — частям на сервере: их подсказка «смотреть снова» будет для хоста
+        return remote.stream(t, "%s=%s " % (bg.HUB_ID, t["id"]) + " ".join(shlex.quote(x) for x in [part] + rest),
                              tty=sys.stdout.isatty() and sys.stdin.isatty() and not as_json)
     except Fail as e:
         say_fail(e, as_json)
@@ -282,6 +287,18 @@ def ram_gb(v):
     return max(1, v // 1024) if v >= 512 else v
 
 
+def as_job(a, kind, params, title, target=None):
+    """Долгое из терминала — заданием хаба (юнит systemd) и показывать его журнал: обрыв SSH
+    не убивает работу. → (код, данные) или None — делать здесь (не терминал, --json, уже в фоне)."""
+    if getattr(a, "json", False) or not bg.wanted():
+        return None
+    from . import api                     # noqa: F401 — виды заданий
+    jid = jobs.start(kind, params, title=title, target=target)
+    rc = jobs.follow(jid)
+    d = jobs.get(jid, lines=0)
+    return rc, d.get("result")
+
+
 def c_server_create(a):
     p = {"id": a.id, "name": a.name, "cores": a.cores, "ram_gb": ram_gb(a.ram), "disk_gb": a.disk,
          "storage": a.storage, "bridge": a.bridge, "ip": a.ip, "gw": a.gw, "dns": a.dns, "mode": a.mode,
@@ -295,7 +312,8 @@ def c_server_create(a):
         if not ui.confirm_id("ВМ %s будет удалена со всеми дисками и создана заново" % p["id"], p["id"]):
             raise Fail("отменено")
     pve.need_pve()
-    return 0, servers.create(p)
+    r = as_job(a, "create_server", p, "Создание ВМ %s" % (p.get("name") or p.get("id") or ""), target=p.get("id") or "new")
+    return r if r else (0, servers.create(p))
 
 
 def ask_create(p, a):
@@ -412,6 +430,10 @@ def c_mpspace(a):
     if not auth and ui.interactive() and not a.json:
         print("  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже: pcs mpspace auth)")
         auth = ui.ask("auth.mp", "")
+    r = as_job(a, "mpspace", {"id": s["id"], "auth": auth, "proxy": os.environ.get("PCS_MP_PROXY", ""),
+                              "no_reboot": a.no_reboot}, "mp.space на сервер %s" % s["id"], target=s["id"])
+    if r:
+        return r
     lk = util.lock(os.path.join(remote.RUN, "srv-%s.lock" % s["id"]), wait=10, what="работа с сервером %s" % s["id"])
     try:
         return 0, servers.mpspace_install(s, auth, os.environ.get("PCS_MP_PROXY", ""), a.no_reboot)
@@ -420,6 +442,16 @@ def c_mpspace(a):
 
 
 def c_update(a):
+    if a.host:
+        params, key = {"host": True}, "host"
+    elif a.server or a.all:
+        params = {"servers": [int(store.norm_id(x)) for x in a.server] if a.server else "all"}
+        key = "all" if a.all else ",".join(str(x) for x in params["servers"])
+    else:
+        params, key = {"host": True, "servers": "all" if store.all_servers() else None}, "all"
+    r = as_job(a, "update", params, "Обновление PCS (%s)" % key, target=key)
+    if r:
+        return r
     if a.host:
         return 0, {"host": servers.update_host()}
     if a.server or a.all:
@@ -433,6 +465,9 @@ def c_update(a):
 
 
 def c_host_setup(a):
+    r = as_job(a, "host_setup", {}, "Хост: команды, hivelink, modlink", target="host")
+    if r:
+        return r
     d = servers.host_setup()
     return (1 if d["failed"] else 0), d
 
@@ -472,22 +507,41 @@ def c_job(a):
             raise Fail("pcs job run ID")
         from .api import KINDS
         return jobs.run(a.run_id, KINDS), None
+    if a.server:                           # фоновые запуски на сервере (proxyveth, modlink там)
+        s = store.target(a.server)
+        if a.json:
+            return 0, remote.node(s, "bg", *([a.id] if a.id else []), timeout=60)
+        cmd = "%s=%s pcs-node bg" % (bg.HUB_ID, s["id"]) + (" " + shlex.quote(a.id) if a.id else "")
+        return remote.stream(s, cmd, tty=sys.stdout.isatty()), None
     if a.id:
-        d = jobs.get(a.id)
+        if bg.is_id(a.id):
+            d = bg.get(a.id)
+        else:
+            d = jobs.get(a.id)
+        if not a.json and d["state"] == "running" and sys.stdout.isatty():
+            return (bg.follow(a.id) if d.get("kind") == "bg" else jobs.follow(a.id)), None
         if not a.json:
-            print("\n  %s — %s (%s)" % (d["id"], d["title"], d["state"]))
-            for ln in d["log"][-60:]:
+            print("\n  %s — %s (%s)" % (d["id"], d["title"], STATE.get(d["state"], d["state"])))
+            for ln in d["log"][-80:]:
                 print("  │ " + ln)
             if d.get("error"):
                 ui.bad(d["error"])
-        return 0, d
-    lst = jobs.recent()
+        return (0 if d["state"] in ("done", "running") else 1), d
+    lst = sorted(jobs.recent() + bg.recent(), key=lambda d: d.get("started") or 0, reverse=True)[:30]
     if not a.json:
         if not lst:
             print("  фоновых заданий нет")
         for d in lst:
-            print("  %s  %-8s %s%s" % (d["id"], d["state"], d["title"], ("  ✗ " + d["error"]) if d.get("error") else ""))
+            print("  %s  %-10s %s%s" % (d["id"], STATE.get(d["state"], d["state"]), d["title"],
+                                         ("  ✗ " + d["error"]) if d.get("error") else ""))
+        run = [d for d in lst if d["state"] == "running"]
+        if run:
+            print("\n  идёт: %s — смотреть: pcs job %s" % (run[0]["title"], run[0]["id"]))
+        print("  на сервере: pcs job --server ID")
     return 0, lst
+
+
+STATE = {"running": "идёт", "done": "готово", "failed": "ошибка"}
 
 
 def c_log(a):

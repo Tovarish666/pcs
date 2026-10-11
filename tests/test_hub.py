@@ -397,10 +397,10 @@ real_call = subprocess.call
 subprocess.call = lambda argv, **k: (called.append(argv), 0)[1]
 try:
     rc = cli.passthru("proxyveth", ["status", "--wan", "--server", "200"])
-    check("pcs proxyveth status --wan --server 200", rc == 0 and streamed[-1] == (200, "proxyveth status --wan", False), streamed)
+    check("pcs proxyveth status --wan --server 200", rc == 0 and streamed[-1] == (200, "PCS_HUB_SERVER=200 proxyveth status --wan", False), streamed)
     cli.passthru("modlink", ["add", "--lan-ip", "192.168.201.100", "--name", "мой модем"])
     check("без --server — выбранный; аргументы с пробелами целы",
-          streamed[-1][:2] == (2000, "modlink add --lan-ip 192.168.201.100 --name 'мой модем'"), streamed[-1])
+          streamed[-1][:2] == (2000, "PCS_HUB_SERVER=2000 modlink add --lan-ip 192.168.201.100 --name 'мой модем'"), streamed[-1])
     cli.passthru("hivelink", ["install", "--host"])
     check("hivelink --host — на самом хосте", called[-1][0].endswith("bin/hivelink") and called[-1][1:] == ["install"])
     open(os.path.join(store.ETC, "active"), "w").write("4242\n")

@@ -8,6 +8,7 @@
     pcs-node mpspace install --params FILE [--no-reboot]
     pcs-node mpspace auth|check [--json]      auth.mp — со stdin
     pcs-node version
+    pcs-node bg [ID] [--json]                 долгие команды, ушедшие в фон (идёт — смотреть до конца)
 
 Работает и на хосте: так хаб чинит DNS у себя (юнит pcs-dns.service).
 """
@@ -437,6 +438,15 @@ def cmd(a):
     raise Fail("неизвестная команда")
 
 
+def _bg(argv):
+    from ..core import bg
+    try:
+        return bg.main(argv)
+    except Fail as e:
+        print("  ✗ %s" % e, file=sys.stderr)
+        return 1
+
+
 def parser():
     ap = argparse.ArgumentParser(prog="pcs-node", description="служебная команда хаба PCS на сервере")
     sub = ap.add_subparsers(dest="cmd")
@@ -467,6 +477,8 @@ def main(argv=None):
     if not argv or argv[0] in ("help", "-h", "--help"):
         print(__doc__.strip())
         return 0
+    if argv[0] == "bg":
+        return _bg(argv[1:])
     a = parser().parse_args(argv)
     if not a.cmd:
         print(__doc__.strip())

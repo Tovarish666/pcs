@@ -280,6 +280,21 @@ def G(path):
     return req("GET", path, cookie=SID)
 
 
+def RUN(body):
+    """/api/run как в браузере: долгая команда приходит заданием — дождаться и вернуть итог конвертом."""
+    r, d = P("/api/run", body)
+    if not (d.get("ok") and isinstance(d.get("data"), dict) and set(d["data"]) == {"job"}):
+        return r, d
+    for _ in range(150):
+        _, j = G("/api/jobs/" + d["data"]["job"])
+        if j["data"]["state"] != "running":
+            break
+        time.sleep(0.2)
+    j = j["data"]
+    return r, ({"ok": True, "data": j["result"]} if j["state"] == "done"
+               else {"ok": False, "error": (j.get("result") or {}).get("error") or j.get("error")})
+
+
 r, d = P("/api/targets/host/dns", csrf="")
 check("POST без X-CSRF — 403", r.status == 403)
 r, d = P("/api/targets/host/dns", csrf="bad")
@@ -321,14 +336,14 @@ r, d = P("/api/servers/2000/proxyveth/table", {"csv": csv0 + "206,86,188.134.95.
                                                "make_main": True})
 check("таблица сохранена в локальную копию и стала главной", d["ok"] and d["data"]["saved"]["data"]["rows"] == 6
       and d["data"]["source"]["data"]["source"] == "local", d)
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync"]})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync"]})
 check("синхронизация создала модем 206", d["ok"] and d["data"]["created"] == [206], d)
 r, d = P("/api/servers/2000/proxyveth/table", {"csv": "n,real,proxy\n207,87,188.134.95.184:1187:m:p\n"})
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync"]})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync"]})
 check("снести больше половины без --force — отказ", not d["ok"] and "--force" in d["error"], d)
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync", "--force"]})
 check("--force без номера ВМ — 403", r.status == 403)
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync", "--force"], "confirm": "2000"})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync", "--force"], "confirm": "2000"})
 check("--force с номером ВМ — выполнено", d["ok"] and d["data"]["created"] == [207], d)
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["diag", "207"]})
 check("диагностика модема: шаги и итог", d["ok"] and len(d["data"]["steps"]) == 5 and d["data"]["verdict"])
@@ -379,7 +394,19 @@ check("при старом modlink-linux «Применить» — понятн
 r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"]})
 check("перенос с --force без подтверждения — 403", r.status == 403, d)
 r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"], "confirm": "host"})
-check("перенос из modlink-linux с подтверждением", d["ok"] and not fake_api.HML["legacy"], d)
+check("долгая команда (migrate) — сразу задание, запрос не висит", d["ok"] and set(d["data"]) == {"job"}, d)
+jid = d["data"]["job"]
+for _ in range(100):
+    r, j = G("/api/jobs/" + jid)
+    if j["data"]["state"] != "running":
+        break
+    time.sleep(0.2)
+check("задание доработало: итог — данные команды", j["data"]["state"] == "done" and not fake_api.HML["legacy"]
+      and isinstance(j["data"]["result"], dict) and "rows" in j["data"]["result"], j)
+r, d = G("/api/jobs")
+check("список заданий для страницы хоста", d["ok"] and any(x["id"] == jid for x in d["data"]), d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--dry-run"]})
+check("предпросмотр (--dry-run) — сразу ответ, без задания", d["ok"] and "rows" in d["data"], d)
 r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
 check("modlink на хосте: снять защиту и применить", d["ok"] and d["data"]["applied"]
       and fake_api.HML["modlink"][0]["protect"] is False, d)

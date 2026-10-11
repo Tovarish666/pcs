@@ -35,19 +35,59 @@
       opt.headers["X-CSRF"] = S.session ? S.session.csrf : "";
       opt.body = JSON.stringify(body || {});
     }
-    let r;
-    try { r = await fetch(path, opt); } catch (e) {
-      return {ok: false, error: "панель не отвечает — сеть или pcs-web остановлена"};
+    // GET безопасно повторить: связь моргнула — ещё раз (до 4 попыток), а не ошибка на экране
+    const tries = method === "GET" ? 4 : 1;
+    for (let i = 0; ; i++) {
+      let r, text;
+      try { r = await fetch(path, opt); } catch (e) {
+        if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
+        return {ok: false, net: true, error: method === "GET" ? "панель не отвечает — сеть или pcs-web остановлена"
+          : "связь с панелью прервалась — действие могло выполниться: «Обновить» или «Фоновые задания» на странице хоста"};
+      }
+      if (r.status === 401) { location.href = "/login"; return {ok: false, error: "нужен вход"}; }
+      try { text = await r.text(); } catch (e) {
+        if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
+        return {ok: false, net: true, error: "связь оборвалась посреди ответа (HTTP " + r.status + ")" +
+          (method === "POST" ? " — действие могло выполниться: «Обновить»" : "")};
+      }
+      try { return JSON.parse(text); } catch (e) {
+        return {ok: false, error: "ответ панели не JSON (HTTP " + r.status + "): " + text.slice(0, 120)};
+      }
     }
-    if (r.status === 401) { location.href = "/login"; return {ok: false, error: "нужен вход"}; }
-    try { return await r.json(); } catch (e) {
-      return {ok: false, error: "ответ панели не JSON (HTTP " + r.status + ")"};
+  }
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // Долгое панель запускает заданием хаба: ждём его здесь. Обрыв связи — не беда: задание
+  // идёт на хосте, а мы спрашиваем снова, пока не узнаем итог.
+  let ACT_RES = null;
+  async function waitJob(jid) {
+    const res = ACT_RES;
+    for (let miss = 0; ;) {
+      const r = await GET("/api/jobs/" + encodeURIComponent(jid));
+      if (!r.ok) {
+        if (r.net && ++miss < 200) {
+          if (res) setRes(res, "run", "связь прервалась — задание идёт на хосте, жду…");
+          await sleep(3000); continue;
+        }
+        return {ok: false, error: r.error + " (задание " + jid + ": #/job/" + jid + ")"};
+      }
+      miss = 0;
+      const j = r.data || {};
+      if (j.state === "running" || j.state === "queued") {
+        const last = (j.log || []).filter((l) => l.trim()).slice(-1)[0];
+        if (res) setRes(res, "run", "идёт" + (last ? ": " + last.trim().slice(0, 90) : "…"));
+        await sleep(1500); continue;
+      }
+      if (j.state === "done") return {ok: true, data: j.result, job: jid};
+      return {ok: false, error: ((j.result && j.result.error) || j.error || "задание не удалось"), job: jid, log: j.log};
     }
   }
   const GET = (p) => api("GET", p);
   const POST = (p, b) => api("POST", p, b);
-  const run = (target, part, args, extra) =>
-    POST("/api/run", Object.assign({target: String(target), part, args}, extra || {}));
+  const run = async (target, part, args, extra) => {
+    const r = await POST("/api/run", Object.assign({target: String(target), part, args}, extra || {}));
+    if (r && r.ok && r.data && r.data.job != null && Object.keys(r.data).length === 1) return waitJob(r.data.job);
+    return r;
+  };
 
   // ── формат ────────────────────────────────────────────────────────────────
   const MODE = {usb: "USB", gw: "шлюз"};
@@ -228,7 +268,8 @@
     if (button) button.disabled = true;
     setRes(res, "run", "выполняется…");
     let r;
-    try { r = await fn(); } catch (e) { r = {ok: false, error: String(e)}; }
+    ACT_RES = res;
+    try { r = await fn(); } catch (e) { r = {ok: false, error: String(e)}; } finally { ACT_RES = null; }
     if (button) button.disabled = false;
     if (!r || !r.ok) { setRes(res, "err", "Ошибка: " + ((r && r.error) || "неизвестно")); return r; }
     const d = r.data;
@@ -255,6 +296,7 @@
       if (!first && !box.isConnected) return;
       first = false;
       const r = await GET("/api/jobs/" + encodeURIComponent(jid));
+      if (!r.ok && r.net) { setRes(st, "run", "связь прервалась — задание идёт на хосте, жду…"); setTimeout(tick, 3000); return; }
       if (!r.ok) { setRes(st, "err", "Ошибка: " + r.error); return; }
       const j = r.data || {};
       if (j.title && !opts.title) box.firstChild.firstChild.textContent = j.title;
@@ -350,8 +392,22 @@
     const rTerm = actRow("Терминал хоста", "консоль root на хосте Proxmox", link("Открыть", "#/host/term"));
     const acts = el("div", {class: "acts"}, rDns.el, rPw.el, rKey.el, rHl.el, rMl.el, rUp.el, rTerm.el);
 
+    const jobsBox = el("div", {class: "list"});
     const root = el("div", {}, banner, head, cards, el("h2", {text: "Виртуальные машины"}), list,
-      el("h2", {text: "Хост"}), acts);
+      el("h2", {text: "Хост"}), acts, el("h2", {text: "Фоновые задания"}), jobsBox);
+    const JOB_ST = {running: ["info", "идёт"], done: ["ok", "готово"], failed: ["bad", "ошибка"]};
+    async function loadJobs() {
+      const r = await GET("/api/jobs");
+      if (!r.ok) return;
+      const lst = r.data || [];
+      jobsBox.replaceChildren(...(lst.length ? lst.map((j) => {
+        const [cls, txt] = JOB_ST[j.state] || ["", j.state];
+        return el("div", {class: "item"}, el("span", {class: "dot " + cls, title: txt}),
+          el("div", {class: "grow"}, el("div", {class: "title", text: j.title || j.id}),
+            el("div", {class: "sub", text: [txt, j.started ? new Date(j.started * 1000).toLocaleString() : "", j.error || ""].filter(Boolean).join(" · ")})),
+          el("div", {class: "btns"}, link("Журнал", "#/job/" + encodeURIComponent(j.id))));
+      }) : [el("div", {class: "item muted", text: "заданий пока нет: долгое (обновление, установка, перенос) идёт здесь в фоне и не боится обрыва связи"})]));
+    }
 
     function update() {
       const ov = S.ov || {}, host = ov.host || {}, list_ = ov.servers || [];
@@ -366,6 +422,7 @@
           real + " " + plural(real, "настоящий модем", "настоящих модема", "настоящих модемов")].join(" · ")}));
       hl.textContent = h.installed === false ? "не установлен" : ["установлен", h.version, real + " " + plural(real, "модем", "модема", "модемов")].filter(Boolean).join(" · ");
       ver.textContent = "версия " + (host.version || (S.session && S.session.version) || "—");
+      loadJobs();
       const m = host.modlink || {};
       ml.textContent = m.installed === false ? "не установлен — pcs update --host" : m.state
         ? "демон " + m.state.modlink + " · sing-box " + m.state["modlink-sb"] : "";

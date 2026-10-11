@@ -317,6 +317,35 @@ def update(target):
                 lambda: {"version": VERSION})
 
 
+LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart"),
+        "modlink": ("setup", "migrate", "uninstall"), "hivelink": ("install", "uninstall")}
+
+
+def is_long(part, args):
+    a = [str(x) for x in args]
+    if not a or a[0] not in LONG.get(part, ()) or "--dry-run" in a:
+        return False
+    return not (part == "proxyveth" and a[0] in ("up", "down", "restart") and (len(a) < 2 or a[1] != "all"))
+
+
+def run_job(id, part, args, input=None):
+    """Как у хаба: долгая команда — заданием; результат — data команды."""
+    title = "%s %s — %s" % (part, " ".join(args), "хост" if id is None else "ВМ %s" % id)
+
+    def done():
+        e = run(id, part, list(args), input=input)
+        if not e["ok"]:
+            raise Fail(e["error"])
+        return e["data"]
+    return _job(title, ["▸ %s %s" % (part, " ".join(args)), "работаю…"], done)
+
+
+def jobs_recent(n=15):
+    with _lock:
+        lst = [{k: v for k, v in j.items() if k != "log"} for j in _jobs.values()]
+    return sorted(lst, key=lambda d: d.get("started") or 0, reverse=True)[:n]
+
+
 def job(job_id):
     _pause()
     with _lock:

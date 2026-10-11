@@ -32,7 +32,7 @@ import re
 import sys
 
 from .. import VERSION
-from ..core import util
+from ..core import bg, util
 from ..core.util import Fail, lock, need_root
 from . import hilink, ops, store, system
 from .store import P
@@ -486,5 +486,10 @@ def main(argv=None):
             return 0, {"version": VERSION}
         if not P.root:
             need_root()
+        if a.cmd in ("setup", "migrate", "uninstall") and not getattr(a, "dry_run", False) \
+                and (a.cmd != "uninstall" or a.yes):
+            rc = bg.handoff("modlink-" + a.cmd, argv, title="modlink " + " ".join(argv))
+            if rc is not None:
+                return rc, None
         return CMDS[a.cmd](a)
     return util.run_cli(fn, None, as_json)
