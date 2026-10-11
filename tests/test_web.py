@@ -356,6 +356,14 @@ check("modlink: состояние строк из status", d["data"]["status"][
 r, d = P("/api/targets/2000/modlink/reveal", {"id": 201})
 check("пароль — только по явному запросу", d["ok"] and d["data"]["password"] == fake_api.S[2000]["modlink"][0]["password"])
 r, d = P("/api/targets/2000/modlink/export")
+check("экспорт для клиента — по колонкам (прокси | реконнект) для вставки в таблицу",
+      d["ok"] and d["data"]["columns"] == ["Ip:port:log:pass SOCKS5", "ReConnect"]
+      and d["data"]["rows"][0][0].startswith("192.168.88.7:") and d["data"]["rows"][0][1].endswith("/reconnect"), d)
+r2, d2 = P("/api/targets/2000/modlink/export", {"table": True})
+check("для proxyveth — колонки n | real | proxy, без шапки в строках",
+      d2["ok"] and d2["data"]["columns"] == ["n", "real", "proxy"] and d2["data"]["rows"][0][0] == "201"
+      and d2["data"]["rows"][0][2].startswith("192.168.88.7:"), d2)
+r, d = P("/api/targets/2000/modlink/export")
 check("экспорт для клиента: IP:PORT:LOGIN:PASS<TAB>ссылка", d["ok"] and d["data"]["text"].startswith("192.168.88.7:20201:u201:")
       and "\thttp://192.168.88.7:21201/reconnect" in d["data"]["text"], d)
 r, d = P("/api/targets/2000/modlink/save", {"set": [{"id": 202, "fields": {"name": "новое имя", "password": "gen"}}],

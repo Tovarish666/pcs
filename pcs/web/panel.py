@@ -311,7 +311,15 @@ class Panel:
         if not e["ok"]:
             return e
         d = e["data"] if isinstance(e["data"], dict) else {}
-        return ok({"text": "\n".join(_export_lines(e["data"])), "warnings": d.get("warnings") or []})
+        lines = _export_lines(e["data"])
+        # по колонкам — чтобы вставлялось в Google-таблицу по ячейкам
+        if table:
+            body_ = list(csv.reader(io.StringIO("\n".join(lines))))[1:]
+            cols, rows = ["n", "real", "proxy"], [r[:3] for r in body_ if len(r) >= 3]
+        else:
+            cols = ["Ip:port:log:pass SOCKS5", "ReConnect"]
+            rows = [(ln.split("\t") + [""])[:2] for ln in lines]
+        return ok({"text": "\n".join(lines), "warnings": d.get("warnings") or [], "columns": cols, "rows": rows})
 
     def ml_save(self, sid, query, body):
         """Правки таблицы modlink разом: удалить, поменять, добавить, затем apply."""

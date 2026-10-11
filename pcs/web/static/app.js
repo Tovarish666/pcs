@@ -219,14 +219,59 @@
     if (f) f.focus();
     return close;
   }
+  // Буфер обмена. Панель — по HTTP, а там у браузера нет navigator.clipboard (только для HTTPS
+  // и localhost): тогда — старый способ через скрытое поле. Он работает в обработчике нажатия.
+  function copySync(text) {
+    const ta = el("textarea", {style: "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0"});
+    ta.value = text;
+    document.body.append(ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
   async function copy(text) {
-    try { await navigator.clipboard.writeText(text); return true; } catch (e) { return false; }
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* дальше — запасной путь */ }
+    }
+    return copySync(text);
+  }
+  // Кнопка «Копировать» с ответом: скопировано или как сделать руками.
+  function copyBtn(getText, label) {
+    const b = btn(label || "Копировать", null);
+    const base = b.textContent;
+    b.addEventListener("click", async () => {
+      const ok = await copy(getText());
+      b.textContent = ok ? "Скопировано ✓" : "Не вышло — выделите и Ctrl+C";
+      b.classList.toggle("primary", ok);
+      setTimeout(() => { b.textContent = base; b.classList.remove("primary"); }, 2500);
+    });
+    return b;
+  }
+  // Таблица по колонкам; копируется через табуляцию — в Google-таблицу встаёт по ячейкам.
+  function showTable(title, columns, rows, note) {
+    const tsv = (head) => (head ? [columns] : []).concat(rows).map((r) => r.join("\t")).join("\n");
+    const head = el("input", {type: "checkbox"});
+    const t = el("table", {class: "t export"}, el("thead", {}, el("tr", {}, columns.map((c) => el("th", {text: c})))),
+      el("tbody", {}, rows.length ? rows.map((r) => el("tr", {}, r.map((v) => el("td", {class: "mono", text: v}))))
+        : el("tr", {}, el("td", {colspan: columns.length, class: "muted", text: "пусто"}))));
+    const bg = el("div", {class: "modal-bg"});
+    const close = () => { bg.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    bg.append(el("div", {class: "modal wide", role: "dialog", "aria-modal": "true"},
+      el("h3", {text: title}), note ? el("div", {class: "note"}, note) : null, el("div", {class: "tbl-wrap"}, t),
+      el("div", {class: "btns"}, el("label", {class: "muted"}, head, " с шапкой"),
+        copyBtn(() => tsv(head.checked), "Копировать для таблицы"), btn("Закрыть", close, "primary"))));
+    bg.addEventListener("mousedown", (e) => { if (e.target === bg) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.append(bg);
   }
   function showText(title, text) {
     const pre = el("pre", {text: text || "—"});
-    modal(title, pre, [
-      {text: "Копировать", onclick: async () => { pre.dataset.c = (await copy(text)) ? "1" : ""; }},
-      {text: "Закрыть", cls: "primary"}]);
+    const close = modal(title, pre, [{text: "Закрыть", cls: "primary"}]);
+    pre.closest(".modal").querySelector(".btns").prepend(copyBtn(() => text || ""));
+    void close;
   }
   // Опасное — только после ввода номера ВМ (как в меню).
   function confirmNumber(title, warn, expected, actText) {
@@ -973,14 +1018,15 @@
     }, "primary", "сохранить правки и modlink apply (sing-box check → перезапуск)");
     const bExp = btn("Экспорт для клиента", async (e) => {
       const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {}), "Готово");
-      if (r && r.ok) showText("Экспорт для клиента · " + where, r.data.text || "пусто");
+      if (r && r.ok) showTable("Экспорт для клиента · " + where, r.data.columns, r.data.rows,
+        "Колонки — как в таблице клиента: прокси и ссылка реконнекта. «Копировать для таблицы» — вставляется по ячейкам.");
     }, "", "IP:PORT:LOGIN:PASS и ссылка реконнекта — с паролями");
     const bTbl = btn("Для proxyveth", async (e) => {
       const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {table: true}), "Готово");
-      if (r && r.ok) showText("Строки для таблицы proxyveth · " + where,
-        (r.data.warnings.length ? r.data.warnings.map((w) => "⚠ " + w).join("\n") + "\n\n" : "") + (r.data.text || "пусто") +
-        "\n\nВставьте строки в таблицу proxyveth ВМ этого хоста (вкладка proxyveth → таблица). У строк-поставщиков защита снята:" +
-        " proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink.");
+      if (r && r.ok) showTable("Строки для таблицы proxyveth · " + where, r.data.columns, r.data.rows,
+        el("div", {}, ...r.data.warnings.map((w) => el("div", {class: "warn-line", text: "⚠ " + w})),
+          el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
+            " можно поменять. У строк-поставщиков защита снята: proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink."})));
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
 
     const root = el("div", {}, legacyBox, sBox, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
