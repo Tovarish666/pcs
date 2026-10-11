@@ -112,6 +112,7 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/modlink/save", self.ml_save),
             ("POST", r"/api/targets/(host|\d+)/modlink/reveal", self.ml_reveal),
             ("POST", r"/api/targets/(host|\d+)/modlink/export", self.ml_export),
+            ("POST", r"/api/targets/(host|\d+)/modlink/settings", self.ml_settings),
             ("POST", r"/api/servers", self.create),
             ("POST", r"/api/servers/(\d+)/delete", self.delete),
             ("POST", r"/api/run", self.run),
@@ -120,6 +121,7 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/key", self.key),
             ("POST", r"/api/targets/(host|\d+)/mpspace", self.mpspace),
             ("POST", r"/api/targets/(host|\d+)/update", self.update),
+            ("GET", r"/api/jobs", self.jobs),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
@@ -250,7 +252,8 @@ class Panel:
         sid = target(sid)
         if query.get("only") == "status":
             return ok({"status": self._run(sid, "modlink", ["status"])})
-        r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]))
+        r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]),
+                           settings=(self._run, sid, "modlink", ["settings"]))
         if r["list"]["ok"]:
             d = r["list"]["data"]
             rows = []
@@ -286,6 +289,21 @@ class Panel:
                     return ok({"id": int(rid), "password": ":".join(parts[3:])})
         return err("modlink не отдал пароль строки %s" % rid)
 
+    def ml_settings(self, sid, query, body):
+        """Общие настройки modlink: base_port (порты ВСЕХ строк заново), lan_ip, wan_ip ("" — авто)."""
+        kv = []
+        if body.get("base_port") not in (None, ""):
+            kv.append("base_port=%d" % _int(body["base_port"], "базовый порт", 1, 65534))
+        for k in ("lan_ip", "wan_ip"):
+            if k in body:
+                v = _s(body[k], k, 40).strip()
+                if v and v != "auto" and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", v):
+                    raise Bad("%s: адрес IPv4 или пусто (авто)" % k)
+                kv.append("%s=%s" % (k, v or "auto"))
+        if not kv:
+            raise Bad("настройки: base_port, lan_ip, wan_ip")
+        return self._run(target(sid), "modlink", ["settings"] + kv)
+
     def ml_export(self, sid, query, body):
         """Экспорт для клиента; table — строки таблицы proxyveth (виртуальные из этих настоящих)."""
         table = bool(body.get("table"))
@@ -293,7 +311,15 @@ class Panel:
         if not e["ok"]:
             return e
         d = e["data"] if isinstance(e["data"], dict) else {}
-        return ok({"text": "\n".join(_export_lines(e["data"])), "warnings": d.get("warnings") or []})
+        lines = _export_lines(e["data"])
+        # по колонкам — чтобы вставлялось в Google-таблицу по ячейкам
+        if table:
+            body_ = list(csv.reader(io.StringIO("\n".join(lines))))[1:]
+            cols, rows = ["n", "real", "proxy"], [r[:3] for r in body_ if len(r) >= 3]
+        else:
+            cols = ["Ip:port:log:pass SOCKS5", "ReConnect"]
+            rows = [(ln.split("\t") + [""])[:2] for ln in lines]
+        return ok({"text": "\n".join(lines), "warnings": d.get("warnings") or [], "columns": cols, "rows": rows})
 
     def ml_save(self, sid, query, body):
         """Правки таблицы modlink разом: удалить, поменять, добавить, затем apply."""
@@ -353,6 +379,11 @@ class Panel:
         args = [_s(a, "аргумент", 2000) for a in args if a != "--json"]
         if any(a in DANGER for a in args) and str(body.get("confirm", "")).strip() != str(t):
             raise Bad("опасное действие: подтвердите номером сервера (%s)" % t, 403)
+        long_ = getattr(self.api, "is_long", None)
+        if long_ and long_(part, args):
+            # долгая команда — заданием: запрос не висит минутами и не теряется при обрыве связи
+            self.forget()
+            return ok({"job": self.api.run_job(None if t == "host" else t, part, args)})
         e = self._run(t, part, args)
         if args[0] in ("mode", "sync", "up", "down", "install", "uninstall"):
             self.forget()
@@ -428,6 +459,10 @@ class Panel:
 
     def job(self, jid, query, body):
         return ok(self.api.job(jid))
+
+    def jobs(self, query, body):
+        fn = getattr(self.api, "jobs_recent", None)
+        return ok(fn() if fn else [])
 
 
 # ── мелочи ──────────────────────────────────────────────────────────────────

@@ -147,8 +147,14 @@ with open(os.path.join(ROOT, "install.sh")) as f:
     inst = f.read()
 check("install.sh: только Proxmox, VPS — понятный отказ", "qm" in inst and "pvesm" in inst and "VPS" in inst
       and "vmodem" not in inst)
-check("install.sh: панель (PCS_WEB_USER/PCS_WEB_PASS) и hivelink на хост",
-      "web passwd" in inst and "web on" in inst and "PCS_WEB_PASS" in inst and '/bin/hivelink" install' in inst)
+check("install.sh: панель (PCS_WEB_USER/PCS_WEB_PASS), hivelink и modlink — тем же pcs host-setup, что после update",
+      "web passwd" in inst and "web on" in inst and "PCS_WEB_PASS" in inst and '/bin/pcs" host-setup' in inst)
+import inspect  # noqa: E402
+from pcs.hub import servers as hub_servers  # noqa: E402
+src = inspect.getsource(hub_servers.host_setup) + inspect.getsource(hub_servers.update_host)
+check("host-setup: hivelink install и modlink setup; update --host зовёт его НОВЫМ кодом",
+      '("hivelink", ["install"]' in src and '("modlink", ["setup"]' in src
+      and 'os.path.join(dest, "bin", "pcs"), "host-setup"' in src and "modlink" in hub_servers.HOST_BIN)
 r = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "pcs-node"), "version"], capture_output=True, text=True)
 check("pcs-node version", r.returncode == 0 and r.stdout.strip() == VERSION, r.stdout + r.stderr)
 

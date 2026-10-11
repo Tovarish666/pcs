@@ -19,7 +19,7 @@ import time
 import traceback
 
 from pcs import VERSION
-from pcs.core import net, table
+from pcs.core import bg, net, table
 from pcs.core.util import QUIET, Busy, Fail, Log, jload, jsave, lock, merge, rd, run_cli, sh, wr
 from pcs.proxyveth import usb
 
@@ -29,6 +29,7 @@ TABLE = ETC + "/table.csv"
 OLD_GW = ETC + "/env"                  # proxyveth-virt 3.4: режим gw, переезд делает gw.setup
 RUN = "/run/proxyveth"
 LOCK = RUN + "/lock"
+ARGV = []                     # аргументы этого запуска: с ними команда уходит в фон
 UNITD = "/etc/systemd/system"
 PY = "/usr/bin/python3"
 CMD = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "bin", "proxyveth")
@@ -113,7 +114,7 @@ def need_mode(cfg):
 
 
 def confirm(a, text, word):
-    if a.yes:
+    if a.yes or bg.confirmed():          # в фоне: подтвердил человек в терминале до ухода в фон
         return
     if a.json or not sys.stdin.isatty():
         raise Fail("%s — подтверди: --yes" % text)
@@ -253,8 +254,25 @@ def migrate_vmodem():
 
 
 # ── команды ────────────────────────────────────────────────────────────────
+class Handoff(Exception):
+    """Команда ушла в фон и там отработала: здесь — только её код."""
+
+    def __init__(self, rc):
+        super().__init__(rc)
+        self.rc = rc
+
+
+def to_bg(a, name):
+    """Дальше — в фоне (если человек в терминале). Звать ПОСЛЕ подтверждений и ДО блокировки:
+    фоновая копия возьмёт её сама."""
+    rc = bg.handoff("proxyveth-" + name, ARGV, title="proxyveth " + " ".join(ARGV))
+    if rc is not None:
+        raise Handoff(rc)
+
+
 def cmd_setup(a):
     need_root()
+    to_bg(a, "setup")
     with held():
         migrated = migrate_vmodem()
         cfg = load_cfg()
@@ -293,9 +311,10 @@ def cmd_mode(a):
     old_vm = usb.vmodem_found()
     if not cur:
         cur = "usb" if old_vm else ("gw" if os.path.exists(OLD_GW) else None)
+    if cur and cur != new:
+        confirm(a, "режим %s → %s: все модемы сервера будут сняты и подняты заново" % (cur, new), new)
+    to_bg(a, "mode")
     with held():
-        if cur and cur != new:
-            confirm(a, "режим %s → %s: все модемы сервера будут сняты и подняты заново" % (cur, new), new)
         migrated = migrate_vmodem() if old_vm else False
         if cur and cur != new:
             mode_mod(cur).teardown()
@@ -451,6 +470,8 @@ def cmd_lint(a):
 
 def cmd_sync(a):
     need_root()
+    if not a.quiet:                       # таймер — не терминал, ему фон не нужен
+        to_bg(a, "sync")
     try:
         lk = lock(LOCK, wait=0 if a.quiet else 300, what="команда proxyveth")
     except Busy:
@@ -485,6 +506,8 @@ def cmd_updown(a):
     mode, mod = need_mode(cfg)
     if n is None and a.cmd in ("down", "restart"):
         confirm(a, "%s все модемы сервера" % ("снять" if a.cmd == "down" else "пересоздать"), "да")
+    if n is None:                         # все модемы — долго; один — быстро, без фона
+        to_bg(a, a.cmd)
     with held():
         if a.cmd in ("up", "restart"):
             pin(read_table(cfg, mode, fetch=False)["desired"], mod)
@@ -659,12 +682,16 @@ def main(argv=None):
         print(HELP)
         return 0
 
+    ARGV[:] = argv
+
     def go(_):
         a = parser().parse_args(argv)
         a.json = as_json
         a.yes = getattr(a, "yes", False)
         try:
             rc, data = COMMANDS[a.cmd](a)
+        except Handoff as h:
+            return h.rc, None
         except (Fail, KeyboardInterrupt):
             raise
         except OSError as e:

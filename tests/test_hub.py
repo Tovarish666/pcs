@@ -397,12 +397,26 @@ real_call = subprocess.call
 subprocess.call = lambda argv, **k: (called.append(argv), 0)[1]
 try:
     rc = cli.passthru("proxyveth", ["status", "--wan", "--server", "200"])
-    check("pcs proxyveth status --wan --server 200", rc == 0 and streamed[-1] == (200, "proxyveth status --wan", False), streamed)
+    check("pcs proxyveth status --wan --server 200", rc == 0 and streamed[-1] == (200, "PCS_HUB_SERVER=200 proxyveth status --wan", False), streamed)
     cli.passthru("modlink", ["add", "--lan-ip", "192.168.201.100", "--name", "мой модем"])
     check("без --server — выбранный; аргументы с пробелами целы",
-          streamed[-1][:2] == (2000, "modlink add --lan-ip 192.168.201.100 --name 'мой модем'"), streamed[-1])
+          streamed[-1][:2] == (2000, "PCS_HUB_SERVER=2000 modlink add --lan-ip 192.168.201.100 --name 'мой модем'"), streamed[-1])
     cli.passthru("hivelink", ["install", "--host"])
     check("hivelink --host — на самом хосте", called[-1][0].endswith("bin/hivelink") and called[-1][1:] == ["install"])
+    open(os.path.join(store.ETC, "active"), "w").write("4242\n")
+    check("выбранный сервер, которого нет (остаток прежней версии) — не выбран", store.active() == "")
+    called.clear()
+    cli.passthru("modlink", ["setup"])
+    check("modlink без выбранного сервера — на хосте, а не ошибка про чужую ВМ",
+          called and called[-1][0].endswith("bin/modlink") and called[-1][1:] == ["setup"], called)
+    err = io.StringIO()
+    real_err, sys.stderr = sys.stderr, err
+    try:
+        rc = cli.passthru("proxyveth", ["status"])
+    finally:
+        sys.stderr = real_err
+    check("proxyveth без выбранного — по-прежнему просит выбрать сервер", rc == 1 and "не выбран" in err.getvalue(), err.getvalue())
+    store.set_active("2000")
     cli.passthru("modlink", ["list", "--host"])
     check("modlink --host — на самом хосте (настоящие модемы хоста)",
           called[-1][0].endswith("bin/modlink") and called[-1][1:] == ["list"], called[-1])

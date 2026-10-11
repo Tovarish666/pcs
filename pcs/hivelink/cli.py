@@ -214,6 +214,11 @@ def main(argv=None):
         print(USAGE)
         return 0
     cmd, rest = argv[0], argv[1:]
+    if cmd in ("install", "uninstall") and not as_json:
+        from ..core import bg
+        rc = bg.handoff("hivelink-" + cmd, argv, title="hivelink " + " ".join(argv))
+        if rc is not None:
+            return rc
     fn = CMDS.get(cmd)
     if fn is None:
         def fn(a):

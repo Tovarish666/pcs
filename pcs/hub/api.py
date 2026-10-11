@@ -148,9 +148,48 @@ def update(target=None):
     return jobs.start("update", params, title="Обновление PCS (%s)" % key, target=key)
 
 
+LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart"),
+        "modlink": ("setup", "migrate", "uninstall"),
+        "hivelink": ("install", "uninstall")}
+
+
+def is_long(part, args):
+    """Долгая команда части — её панель запускает заданием, а не держит запрос минутами."""
+    a = [str(x) for x in args]
+    if not a or a[0] not in LONG.get(part, ()) or "--dry-run" in a:
+        return False
+    if part == "proxyveth" and a[0] in ("up", "down", "restart"):
+        return len(a) > 1 and a[1] == "all"
+    return True
+
+
+def run_job(id, part, args, input=None):
+    """Долгая команда части — фоновым заданием: обрыв связи с панелью ей не мешает. → job_id."""
+    if part not in PARTS:
+        raise Fail("часть — одна из: %s" % ", ".join(PARTS))
+    t = _target(id)
+    key = "host" if t == store.HOST else t["id"]
+    if t == store.HOST and part not in remote.HOST_PARTS:
+        raise Fail("на хосте есть hivelink и modlink; %s — на серверах" % part)
+    if jobs.busy("part", key):
+        raise Fail("на %s уже идёт долгая команда — дождись её (pcs job)" % ("хосте" if key == "host" else "сервере %s" % key))
+    return jobs.start("part", {"id": None if key == "host" else key, "part": part, "args": [str(x) for x in args],
+                               "input": input},
+                      title="%s %s — %s" % (part, " ".join(str(x) for x in args), "хост" if key == "host" else "ВМ %s" % key),
+                      target=key)
+
+
 def job(job_id):
-    """{"state": "running|done|failed", "log": [...], "result": ..., "error", "title", "kind", …}."""
-    return jobs.get(job_id)
+    """{"state": "running|done|failed", "log": [...], "result": ..., "error", "title", "kind", …}.
+    И задания хаба, и фоновые запуски частей на хосте (pcs/core/bg)."""
+    from ..core import bg
+    return bg.get(job_id) if bg.is_id(job_id) else jobs.get(job_id)
+
+
+def jobs_recent(n=15):
+    """Последние задания хаба и фоновые запуски на хосте, новые сверху (без журналов)."""
+    from ..core import bg
+    return sorted(jobs.recent(n) + bg.recent(n), key=lambda d: d.get("started") or 0, reverse=True)[:n]
 
 
 def term_argv(target):
@@ -168,5 +207,22 @@ def _job_mpspace(p):
     return srv.mpspace_install(s, p.get("auth"), p.get("proxy"), p.get("no_reboot"))
 
 
-KINDS = {"create_server": _job_create, "mpspace": _job_mpspace, "update": srv.update}
+def _job_part(p):
+    print("  ▸ %s %s на %s" % (p["part"], " ".join(p["args"]), "хосте" if p["id"] is None else "сервере %s" % p["id"]),
+          flush=True)
+    e = run(p["id"], p["part"], p["args"], timeout=3 * 3600, input=p.get("input"))
+    if not e.get("ok"):
+        raise Fail(e.get("error") or "ошибка без текста")
+    return e.get("data")
+
+
+def _job_host_setup(p):
+    d = srv.host_setup()
+    if d["failed"]:
+        raise Fail("не прошло: %s — см. журнал выше" % ", ".join(d["failed"]))
+    return d
+
+
+KINDS = {"create_server": _job_create, "mpspace": _job_mpspace, "update": srv.update, "part": _job_part,
+         "host_setup": _job_host_setup}
 summarize = node.summarize

@@ -35,19 +35,59 @@
       opt.headers["X-CSRF"] = S.session ? S.session.csrf : "";
       opt.body = JSON.stringify(body || {});
     }
-    let r;
-    try { r = await fetch(path, opt); } catch (e) {
-      return {ok: false, error: "панель не отвечает — сеть или pcs-web остановлена"};
+    // GET безопасно повторить: связь моргнула — ещё раз (до 4 попыток), а не ошибка на экране
+    const tries = method === "GET" ? 4 : 1;
+    for (let i = 0; ; i++) {
+      let r, text;
+      try { r = await fetch(path, opt); } catch (e) {
+        if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
+        return {ok: false, net: true, error: method === "GET" ? "панель не отвечает — сеть или pcs-web остановлена"
+          : "связь с панелью прервалась — действие могло выполниться: «Обновить» или «Фоновые задания» на странице хоста"};
+      }
+      if (r.status === 401) { location.href = "/login"; return {ok: false, error: "нужен вход"}; }
+      try { text = await r.text(); } catch (e) {
+        if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
+        return {ok: false, net: true, error: "связь оборвалась посреди ответа (HTTP " + r.status + ")" +
+          (method === "POST" ? " — действие могло выполниться: «Обновить»" : "")};
+      }
+      try { return JSON.parse(text); } catch (e) {
+        return {ok: false, error: "ответ панели не JSON (HTTP " + r.status + "): " + text.slice(0, 120)};
+      }
     }
-    if (r.status === 401) { location.href = "/login"; return {ok: false, error: "нужен вход"}; }
-    try { return await r.json(); } catch (e) {
-      return {ok: false, error: "ответ панели не JSON (HTTP " + r.status + ")"};
+  }
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // Долгое панель запускает заданием хаба: ждём его здесь. Обрыв связи — не беда: задание
+  // идёт на хосте, а мы спрашиваем снова, пока не узнаем итог.
+  let ACT_RES = null;
+  async function waitJob(jid) {
+    const res = ACT_RES;
+    for (let miss = 0; ;) {
+      const r = await GET("/api/jobs/" + encodeURIComponent(jid));
+      if (!r.ok) {
+        if (r.net && ++miss < 200) {
+          if (res) setRes(res, "run", "связь прервалась — задание идёт на хосте, жду…");
+          await sleep(3000); continue;
+        }
+        return {ok: false, error: r.error + " (задание " + jid + ": #/job/" + jid + ")"};
+      }
+      miss = 0;
+      const j = r.data || {};
+      if (j.state === "running" || j.state === "queued") {
+        const last = (j.log || []).filter((l) => l.trim()).slice(-1)[0];
+        if (res) setRes(res, "run", "идёт" + (last ? ": " + last.trim().slice(0, 90) : "…"));
+        await sleep(1500); continue;
+      }
+      if (j.state === "done") return {ok: true, data: j.result, job: jid};
+      return {ok: false, error: ((j.result && j.result.error) || j.error || "задание не удалось"), job: jid, log: j.log};
     }
   }
   const GET = (p) => api("GET", p);
   const POST = (p, b) => api("POST", p, b);
-  const run = (target, part, args, extra) =>
-    POST("/api/run", Object.assign({target: String(target), part, args}, extra || {}));
+  const run = async (target, part, args, extra) => {
+    const r = await POST("/api/run", Object.assign({target: String(target), part, args}, extra || {}));
+    if (r && r.ok && r.data && r.data.job != null && Object.keys(r.data).length === 1) return waitJob(r.data.job);
+    return r;
+  };
 
   // ── формат ────────────────────────────────────────────────────────────────
   const MODE = {usb: "USB", gw: "шлюз"};
@@ -179,14 +219,59 @@
     if (f) f.focus();
     return close;
   }
+  // Буфер обмена. Панель — по HTTP, а там у браузера нет navigator.clipboard (только для HTTPS
+  // и localhost): тогда — старый способ через скрытое поле. Он работает в обработчике нажатия.
+  function copySync(text) {
+    const ta = el("textarea", {style: "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0"});
+    ta.value = text;
+    document.body.append(ta);
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
   async function copy(text) {
-    try { await navigator.clipboard.writeText(text); return true; } catch (e) { return false; }
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* дальше — запасной путь */ }
+    }
+    return copySync(text);
+  }
+  // Кнопка «Копировать» с ответом: скопировано или как сделать руками.
+  function copyBtn(getText, label) {
+    const b = btn(label || "Копировать", null);
+    const base = b.textContent;
+    b.addEventListener("click", async () => {
+      const ok = await copy(getText());
+      b.textContent = ok ? "Скопировано ✓" : "Не вышло — выделите и Ctrl+C";
+      b.classList.toggle("primary", ok);
+      setTimeout(() => { b.textContent = base; b.classList.remove("primary"); }, 2500);
+    });
+    return b;
+  }
+  // Таблица по колонкам; копируется через табуляцию — в Google-таблицу встаёт по ячейкам.
+  function showTable(title, columns, rows, note) {
+    const tsv = (head) => (head ? [columns] : []).concat(rows).map((r) => r.join("\t")).join("\n");
+    const head = el("input", {type: "checkbox"});
+    const t = el("table", {class: "t export"}, el("thead", {}, el("tr", {}, columns.map((c) => el("th", {text: c})))),
+      el("tbody", {}, rows.length ? rows.map((r) => el("tr", {}, r.map((v) => el("td", {class: "mono", text: v}))))
+        : el("tr", {}, el("td", {colspan: columns.length, class: "muted", text: "пусто"}))));
+    const bg = el("div", {class: "modal-bg"});
+    const close = () => { bg.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    bg.append(el("div", {class: "modal wide", role: "dialog", "aria-modal": "true"},
+      el("h3", {text: title}), note ? el("div", {class: "note"}, note) : null, el("div", {class: "tbl-wrap"}, t),
+      el("div", {class: "btns"}, el("label", {class: "muted"}, head, " с шапкой"),
+        copyBtn(() => tsv(head.checked), "Копировать для таблицы"), btn("Закрыть", close, "primary"))));
+    bg.addEventListener("mousedown", (e) => { if (e.target === bg) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.append(bg);
   }
   function showText(title, text) {
     const pre = el("pre", {text: text || "—"});
-    modal(title, pre, [
-      {text: "Копировать", onclick: async () => { pre.dataset.c = (await copy(text)) ? "1" : ""; }},
-      {text: "Закрыть", cls: "primary"}]);
+    const close = modal(title, pre, [{text: "Закрыть", cls: "primary"}]);
+    pre.closest(".modal").querySelector(".btns").prepend(copyBtn(() => text || ""));
+    void close;
   }
   // Опасное — только после ввода номера ВМ (как в меню).
   function confirmNumber(title, warn, expected, actText) {
@@ -228,7 +313,8 @@
     if (button) button.disabled = true;
     setRes(res, "run", "выполняется…");
     let r;
-    try { r = await fn(); } catch (e) { r = {ok: false, error: String(e)}; }
+    ACT_RES = res;
+    try { r = await fn(); } catch (e) { r = {ok: false, error: String(e)}; } finally { ACT_RES = null; }
     if (button) button.disabled = false;
     if (!r || !r.ok) { setRes(res, "err", "Ошибка: " + ((r && r.error) || "неизвестно")); return r; }
     const d = r.data;
@@ -255,6 +341,7 @@
       if (!first && !box.isConnected) return;
       first = false;
       const r = await GET("/api/jobs/" + encodeURIComponent(jid));
+      if (!r.ok && r.net) { setRes(st, "run", "связь прервалась — задание идёт на хосте, жду…"); setTimeout(tick, 3000); return; }
       if (!r.ok) { setRes(st, "err", "Ошибка: " + r.error); return; }
       const j = r.data || {};
       if (j.title && !opts.title) box.firstChild.firstChild.textContent = j.title;
@@ -350,8 +437,22 @@
     const rTerm = actRow("Терминал хоста", "консоль root на хосте Proxmox", link("Открыть", "#/host/term"));
     const acts = el("div", {class: "acts"}, rDns.el, rPw.el, rKey.el, rHl.el, rMl.el, rUp.el, rTerm.el);
 
+    const jobsBox = el("div", {class: "list"});
     const root = el("div", {}, banner, head, cards, el("h2", {text: "Виртуальные машины"}), list,
-      el("h2", {text: "Хост"}), acts);
+      el("h2", {text: "Хост"}), acts, el("h2", {text: "Фоновые задания"}), jobsBox);
+    const JOB_ST = {running: ["info", "идёт"], done: ["ok", "готово"], failed: ["bad", "ошибка"]};
+    async function loadJobs() {
+      const r = await GET("/api/jobs");
+      if (!r.ok) return;
+      const lst = r.data || [];
+      jobsBox.replaceChildren(...(lst.length ? lst.map((j) => {
+        const [cls, txt] = JOB_ST[j.state] || ["", j.state];
+        return el("div", {class: "item"}, el("span", {class: "dot " + cls, title: txt}),
+          el("div", {class: "grow"}, el("div", {class: "title", text: j.title || j.id}),
+            el("div", {class: "sub", text: [txt, j.started ? new Date(j.started * 1000).toLocaleString() : "", j.error || ""].filter(Boolean).join(" · ")})),
+          el("div", {class: "btns"}, link("Журнал", "#/job/" + encodeURIComponent(j.id))));
+      }) : [el("div", {class: "item muted", text: "заданий пока нет: долгое (обновление, установка, перенос) идёт здесь в фоне и не боится обрыва связи"})]));
+    }
 
     function update() {
       const ov = S.ov || {}, host = ov.host || {}, list_ = ov.servers || [];
@@ -366,6 +467,7 @@
           real + " " + plural(real, "настоящий модем", "настоящих модема", "настоящих модемов")].join(" · ")}));
       hl.textContent = h.installed === false ? "не установлен" : ["установлен", h.version, real + " " + plural(real, "модем", "модема", "модемов")].filter(Boolean).join(" · ");
       ver.textContent = "версия " + (host.version || (S.session && S.session.version) || "—");
+      loadJobs();
       const m = host.modlink || {};
       ml.textContent = m.installed === false ? "не установлен — pcs update --host" : m.state
         ? "демон " + m.state.modlink + " · sing-box " + m.state["modlink-sb"] : "";
@@ -689,6 +791,39 @@
   function mlTab(id) {
     const where = id === "host" ? "хост" : "ВМ " + id;
     const statusLine = el("div", {class: "muted"});
+    const legacyBox = el("div");
+    // общие настройки — как в modlink-linux: базовый порт, LAN IP, WAN IP
+    const sBase = el("input", {class: "w-s", placeholder: "10000", inputmode: "numeric"});
+    const sLan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sWan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sRes = el("span", {class: "res"});
+    let S0 = null;
+    const sBox = el("div", {class: "ml-settings"},
+      el("label", {title: "порты ВСЕХ строк заново: прокси база+2i, реконнект база+2i+1; новые строки — от него"}, "базовый порт ", sBase),
+      el("label", {title: "адрес этого сервера в локальной сети — в строках «Для proxyveth» (ВМ этого хоста). Пусто — определить самим"}, "LAN IP ", sLan),
+      el("label", {title: "внешний адрес для клиентов — в «Экспорт для клиента». Пусто — определить при экспорте"}, "WAN IP ", sWan),
+      btn("Сохранить настройки", async (e) => {
+        const body = {lan_ip: sLan.value.trim(), wan_ip: sWan.value.trim()};
+        const base = sBase.value.trim();
+        if (base && S0 && String(S0.base_port) !== base) {
+          if (!window.confirm("Порты всех строк пересчитаются от " + base + ": прокси " + base + ", " + (+base + 2) + ", …, реконнект — следующий." +
+              " Клиентам понадобятся новые порты. Дальше — «Применить». Продолжить?")) return;
+          body.base_port = base;
+        }
+        if ((Object.keys(edits).length || added.length || deleted.size) && body.base_port &&
+            !window.confirm("Несохранённые правки таблицы пропадут. Продолжить?")) return;
+        const r = await act(e.target, sRes, () => POST("/api/targets/" + id + "/modlink/settings", body),
+          (d) => d && d.renumbered ? "порты пересчитаны — «Применить»" : "Сохранено");
+        if (r && r.ok) await load();
+      }, "", "сохранить базовый порт, LAN IP и WAN IP"), sRes);
+    function showSettings(x) {
+      if (!x || !x.ok || !x.data) { sBox.hidden = !!(x && !x.ok); return; }
+      sBox.hidden = false;
+      S0 = x.data;
+      sBase.value = String(S0.base_port || "");
+      sLan.value = S0.lan_ip || ""; sLan.placeholder = "авто" + (S0.lan_ip_now ? " (" + S0.lan_ip_now + ")" : "");
+      sWan.value = S0.wan_ip || ""; sWan.placeholder = "авто (при экспорте)";
+    }
     const tbl = el("div", {class: "tbl-wrap"});
     const res = el("span", {class: "res"});
     const out = el("div", {class: "muted mono"});
@@ -796,6 +931,7 @@
       const r = await GET("/api/targets/" + id + "/modlink");
       if (!r.ok) { err = r.error; draw(); return; }
       const L = r.data.list, St = r.data.status;
+      showSettings(r.data.settings);
       err = L.ok ? null : L.error;
       orig = L.ok ? rowsOf(L.data) : [];
       pending = !!(L.ok && L.data && L.data.pending);
@@ -803,8 +939,33 @@
       edits = {}; added = []; deleted = new Set(); revealed = {};
       draw(); markDirty();
     }
+    function showLegacy(d) {
+      if (!d || d.unit !== "legacy") { legacyBox.replaceChildren(); return; }
+      legacyBox.replaceChildren(el("div", {class: "banner"},
+        el("div", {text: "Здесь стоит старый modlink-linux" + (d.panel === "active" ? " (его панель :5000 работает)" : "") +
+          ": его служба держит порты прокси, поэтому «Применить» не пройдёт. Перенос возьмёт его строки — порты и пароли как были," +
+          " клиентам ничего менять не надо — и остановит старую панель."}),
+        btn("Перенести из modlink-linux", migrate, "primary", "modlink migrate: сначала покажет, что перенесётся")));
+    }
+    async function migrate(e) {
+      const r = await act(e.target, res, () => run(id, "modlink", ["migrate", "--dry-run"]), (d) => "к переносу строк: " + rowsOf(d).length);
+      if (!r || !r.ok) return;
+      const rows = rowsOf(r.data), warns = (r.data && r.data.warnings) || [];
+      modal("Перенос из modlink-linux · " + where, el("div", {},
+        el("p", {text: "Таблица modlink заменится строками старого modlink-linux. Правки, сделанные здесь до переноса, пропадут." +
+          " Защита у перенесённых строк включится — снять можно галочкой после переноса."}),
+        el("pre", {text: rows.map((x) => [x.id, x.name, ":" + x.port, x.lan_ip, x.modem_ip].join("  ")).join("\n") +
+          (warns.length ? "\n\n" + warns.map((w) => "⚠ " + w).join("\n") : "")})), [
+        {text: "Отмена"},
+        {text: "Перенести " + rows.length, cls: "primary", onclick: async (close) => {
+          close();
+          await act(e.target, res, () => run(id, "modlink", ["migrate", "--force", "--stop-panel"], {confirm: String(id)}), "Перенесено");
+          await load();
+        }}]);
+    }
     function applyStatus(St) {
       states = {};
+      showLegacy(St && St.ok ? St.data : null);
       if (St && St.ok && St.data && typeof St.data === "object") {
         for (const x of rowsOf(St.data)) if (x && x.id != null) states[x.id] = x;
         if (!Array.isArray(St.data)) {
@@ -857,17 +1018,18 @@
     }, "primary", "сохранить правки и modlink apply (sing-box check → перезапуск)");
     const bExp = btn("Экспорт для клиента", async (e) => {
       const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {}), "Готово");
-      if (r && r.ok) showText("Экспорт для клиента · " + where, r.data.text || "пусто");
+      if (r && r.ok) showTable("Экспорт для клиента · " + where, r.data.columns, r.data.rows,
+        "Колонки — как в таблице клиента: прокси и ссылка реконнекта. «Копировать для таблицы» — вставляется по ячейкам.");
     }, "", "IP:PORT:LOGIN:PASS и ссылка реконнекта — с паролями");
     const bTbl = btn("Для proxyveth", async (e) => {
       const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {table: true}), "Готово");
-      if (r && r.ok) showText("Строки для таблицы proxyveth · " + where,
-        (r.data.warnings.length ? r.data.warnings.map((w) => "⚠ " + w).join("\n") + "\n\n" : "") + (r.data.text || "пусто") +
-        "\n\nВставьте строки в таблицу proxyveth ВМ этого хоста (вкладка proxyveth → таблица). У строк-поставщиков защита снята:" +
-        " proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink.");
+      if (r && r.ok) showTable("Строки для таблицы proxyveth · " + where, r.data.columns, r.data.rows,
+        el("div", {}, ...r.data.warnings.map((w) => el("div", {class: "warn-line", text: "⚠ " + w})),
+          el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
+            " можно поменять. У строк-поставщиков защита снята: proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink."})));
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
 
-    const root = el("div", {}, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
+    const root = el("div", {}, legacyBox, sBox, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
       el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, bTbl, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
     let loaded = false;
     const pl = poller(15000, pollStatus);

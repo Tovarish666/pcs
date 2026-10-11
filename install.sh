@@ -101,18 +101,11 @@ else
     fi
 fi
 
-# ── hivelink на хост: ставится сам ─────────────────────────────────────────
-if "$DEST/bin/hivelink" install; then
-    ok "hivelink на хосте"
+# ── hivelink и modlink на хост — тем же шагом, что после pcs update ────────
+if "$DEST/bin/pcs" host-setup; then
+    ok "hivelink и modlink на хосте (строки modlink: modlink from-ifaces --add && modlink apply)"
 else
-    warn "hivelink на хост не встал (см. выше) — PCS работает и без него; потом: hivelink install"
-fi
-
-# ── modlink на хост: прокси из настоящих модемов хоста ────────────────────
-if "$DEST/bin/modlink" setup; then
-    ok "modlink на хосте (строки: modlink from-ifaces --add && modlink apply)"
-else
-    warn "modlink на хост не встал (см. выше) — потом: modlink setup"
+    warn "не всё встало (см. выше) — PCS работает и так; повторить: pcs host-setup"
 fi
 
 ok "дальше: pcs   (меню)   или   pcs server create --mode usb|gw"

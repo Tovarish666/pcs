@@ -214,6 +214,58 @@ def masked(r, show=False):
     return out
 
 
+# ── общие настройки (/etc/modlink/config.json) ────────────────────────────
+def settings(path=None):
+    """{"base_port", "lan_ip", "wan_ip"}; пустой адрес — определить самим.
+    base_port — откуда считаются порты (новые строки и «все строки заново»);
+    lan_ip — адрес машины в локальной сети: строки для proxyveth ВМ этого хоста;
+    wan_ip — внешний адрес для клиентов: экспорт. ext_ip — прежнее имя wan_ip."""
+    c = jload(path or P.config, {})
+    c = c if isinstance(c, dict) else {}
+    try:
+        base = as_port(c.get("base_port") or BASE_PORT, "base_port")
+    except Fail:
+        base = BASE_PORT
+    return {"base_port": base, "lan_ip": str(c.get("lan_ip") or ""), "wan_ip": str(c.get("wan_ip") or c.get("ext_ip") or "")}
+
+
+def save_settings(path=None, **kw):
+    """kw: base_port, lan_ip, wan_ip ("" или "auto" — определять самим). → новые настройки."""
+    path = path or P.config
+    c = jload(path, {})
+    c = c if isinstance(c, dict) else {}
+    for k, v in kw.items():
+        if k == "base_port":
+            c[k] = as_port(v, "base_port")
+            if c[k] > 65534:
+                raise Fail("base_port: %d — нужна пара портов, не выше 65534" % c[k])
+        elif k in ("lan_ip", "wan_ip"):
+            v = str(v or "").strip()
+            c[k] = "" if v.lower() in ("", "auto", "авто") else as_ipv4(v, k)
+        else:
+            raise Fail("нет настройки «%s»; есть: base_port, lan_ip, wan_ip" % k)
+    c.pop("ext_ip", None)                 # прежнее имя wan_ip
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    jsave(path, c, 0o600)
+    return settings(path)
+
+
+def renumber(doc, base, mine=()):
+    """Порты всех строк заново, подряд от base в порядке id: прокси base+2i, триггер base+2i+1
+    (как в modlink-linux). mine — порты, которые держит своё применённое: для нас они свободны."""
+    rows = sorted(doc["proxies"], key=lambda r: r["id"])
+    if base + 2 * len(rows) - 1 > 65535:
+        raise Fail("от %d не хватит портов на %d строк" % (base, len(rows)))
+    busy = [p for p in range(base, base + 2 * len(rows)) if p not in mine and not PROBE[0](p)]
+    if busy:
+        raise Fail("порт %s уже слушает кто-то другой (ss -ltnp) — возьми другой базовый порт"
+                   % ", ".join(map(str, busy[:5])))
+    for i, r in enumerate(rows):
+        r["port"], r["reconnect_port"] = base + 2 * i, base + 2 * i + 1
+    doc["proxies"] = check_all(rows)
+    return rows
+
+
 # ── новые строки ───────────────────────────────────────────────────────────
 def gen_password(n=12):
     return "".join(secrets.choice(PW_ABC) for _ in range(n))
@@ -290,12 +342,12 @@ def resolve_ports(doc, row, port, rport, skip_id=None, mine=()):
         row["reconnect_port"] = as_port(rport, "reconnect_port")
         taken.add(row["reconnect_port"])
     if pa:
-        row["port"] = free_port(taken, pair=ra, mine=mine)
+        row["port"] = free_port(taken, start=settings()["base_port"], pair=ra, mine=mine)
         taken.add(row["port"])
     if ra:
         nxt = row["port"] + 1
         row["reconnect_port"] = nxt if nxt <= 65535 and nxt not in taken and (nxt in mine or PROBE[0](nxt)) \
-            else free_port(taken, mine=mine)
+            else free_port(taken, start=settings()["base_port"], mine=mine)
     return row
 
 

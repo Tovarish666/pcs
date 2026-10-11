@@ -6,6 +6,10 @@
   modlink set ID поле=значение …          поля: enabled name login password port lan_ip
                                           modem_ip reconnect_port interval_min protect
   modlink del ID --yes | enable ID | disable ID
+  modlink settings [base_port=N] [lan_ip=IP|auto] [wan_ip=IP|auto]
+                                          общие: базовый порт (base_port — порты ВСЕХ строк
+                                          заново: прокси N+2i, реконнект N+2i+1), LAN IP —
+                                          для proxyveth ВМ этого хоста, WAN IP — для клиентов
   modlink protect [ID|all on|off]         защита строки: ЛК операторов, опасные порты, веб модема
                                           (без аргументов — что закрыто и у каких строк)
   modlink apply                           конфиг sing-box → sing-box check → перезапуск
@@ -28,7 +32,7 @@ import re
 import sys
 
 from .. import VERSION
-from ..core import util
+from ..core import bg, util
 from ..core.util import Fail, lock, need_root
 from . import hilink, ops, store, system
 from .store import P
@@ -78,6 +82,8 @@ def parser():
     c = sub.add_parser("del")
     c.add_argument("id")
     c.add_argument("--yes", action="store_true")
+    c = sub.add_parser("settings")
+    c.add_argument("pairs", nargs="*")
     c = sub.add_parser("protect")
     c.add_argument("id", nargs="?")
     c.add_argument("state", nargs="?", choices=("on", "off"))
@@ -209,6 +215,44 @@ def cmd_enable(a, on=True):
     return 0, {"row": store.masked(r)}
 
 
+def cmd_settings(a):
+    kv = {}
+    for p in a.pairs:
+        if "=" not in p:
+            raise Fail("«%s»: нужно поле=значение (base_port, lan_ip, wan_ip)" % p)
+        k, v = p.split("=", 1)
+        kv[k.strip().replace("-", "_")] = v.strip()
+    renumbered = False
+    if kv:
+        with edit():
+            if "base_port" in kv:
+                base = store.as_port(kv["base_port"], "base_port")
+                doc = store.load()
+                mine = {p for r in system.applied_rows() for p in (r["port"], r["reconnect_port"])}
+                store.renumber(doc, base, mine=mine)
+                store.save_settings(**kv)        # сначала проверка портов, потом запись
+                store.save(doc)
+                renumbered = bool(doc["proxies"])
+            else:
+                store.save_settings(**kv)
+    s = store.settings()
+    lan_now = s["lan_ip"] or (primary_ip_or_none() or "")
+    say("  базовый порт: %d    LAN IP: %s    WAN IP: %s" % (
+        s["base_port"], s["lan_ip"] or "авто (%s)" % (lan_now or "?"), s["wan_ip"] or "авто (при экспорте)"))
+    if renumbered:
+        say("  порты всех строк — заново от %d: прокси %d, %d, …; реконнект — следующий" % (
+            s["base_port"], s["base_port"], s["base_port"] + 2))
+        hint_apply()
+    return 0, dict(s, lan_ip_now=lan_now, renumbered=renumbered)
+
+
+def primary_ip_or_none():
+    try:
+        return primary_ip()
+    except Fail:
+        return None
+
+
 def cmd_protect(a):
     """Без аргументов — что закрывает защита и у каких строк она снята; ID|all on|off — переключить."""
     if a.id is not None and a.state is None:
@@ -323,7 +367,7 @@ def primary_ip():
 
 def cmd_export_table(a):
     rows = store.load()["proxies"]
-    ip = store.as_ipv4(a.ip if a.ip and a.ip != "auto" else primary_ip(), "IP")
+    ip = store.as_ipv4(a.ip if a.ip and a.ip != "auto" else (store.settings()["lan_ip"] or primary_ip()), "IP")
     lines, warn = store.table_lines(rows, ip)
     if not util.QUIET[0]:
         for ln in lines:
@@ -392,7 +436,8 @@ def cmd_migrate(a):
             say(row_line(dict(r, password="")))
         for w in res["warnings"]:
             say("  ⚠ " + w)
-        say("  это проверка; перенести: modlink migrate%s" % (" --from " + a.src if a.src else ""))
+        say("  это проверка; перенести: modlink migrate%s%s --stop-panel" % (
+            " --from " + a.src if a.src else "", " --force" if res.get("replaces") else ""))
     else:
         say("  перенос готов: строк %d, sing-box %s, демон %s; клиентам — modlink export"
             % (len(res["rows"]), res["sb"], res["daemon"]))
@@ -419,6 +464,7 @@ def cmd_daemon(a):
 
 
 CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enable": cmd_enable, "protect": cmd_protect,
+        "settings": cmd_settings,
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
         "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log,
         "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,
@@ -440,5 +486,10 @@ def main(argv=None):
             return 0, {"version": VERSION}
         if not P.root:
             need_root()
+        if a.cmd in ("setup", "migrate", "uninstall") and not getattr(a, "dry_run", False) \
+                and (a.cmd != "uninstall" or a.yes):
+            rc = bg.handoff("modlink-" + a.cmd, argv, title="modlink " + " ".join(argv))
+            if rc is not None:
+                return rc, None
         return CMDS[a.cmd](a)
     return util.run_cli(fn, None, as_json)

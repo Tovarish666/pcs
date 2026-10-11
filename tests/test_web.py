@@ -280,6 +280,21 @@ def G(path):
     return req("GET", path, cookie=SID)
 
 
+def RUN(body):
+    """/api/run как в браузере: долгая команда приходит заданием — дождаться и вернуть итог конвертом."""
+    r, d = P("/api/run", body)
+    if not (d.get("ok") and isinstance(d.get("data"), dict) and set(d["data"]) == {"job"}):
+        return r, d
+    for _ in range(150):
+        _, j = G("/api/jobs/" + d["data"]["job"])
+        if j["data"]["state"] != "running":
+            break
+        time.sleep(0.2)
+    j = j["data"]
+    return r, ({"ok": True, "data": j["result"]} if j["state"] == "done"
+               else {"ok": False, "error": (j.get("result") or {}).get("error") or j.get("error")})
+
+
 r, d = P("/api/targets/host/dns", csrf="")
 check("POST без X-CSRF — 403", r.status == 403)
 r, d = P("/api/targets/host/dns", csrf="bad")
@@ -321,14 +336,14 @@ r, d = P("/api/servers/2000/proxyveth/table", {"csv": csv0 + "206,86,188.134.95.
                                                "make_main": True})
 check("таблица сохранена в локальную копию и стала главной", d["ok"] and d["data"]["saved"]["data"]["rows"] == 6
       and d["data"]["source"]["data"]["source"] == "local", d)
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync"]})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync"]})
 check("синхронизация создала модем 206", d["ok"] and d["data"]["created"] == [206], d)
 r, d = P("/api/servers/2000/proxyveth/table", {"csv": "n,real,proxy\n207,87,188.134.95.184:1187:m:p\n"})
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync"]})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync"]})
 check("снести больше половины без --force — отказ", not d["ok"] and "--force" in d["error"], d)
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync", "--force"]})
 check("--force без номера ВМ — 403", r.status == 403)
-r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["sync", "--force"], "confirm": "2000"})
+r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync", "--force"], "confirm": "2000"})
 check("--force с номером ВМ — выполнено", d["ok"] and d["data"]["created"] == [207], d)
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["diag", "207"]})
 check("диагностика модема: шаги и итог", d["ok"] and len(d["data"]["steps"]) == 5 and d["data"]["verdict"])
@@ -340,6 +355,14 @@ check("modlink: строки §8 без паролей", len(ml) == 5 and all("p
 check("modlink: состояние строк из status", d["data"]["status"]["ok"] and d["data"]["status"]["data"]["rows"][0]["state"] == "ok")
 r, d = P("/api/targets/2000/modlink/reveal", {"id": 201})
 check("пароль — только по явному запросу", d["ok"] and d["data"]["password"] == fake_api.S[2000]["modlink"][0]["password"])
+r, d = P("/api/targets/2000/modlink/export")
+check("экспорт для клиента — по колонкам (прокси | реконнект) для вставки в таблицу",
+      d["ok"] and d["data"]["columns"] == ["Ip:port:log:pass SOCKS5", "ReConnect"]
+      and d["data"]["rows"][0][0].startswith("192.168.88.7:") and d["data"]["rows"][0][1].endswith("/reconnect"), d)
+r2, d2 = P("/api/targets/2000/modlink/export", {"table": True})
+check("для proxyveth — колонки n | real | proxy, без шапки в строках",
+      d2["ok"] and d2["data"]["columns"] == ["n", "real", "proxy"] and d2["data"]["rows"][0][0] == "201"
+      and d2["data"]["rows"][0][2].startswith("192.168.88.7:"), d2)
 r, d = P("/api/targets/2000/modlink/export")
 check("экспорт для клиента: IP:PORT:LOGIN:PASS<TAB>ссылка", d["ok"] and d["data"]["text"].startswith("192.168.88.7:20201:u201:")
       and "\thttp://192.168.88.7:21201/reconnect" in d["data"]["text"], d)
@@ -360,6 +383,38 @@ check("modlink хоста → строки для proxyveth и предупре�
 r, d = G("/api/targets/host/modlink")
 check("modlink на хосте: строки настоящих модемов хоста", d["ok"] and d["data"]["list"]["ok"]
       and [x["id"] for x in d["data"]["list"]["data"]["rows"]] == [1, 2], d)
+r, d = G("/api/targets/2000/modlink")
+check("modlink: общие настройки приходят вместе с таблицей", d["data"]["settings"]["ok"]
+      and d["data"]["settings"]["data"]["base_port"] == 10000, d["data"].get("settings"))
+r, d = P("/api/targets/2000/modlink/settings", {"base_port": 30000, "lan_ip": "", "wan_ip": "203.0.113.7"})
+ports = sorted((x["id"], x["port"], x["reconnect_port"]) for x in fake_api.S[2000]["modlink"])
+check("настройки: базовый порт — порты всех строк заново, WAN IP сохранён", d["ok"] and d["data"]["renumbered"]
+      and ports[0][1:] == (30000, 30001) and ports[1][1:] == (30002, 30003)
+      and fake_api.S[2000]["ml_settings"]["wan_ip"] == "203.0.113.7", (d, ports))
+r, d = P("/api/targets/2000/modlink/settings", {"wan_ip": "не адрес"})
+check("настройки: кривой адрес — 400", r.status == 400, d)
+r, d = P("/api/targets/2000/modlink/settings", {"base_port": 70000})
+check("настройки: порт вне 1–65534 — 400", r.status == 400, d)
+r, d = G("/api/targets/host/modlink")
+check("старый modlink-linux на хосте виден панели (unit legacy)", d["data"]["status"]["data"]["unit"] == "legacy", d)
+r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
+check("при старом modlink-linux «Применить» — понятный отказ", not d["ok"] and "migrate" in d["error"], d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"]})
+check("перенос с --force без подтверждения — 403", r.status == 403, d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"], "confirm": "host"})
+check("долгая команда (migrate) — сразу задание, запрос не висит", d["ok"] and set(d["data"]) == {"job"}, d)
+jid = d["data"]["job"]
+for _ in range(100):
+    r, j = G("/api/jobs/" + jid)
+    if j["data"]["state"] != "running":
+        break
+    time.sleep(0.2)
+check("задание доработало: итог — данные команды", j["data"]["state"] == "done" and not fake_api.HML["legacy"]
+      and isinstance(j["data"]["result"], dict) and "rows" in j["data"]["result"], j)
+r, d = G("/api/jobs")
+check("список заданий для страницы хоста", d["ok"] and any(x["id"] == jid for x in d["data"]), d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--dry-run"]})
+check("предпросмотр (--dry-run) — сразу ответ, без задания", d["ok"] and "rows" in d["data"], d)
 r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
 check("modlink на хосте: снять защиту и применить", d["ok"] and d["data"]["applied"]
       and fake_api.HML["modlink"][0]["protect"] is False, d)

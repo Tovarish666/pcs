@@ -149,13 +149,11 @@ def dirs():
 
 
 def ext_ip_saved():
-    return str(jload(P.config, {}).get("ext_ip") or "")
+    return store.settings()["wan_ip"]
 
 
 def save_ext_ip(ip):
-    cfg = jload(P.config, {})
-    cfg["ext_ip"] = ip
-    jsave(P.config, cfg, 0o600)
+    store.save_settings(wan_ip=ip)
 
 
 # ── apply ──────────────────────────────────────────────────────────────────
@@ -180,6 +178,10 @@ def wait_active(unit, sec=8):
 def apply(log, binary=None):
     """Таблица → конфиг sing-box → sing-box check → запись → перезапуск modlink-sb; демон перечитывает."""
     binary = binary or singbox.BIN
+    if owner(SVC) == "legacy":
+        raise Fail("на машине старый modlink-linux: его modlink.service держит порты прокси. "
+                   "Сначала перенос — посмотреть: modlink migrate --dry-run, перенести: "
+                   "modlink migrate --force --stop-panel (порты и пароли его строк — как были)")
     rows = store.load()["proxies"]
     cfg = store.config(rows, store.guard_extra())
     check_config(cfg, binary)
@@ -336,12 +338,16 @@ def migrate(log, src=None, stop_panel=False, force=False, dry_run=False, binary=
     rows, ext_ip, warn = store.legacy(src, old_sb)
     doc = store.load()
     same = not pending(rows, doc["proxies"])
-    if doc["proxies"] and not same and not force:
-        raise Fail("в таблице modlink уже %d строк — перенос заменит их; заменить: modlink migrate --force"
-                   % len(doc["proxies"]))
-    out = {"rows": [store.masked(r) for r in rows], "ext_ip": ext_ip, "warnings": warn, "dry_run": dry_run}
+    replace = len(doc["proxies"]) if doc["proxies"] and not same else 0
+    if replace and dry_run:
+        warn.append("в таблице modlink сейчас %d строк — перенос заменит их (modlink migrate --force)" % replace)
+    out = {"rows": [store.masked(r) for r in rows], "ext_ip": ext_ip, "warnings": warn, "dry_run": dry_run,
+           "replaces": replace}
     if dry_run:
-        return out
+        return out              # предпросмотр — всегда, даже если таблица не пустая
+    if replace and not force:
+        raise Fail("в таблице modlink уже %d строк — перенос заменит их; посмотреть: modlink migrate --dry-run, "
+                   "заменить: modlink migrate --force" % replace)
     if not same:
         store.save({"next_id": store.FIRST_FREE_ID, "proxies": rows,
                     "migrated": {"from": src, "t": int(time.time())}})
@@ -350,6 +356,8 @@ def migrate(log, src=None, stop_panel=False, force=False, dry_run=False, binary=
         log("таблица уже перенесена — строки не трогаю")
     if ext_ip and not ext_ip_saved():
         save_ext_ip(ext_ip)
+    if rows and "base_port" not in jload(P.config, {}):
+        store.save_settings(base_port=min(r["port"] for r in rows))     # базовый порт — как был
     s = setup(log, takeover=True, binary=binary)
     a = apply(log, binary=binary)
     panel = active(PANEL)
@@ -362,9 +370,9 @@ def migrate(log, src=None, stop_panel=False, force=False, dry_run=False, binary=
         warn.append("старая панель modlink-panel (:5000) работает: её триггеры держат порты реконнекта, "
                     "таймеры дублируют наши, а «Применить» в ней перепишет modlink.service. "
                     "Остановить: modlink migrate --stop-panel")
-    warn += [w for w in s["warnings"] + a["warnings"] if w not in warn]
     for w in warn:
-        log("⚠ " + w)
+        log("⚠ " + w)           # setup и apply свои предупреждения уже напечатали
+    warn += [w for w in s["warnings"] + a["warnings"] if w not in warn]
     out.update({"panel": panel, "sb": a["sb"], "daemon": a["daemon"], "warnings": warn})
     return out
 

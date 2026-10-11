@@ -38,7 +38,7 @@ def launch(jid):
     """Запустить исполнителя. Через systemd-run — чтобы перезапуск pcs-web его не убил."""
     log = _p(jid, "log")
     exe = [sys.executable, os.path.join(ROOT, "bin", "pcs"), "job", "run", jid]
-    env = {"PYTHONUNBUFFERED": "1", "PCS_JOBS": DIR}
+    env = {"PYTHONUNBUFFERED": "1", "PCS_JOBS": DIR, "PCS_BG": "1"}   # внутри задания в фон второй раз не уходить
     for k in ("PCS_ETC", "PCS_RUN", "PCS_LOG"):
         if os.environ.get(k):
             env[k] = os.environ[k]
@@ -128,6 +128,25 @@ def get(jid, lines=400):
     out = {k: st.get(k) for k in ("id", "kind", "title", "target", "state", "result", "error", "started", "finished")}
     out["log"] = log
     return out
+
+
+def follow(jid, out=None, sleep=time.sleep):
+    """Показывать журнал задания до конца (терминал). Ctrl+C — перестать смотреть, задание идёт.
+    → 0 — готово, 1 — ошибка, 130 — смотреть перестали."""
+    from ..core import bg
+    out = out or sys.stdout
+    st = get(jid, lines=0)
+    out.write("  ▸ задание %s: %s\n    связь оборвётся — не страшно, задание доработает; снова посмотреть: pcs job %s\n\n"
+              % (jid, st["title"], jid))
+    out.flush()
+    try:
+        st = bg.tail(_p(jid, "log"), lambda: get(jid, lines=0), out=out, sleep=sleep)
+    except KeyboardInterrupt:
+        out.write("\n  ▸ перестал смотреть; задание идёт дальше: pcs job %s\n" % jid)
+        return 130
+    if st.get("error") and "оборвалось" in st["error"]:
+        out.write("  ✗ %s\n" % st["error"])
+    return 0 if st["state"] == "done" else 1
 
 
 def recent(n=20):

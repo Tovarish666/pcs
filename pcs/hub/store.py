@@ -89,9 +89,12 @@ def active():
     except OSError:
         return ""
     try:
-        return norm_id(v) if v else ""
+        sid = norm_id(v) if v else ""
     except Fail:
         return ""
+    if sid and sid != HOST and not os.path.exists(path(sid)):
+        return ""       # выбранного сервера больше нет (удалён мимо PCS, остаток прежней версии) — не выбран
+    return sid
 
 
 def set_active(sid):
