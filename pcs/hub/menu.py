@@ -398,6 +398,21 @@ class Menu:
             if st:
                 self.run(["modlink", "protect", i, st] + self.tgt())
 
+        def settings():
+            self.tgt()
+            self.run(["modlink", "settings"] + self.tgt(), pause=False)
+            kv = []
+            base = self.ask("Базовый порт (Enter — не менять; порты ВСЕХ строк пересчитаются)", r"\d{1,5}", hint="1–65534")
+            if base and self.confirm_server("Порты всех строк modlink на %s — заново от %s" % (where(), base)):
+                kv.append("base_port=" + base)
+            for k, what in (("lan_ip", "LAN IP (для proxyveth ВМ этого хоста)"), ("wan_ip", "WAN IP (для клиентов)")):
+                v = self.ask(what + ", auto — определять самим (Enter — не менять)", r"auto|\d+\.\d+\.\d+\.\d+",
+                             hint="адрес или auto")
+                if v:
+                    kv.append("%s=%s" % (k, v))
+            if kv:
+                self.run(["modlink", "settings"] + kv + self.tgt())
+
         self.loop("Прокси — modlink", [
             ("1", "Список", ml("list")),
             ("2", "Состояние", ml("status")),
@@ -411,6 +426,7 @@ class Menu:
             ("10", "Строки для клиента (export, с паролями)", ml("export")),
             ("11", "Защита: что закрыто и у кого снята", ml("protect")),
             ("12", "Защита: включить / снять", protect),
+            ("13", "Настройки: базовый порт, LAN IP, WAN IP", settings),
         ])
 
     # Софт

@@ -179,11 +179,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
 4. Спрашивает логин и пароль панели (или берёт `PCS_WEB_USER`, `PCS_WEB_PASS`), сохраняет
    хэшем и включает `pcs-web.service` на порту 666. Если вход уже задан — не спрашивает,
    но панель всё равно включает (`pcs web on`).
-5. Ставит hivelink на хост (`hivelink install`). Первая установка тяжёлая: ставятся
-   `proxmox-headers-*`, `build-essential`, `dkms`, собирается модуль — несколько минут.
-6. Ставит modlink на хост (`modlink setup`: sing-box 1.14.2, юниты `modlink` и
-   `modlink-sb`). Строк нет — sing-box стоит, демон работает. `pcs update --host` делает
-   то же самое.
+5. Дальше — `pcs host-setup` (его же зовёт `pcs update --host`):
+   - ссылки `/usr/local/bin/{pcs,hivelink,modlink}`;
+   - hivelink на хост (`hivelink install`). Первая установка тяжёлая: ставятся
+     `proxmox-headers-*`, `build-essential`, `dkms`, собирается модуль — несколько минут;
+   - modlink на хост (`modlink setup`: sing-box 1.14.2, юниты `modlink` и `modlink-sb`).
+     Строк нет — sing-box стоит, демон работает. Если на хосте старый modlink-linux —
+     его не трогает и подсказывает перенос (§9.6);
+   - перезапуск панели, если она включена.
+
+   **`pcs update --host` выполняет `pcs host-setup` уже новым кодом.** Раньше шаги после
+   обновления шли из прежней версии: так PCS без modlink на хосте обновился в PCS с ним,
+   а modlink не поставил (случай megavolgadata, 10.10).
 
 ### Серверы
 
@@ -230,7 +237,9 @@ pcs doctor [--server ID|--host] | pcs job [ID] | pcs log | pcs version
 ```
 
 - Без `--server` команда идёт на **выбранный сервер** (`pcs server use ID`; хранится в
-  `/etc/pcs/active`).
+  `/etc/pcs/active`). Если выбранного сервера больше нет (удалён мимо PCS, остался от
+  прежней версии), он считается невыбранным. `pcs modlink` и `pcs hivelink` без
+  выбранного сервера идут на хост.
 - `--json` — ответ для программ (конверт, §7).
 - **Секреты — не в командной строке:**
   - пароль root — `PCS_PASSWORD` или вопрос;
@@ -609,6 +618,7 @@ modlink set ID поле=значение …       (password=- — со stdin; p
 modlink del ID --yes | enable ID | disable ID
 modlink protect                      что закрывает защита и у каких строк снята
 modlink protect ID|all on|off        включить / снять защиту
+modlink settings [base_port=N] [lan_ip=IP|auto] [wan_ip=IP|auto]   общие настройки (§9.7)
 modlink apply                        конфиг → sing-box check → запись → перезапуск
 modlink status | test ID | reconnect ID | reboot ID | log ID [-n N]
 modlink export [--ip IP|auto] [--save]   IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
@@ -690,8 +700,38 @@ modlink setup | uninstall --yes [--purge] | daemon | version
   ВМ (вкладка proxyveth → таблица или `proxyveth table put`).
 - Прокси хоста слушает `0.0.0.0` с логином и паролем. Порт открыт и наружу, если роутер
   пробрасывает его на хост.
-- Автоматизации «одной кнопкой» (хост → таблица ВМ) пока нет: строки переносятся
-  вручную. Это следующий шаг, если понадобится.
+- Строки переносятся вручную; кнопку «хост → таблица ВМ» пользователь решил не делать (11.10).
+- `export --table` берёт адрес из настройки **LAN IP** (§9.7), а если она пуста — основной
+  адрес хоста.
+
+**Старый modlink-linux на хосте** (бывает на хостах, где он стоял до PCS; так было на
+megavolgadata). Его `modlink.service` — это его sing-box: держит порты прокси, имя
+совпадает с нашим демоном. Признаки: `modlink status` — «юнит от старого modlink-linux»,
+в панели — красный баннер. PCS его не трогает, пока не попросят:
+- `modlink apply` откажет сразу с подсказкой (а не «нет sing-box» или «порт занят»);
+- перенос: `modlink migrate --dry-run` (что перенесётся), затем
+  `modlink migrate --force --stop-panel`. Строки — из его `modems.conf`, порты и пароли как
+  были (клиентам ничего менять не надо), базовый порт и внешний IP — в настройки (§9.7),
+  его юнит — в `/etc/modlink/legacy/`, старая панель :5000 останавливается.
+  `--force` — потому что заменяет таблицу, если в ней уже что-то есть;
+- в панели то же самое — кнопка «Перенести из modlink-linux» в баннере (сначала покажет
+  строки, потом спросит).
+- Защита у перенесённых строк включена; снять — галочкой или `modlink protect all off`.
+
+### 9.7 Общие настройки (`modlink settings`, сверху вкладки modlink)
+
+Как в modlink-linux — одна строка над таблицей: базовый порт, LAN IP, WAN IP. Хранятся
+в `/etc/modlink/config.json` (`base_port`, `lan_ip`, `wan_ip`; прежнее `ext_ip` читается как `wan_ip`).
+
+| настройка | что делает |
+|---|---|
+| **базовый порт** (`base_port`, по умолчанию 10000) | смена пересчитывает порты **всех** строк подряд в порядке id: прокси `база+2i`, реконнект `база+2i+1`. Если какой-то из этих портов занят чужим — отказ, ничего не меняется. Новые строки (`auto`) берут первую свободную пару от базового. Дальше — `modlink apply` |
+| **LAN IP** (`lan_ip`, пусто — авто: основной адрес машины) | адрес машины в локальной сети: в строках «Для proxyveth» (`export --table`) — их берут ВМ этого хоста |
+| **WAN IP** (`wan_ip`, пусто — авто: узнаётся при экспорте) | внешний адрес для клиентов: в «Экспорт для клиента» (`export`) |
+
+- `modlink settings` без аргументов — показать (`--json`: `{base_port, lan_ip, wan_ip, lan_ip_now, renumbered}`).
+- `export --save` сохраняет WAN IP; `migrate` переносит `base_port` и `ext_ip` старой панели.
+- Меню «Прокси — modlink» → «Настройки»; панель — `POST /api/targets/{id|host}/modlink/settings`.
 
 ---
 
@@ -944,6 +984,7 @@ curl -s -b $J -H "X-CSRF: $T" -H 'Content-Type: application/json' \
 | `POST /api/targets/{id\|host}/modlink/save` | правки разом и apply | `{del: [id], set: [{id, fields}], add: [{lan_ip, name?, login?, password?, port?, modem_ip?, reconnect_port?, interval_min?, enabled?, protect?}], apply?: true}` → `{steps: [{what, ok, error, data}], applied}`. Набранный пароль идёт на сервер через stdin; `protect: false` → `set ID protect=0` / `add --no-protect` |
 | `POST /api/targets/{id\|host}/modlink/reveal` | пароль одной строки | `{id}` → `{id, password}` |
 | `POST /api/targets/{id\|host}/modlink/export` | строки для клиента; `{table: true}` — строки таблицы proxyveth | → `{text, warnings}` |
+| `POST /api/targets/{id\|host}/modlink/settings` | общие настройки modlink (§9.7) | `{base_port?, lan_ip?, wan_ip?}` (пустой адрес — авто) → данные `modlink settings`. `GET …/modlink` отдаёт их же в `settings` |
 | `POST /api/servers` | создать ВМ (задание) | `{name, cores=4, ram_gb=8, disk_gb=40, mode: usb\|gw, sheet?: "https://…", mpspace?: bool}` → `{job}` |
 | `POST /api/servers/{id}/delete` | удалить ВМ | `{confirm: "<id>"}`, иначе 403 → `{job}` или `{result}` |
 | `POST /api/run` | любая команда части на сервере или хосте | `{target: id\|"host", part: proxyveth\|modlink\|hivelink, args: [...], confirm?}`. С `--yes`/`--force` нужен `confirm` = номер сервера, иначе 403. На хосте — hivelink и modlink. → конверт команды |

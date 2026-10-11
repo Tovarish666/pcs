@@ -689,6 +689,39 @@
   function mlTab(id) {
     const where = id === "host" ? "хост" : "ВМ " + id;
     const statusLine = el("div", {class: "muted"});
+    const legacyBox = el("div");
+    // общие настройки — как в modlink-linux: базовый порт, LAN IP, WAN IP
+    const sBase = el("input", {class: "w-s", placeholder: "10000", inputmode: "numeric"});
+    const sLan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sWan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sRes = el("span", {class: "res"});
+    let S0 = null;
+    const sBox = el("div", {class: "ml-settings"},
+      el("label", {title: "порты ВСЕХ строк заново: прокси база+2i, реконнект база+2i+1; новые строки — от него"}, "базовый порт ", sBase),
+      el("label", {title: "адрес этого сервера в локальной сети — в строках «Для proxyveth» (ВМ этого хоста). Пусто — определить самим"}, "LAN IP ", sLan),
+      el("label", {title: "внешний адрес для клиентов — в «Экспорт для клиента». Пусто — определить при экспорте"}, "WAN IP ", sWan),
+      btn("Сохранить настройки", async (e) => {
+        const body = {lan_ip: sLan.value.trim(), wan_ip: sWan.value.trim()};
+        const base = sBase.value.trim();
+        if (base && S0 && String(S0.base_port) !== base) {
+          if (!window.confirm("Порты всех строк пересчитаются от " + base + ": прокси " + base + ", " + (+base + 2) + ", …, реконнект — следующий." +
+              " Клиентам понадобятся новые порты. Дальше — «Применить». Продолжить?")) return;
+          body.base_port = base;
+        }
+        if ((Object.keys(edits).length || added.length || deleted.size) && body.base_port &&
+            !window.confirm("Несохранённые правки таблицы пропадут. Продолжить?")) return;
+        const r = await act(e.target, sRes, () => POST("/api/targets/" + id + "/modlink/settings", body),
+          (d) => d && d.renumbered ? "порты пересчитаны — «Применить»" : "Сохранено");
+        if (r && r.ok) await load();
+      }, "", "сохранить базовый порт, LAN IP и WAN IP"), sRes);
+    function showSettings(x) {
+      if (!x || !x.ok || !x.data) { sBox.hidden = !!(x && !x.ok); return; }
+      sBox.hidden = false;
+      S0 = x.data;
+      sBase.value = String(S0.base_port || "");
+      sLan.value = S0.lan_ip || ""; sLan.placeholder = "авто" + (S0.lan_ip_now ? " (" + S0.lan_ip_now + ")" : "");
+      sWan.value = S0.wan_ip || ""; sWan.placeholder = "авто (при экспорте)";
+    }
     const tbl = el("div", {class: "tbl-wrap"});
     const res = el("span", {class: "res"});
     const out = el("div", {class: "muted mono"});
@@ -796,6 +829,7 @@
       const r = await GET("/api/targets/" + id + "/modlink");
       if (!r.ok) { err = r.error; draw(); return; }
       const L = r.data.list, St = r.data.status;
+      showSettings(r.data.settings);
       err = L.ok ? null : L.error;
       orig = L.ok ? rowsOf(L.data) : [];
       pending = !!(L.ok && L.data && L.data.pending);
@@ -803,8 +837,33 @@
       edits = {}; added = []; deleted = new Set(); revealed = {};
       draw(); markDirty();
     }
+    function showLegacy(d) {
+      if (!d || d.unit !== "legacy") { legacyBox.replaceChildren(); return; }
+      legacyBox.replaceChildren(el("div", {class: "banner"},
+        el("div", {text: "Здесь стоит старый modlink-linux" + (d.panel === "active" ? " (его панель :5000 работает)" : "") +
+          ": его служба держит порты прокси, поэтому «Применить» не пройдёт. Перенос возьмёт его строки — порты и пароли как были," +
+          " клиентам ничего менять не надо — и остановит старую панель."}),
+        btn("Перенести из modlink-linux", migrate, "primary", "modlink migrate: сначала покажет, что перенесётся")));
+    }
+    async function migrate(e) {
+      const r = await act(e.target, res, () => run(id, "modlink", ["migrate", "--dry-run"]), (d) => "к переносу строк: " + rowsOf(d).length);
+      if (!r || !r.ok) return;
+      const rows = rowsOf(r.data), warns = (r.data && r.data.warnings) || [];
+      modal("Перенос из modlink-linux · " + where, el("div", {},
+        el("p", {text: "Таблица modlink заменится строками старого modlink-linux. Правки, сделанные здесь до переноса, пропадут." +
+          " Защита у перенесённых строк включится — снять можно галочкой после переноса."}),
+        el("pre", {text: rows.map((x) => [x.id, x.name, ":" + x.port, x.lan_ip, x.modem_ip].join("  ")).join("\n") +
+          (warns.length ? "\n\n" + warns.map((w) => "⚠ " + w).join("\n") : "")})), [
+        {text: "Отмена"},
+        {text: "Перенести " + rows.length, cls: "primary", onclick: async (close) => {
+          close();
+          await act(e.target, res, () => run(id, "modlink", ["migrate", "--force", "--stop-panel"], {confirm: String(id)}), "Перенесено");
+          await load();
+        }}]);
+    }
     function applyStatus(St) {
       states = {};
+      showLegacy(St && St.ok ? St.data : null);
       if (St && St.ok && St.data && typeof St.data === "object") {
         for (const x of rowsOf(St.data)) if (x && x.id != null) states[x.id] = x;
         if (!Array.isArray(St.data)) {
@@ -867,7 +926,7 @@
         " proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink.");
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
 
-    const root = el("div", {}, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
+    const root = el("div", {}, legacyBox, sBox, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
       el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, bTbl, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
     let loaded = false;
     const pl = poller(15000, pollStatus);

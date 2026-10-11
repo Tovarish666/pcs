@@ -112,6 +112,7 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/modlink/save", self.ml_save),
             ("POST", r"/api/targets/(host|\d+)/modlink/reveal", self.ml_reveal),
             ("POST", r"/api/targets/(host|\d+)/modlink/export", self.ml_export),
+            ("POST", r"/api/targets/(host|\d+)/modlink/settings", self.ml_settings),
             ("POST", r"/api/servers", self.create),
             ("POST", r"/api/servers/(\d+)/delete", self.delete),
             ("POST", r"/api/run", self.run),
@@ -250,7 +251,8 @@ class Panel:
         sid = target(sid)
         if query.get("only") == "status":
             return ok({"status": self._run(sid, "modlink", ["status"])})
-        r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]))
+        r = self._parallel(list=(self._run, sid, "modlink", ["list"]), status=(self._run, sid, "modlink", ["status"]),
+                           settings=(self._run, sid, "modlink", ["settings"]))
         if r["list"]["ok"]:
             d = r["list"]["data"]
             rows = []
@@ -285,6 +287,21 @@ class Panel:
                 if len(parts) >= 4 and parts[1] == str(row.get("port")) and parts[2] == str(row.get("login")):
                     return ok({"id": int(rid), "password": ":".join(parts[3:])})
         return err("modlink не отдал пароль строки %s" % rid)
+
+    def ml_settings(self, sid, query, body):
+        """Общие настройки modlink: base_port (порты ВСЕХ строк заново), lan_ip, wan_ip ("" — авто)."""
+        kv = []
+        if body.get("base_port") not in (None, ""):
+            kv.append("base_port=%d" % _int(body["base_port"], "базовый порт", 1, 65534))
+        for k in ("lan_ip", "wan_ip"):
+            if k in body:
+                v = _s(body[k], k, 40).strip()
+                if v and v != "auto" and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", v):
+                    raise Bad("%s: адрес IPv4 или пусто (авто)" % k)
+                kv.append("%s=%s" % (k, v or "auto"))
+        if not kv:
+            raise Bad("настройки: base_port, lan_ip, wan_ip")
+        return self._run(target(sid), "modlink", ["settings"] + kv)
 
     def ml_export(self, sid, query, body):
         """Экспорт для клиента; table — строки таблицы proxyveth (виртуальные из этих настоящих)."""

@@ -109,6 +109,7 @@ def reset():
         HML.update({"id": "host", "ip": "88.87.69.240", "modlink": [], "ml_log": {}, "ml_pending": False,
                     "ml_applied": {}, "modems": [{"n": n, "iface": "enx0c5b8f279a6%d" % n} for n in (1, 2, 3)]})
         HML["modlink"] = _modlink("host", [1, 2], 2)
+        HML["legacy"] = True        # как на живом хосте со старым modlink-linux
         HML["ml_applied"] = {r["id"]: dict(r) for r in HML["modlink"]}
 
 
@@ -542,6 +543,8 @@ def _ml(srv, a, inp):
                         "next": t + 60 * r["interval_min"] if r["interval_min"] and st == "ok" else None,
                         "last": {"t": t - 900, "how": "timer", "ok": True, "dt": 8.7,
                                  "text": "IP %s" % _ml_ip(r["id"])} if r["interval_min"] else None})
+        if srv.get("legacy"):
+            return {"sb": "inactive", "daemon": "active", "unit": "legacy", "panel": "active", "pending": pend, "rows": out}
         return {"sb": "active", "daemon": "active", "unit": "modlink-sb.service", "pending": pend, "rows": out}
     if cmd == "add":
         noprot = "--no-protect" in a
@@ -588,6 +591,22 @@ def _ml(srv, a, inp):
             r[k] = v
         srv["ml_pending"] = True
         return {"id": r["id"], "pending": True}
+    if cmd == "settings":
+        st = srv.setdefault("ml_settings", {"base_port": 10000, "lan_ip": "", "wan_ip": ""})
+        renum = False
+        for kv in a[1:]:
+            k, _, v = kv.partition("=")
+            if k == "base_port":
+                base = int(v)
+                for i, r in enumerate(sorted(srv["modlink"], key=lambda r: r["id"])):
+                    r["port"], r["reconnect_port"] = base + 2 * i, base + 2 * i + 1
+                st[k], renum = base, bool(srv["modlink"])
+                srv["ml_pending"] = srv["ml_pending"] or renum
+            elif k in ("lan_ip", "wan_ip"):
+                st[k] = "" if v in ("", "auto") else v
+            else:
+                raise Fail("нет настройки «%s»" % k)
+        return dict(st, lan_ip_now=st["lan_ip"] or srv["ip"], renumbered=renum)
     if cmd == "protect":
         if len(a) == 1:
             return {"domains": ["beeline.ru", "megafon.ru", "mts.ru", "t2.ru", "tele2.ru", "yota.ru"],
@@ -612,6 +631,19 @@ def _ml(srv, a, inp):
         srv["modlink"].remove(r)
         srv["ml_pending"] = True
         return {"id": r["id"], "deleted": True, "pending": True}
+    if cmd == "migrate":
+        old = [dict(r, password="old%d" % r["id"], protect=True) for r in srv["modlink"]]
+        if "--dry-run" in a:
+            return {"rows": [dict(r, password=None) for r in old], "ext_ip": srv["ip"], "warnings": [], "dry_run": True}
+        if not srv.get("legacy"):
+            raise Fail("нет modems.conf — старого modlink-linux тут нет")
+        srv["modlink"], srv["legacy"] = old, False
+        srv["ml_applied"] = {r["id"]: dict(r) for r in old}
+        srv["ml_pending"] = False
+        return {"rows": [dict(r, password=None) for r in old], "panel": "inactive", "sb": "active", "daemon": "active",
+                "warnings": []}
+    if cmd == "apply" and srv.get("legacy"):
+        raise Fail("на машине старый modlink-linux — сначала перенос: modlink migrate --force --stop-panel")
     if cmd == "apply":
         srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
         srv["ml_pending"] = False

@@ -26,7 +26,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
                     [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
   pcs server adopt ID [--ip IP] | delete ID [--yes]
   pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
-  pcs modlink …    [--server ID|--host]
+  pcs modlink …    [--server ID|--host]   без выбранного сервера — на хосте
   pcs hivelink …   [--server ID|--host]
   pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
   pcs passwd  [--server ID|--host]      пароль root (Enter — сгенерировать)
@@ -37,6 +37,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs update [--host | --server ID | --all]   без флагов — хост из GitHub и все серверы
   pcs web on|off|status|passwd          веб-панель :666
   pcs doctor [--server ID|--host] | pcs job [ID] | pcs log | pcs version
+  pcs host-setup                        хост после установки/обновления: команды, hivelink, modlink
 
   Без --server — выбранный сервер (pcs server use ID). --json — ответ для программ.
   Секреты не в командной строке: пароль root — PCS_PASSWORD или вопрос, auth.mp —
@@ -99,6 +100,7 @@ def parser():
     c.add_argument("action", choices=("install", "auth", "check"))
     c.add_argument("--server")
     c.add_argument("--no-reboot", action="store_true")
+    sub.add_parser("host-setup")
     c = sub.add_parser("update")
     g = c.add_mutually_exclusive_group()
     g.add_argument("--host", action="store_true", help="только хост из GitHub")
@@ -143,12 +145,15 @@ def passthru(part, args):
     rest, server, host = split_target(args)
     as_json = "--json" in rest
     try:
-        t = store.target(server, host)
+        # modlink и hivelink есть и на хосте: без выбранного сервера — туда
+        t = store.target(server, host, default_host=part in remote.HOST_PARTS)
         if not rest:
             rest = ["help"] if not as_json else ["status", "--json"]
         if t == store.HOST:
             if part not in remote.HOST_PARTS:
                 raise Fail("на хосте нет %s — он на серверах: --server ID" % part)
+            if not as_json and sys.stdout.isatty():
+                ui.info("%s на хосте" % part)
             return subprocess.call([os.path.join(remote.ROOT, "bin", part)] + rest)
         if not as_json and sys.stdout.isatty():
             ui.info("%s на %s" % (part, store.label(t)))
@@ -427,6 +432,11 @@ def c_update(a):
     return 0, servers.update({"host": True, "servers": "all" if store.all_servers() else None})
 
 
+def c_host_setup(a):
+    d = servers.host_setup()
+    return (1 if d["failed"] else 0), d
+
+
 def c_web(a):
     if a.action == "serve":
         rc = web.serve(a.rest)
@@ -547,6 +557,7 @@ HANDLERS = {
     ("server", "use"): c_server_use, ("server", "create"): c_server_create, ("server", "adopt"): c_server_adopt,
     ("server", "delete"): c_server_delete, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
     ("ssh-port", None): c_ssh_port, ("mpspace", None): c_mpspace, ("update", None): c_update, ("web", None): c_web,
+    ("host-setup", None): c_host_setup,
     ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor,
 }
 

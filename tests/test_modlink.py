@@ -550,6 +550,12 @@ try:
     check("setup без migrate: старый modlink.service не тронут",
           msg is None and open(os.path.join(store.P.units, "modlink.service")).read() == legacy_unit
           and ("systemctl", "disable", "--now", "modlink.service") not in ran, (msg, ran))
+    store.save({"next_id": 1001, "proxies": [store.norm(dict(r, password="new%d" % r["id"])) for r in rows[:2]]})
+    msg = fails(system.apply, lambda m: None, binary=sbb)
+    check("apply при старом modlink-linux — отказ с подсказкой про migrate, ничего не запущено",
+          msg and "modlink migrate --dry-run" in msg and "--force --stop-panel" in msg
+          and json.load(open(store.P.singbox)) == old_cfg and not any("restart" in c for c in ran), (msg, ran))
+    os.unlink(store.P.proxies)
     ran.clear()
     if sb_binary():
         res = system.migrate(lambda m: None, binary=sbb)
@@ -571,6 +577,7 @@ try:
         check("migrate: /usr/local/bin/sing-box не тронут — его нет ни в одной команде",
               not any("/usr/local/bin/sing-box" in " ".join(c) for c in ran))
         check("ext_ip старой панели сохранён для export", system.ext_ip_saved() == "198.51.100.20")
+        check("базовый порт старой панели — в настройках", store.settings()["base_port"] == 20000, store.settings())
         ran.clear()
         res = system.migrate(lambda m: None, stop_panel=True, binary=sbb)
         check("migrate --stop-panel: повтор безопасен, панель выключена",
@@ -578,6 +585,14 @@ try:
         store.save(dict(store.load(), proxies=store.load()["proxies"][:1]))
         check("таблица уже другая — migrate без --force отказывает",
               "--force" in (fails(system.migrate, lambda m: None, binary=sbb) or ""))
+        pv = system.migrate(lambda m: None, dry_run=True, binary=sbb)
+        check("--dry-run при непустой таблице — всё равно показывает, что перенесётся, и предупреждает",
+              len(pv["rows"]) == 4 and pv["replaces"] == 1 and any("заменит" in w for w in pv["warnings"])
+              and len(store.load()["proxies"]) == 1, pv)
+        said = []
+        system.migrate(said.append, force=True, binary=sbb)
+        dup = [m for m in said if m.startswith("⚠") and said.count(m) > 1]
+        check("migrate: предупреждения не печатаются дважды", not dup, dup)
         ran.clear()
         out = system.uninstall(lambda m: None, purge=True)
         check("uninstall: свои юниты сняты, старый modlink-linux возвращён на место",
@@ -662,6 +677,31 @@ rc, out, err = run_cli("export", "--table", "--ip", "192.168.88.254", "--json")
 d = json.loads(out)["data"] if rc == 0 else {}
 check("export --table --json: строки и предупреждения", d.get("lines", [""])[0] == "n,real,proxy,enabled"
       and len(d["lines"]) == 3 and d["warnings"], out)
+rc, out, err = run_cli("settings", "--json")
+d = json.loads(out)["data"] if rc == 0 else {}
+check("settings: по умолчанию базовый 10000, адреса — авто", d.get("base_port") == 10000 and d.get("lan_ip") == ""
+      and d.get("wan_ip") == "", out)
+rc, out, err = run_cli("settings", "base_port=20000", "lan_ip=192.168.88.254", "wan_ip=203.0.113.9")
+rows_now = sorted(store.load()["proxies"], key=lambda r: r["id"])
+check("settings base_port=20000 — порты ВСЕХ строк заново: прокси 20000+2i, реконнект +1",
+      rc == 0 and [(r["port"], r["reconnect_port"]) for r in rows_now] == [(20000, 20001), (20002, 20003)]
+      and "modlink apply" in out, (out, err, [(r["id"], r["port"]) for r in rows_now]))
+rc, out, err = run_cli("export")
+check("WAN IP настроек — в экспорте для клиентов", rc == 0 and out.startswith("203.0.113.9:20000:"), out)
+rc, out, err = run_cli("export", "--table", "--json")
+check("LAN IP настроек — в строках для proxyveth", rc == 0 and "192.168.88.254:20000:" in json.loads(out)["data"]["lines"][1], out)
+rc, out, err = run_cli("add", "--lan-ip", "192.168.203.100", "--json")
+check("новая строка — от базового порта настроек", rc == 0 and json.loads(out)["data"]["row"]["port"] == 20004, out)
+store.PROBE[0] = lambda p: p != 30003
+rc, out, err = run_cli("settings", "base_port=30000")
+check("base_port, где порт занят чужим — отказ, ничего не поменялось",
+      rc == 1 and "30003" in err and store.settings()["base_port"] == 20000
+      and sorted(r["port"] for r in store.load()["proxies"]) == [20000, 20002, 20004], err)
+store.PROBE[0] = lambda p: True
+rc, out, err = run_cli("settings", "lan_ip=auto", "wan_ip=не-адрес")
+check("кривой адрес — отказ", rc == 1 and "wan_ip" in err, err)
+rc, out, err = run_cli("settings", "lan_ip=auto")
+check("lan_ip=auto — снова определять самим", rc == 0 and store.settings()["lan_ip"] == "", err)
 rc, out, err = run_cli("protect", "201")
 check("protect ID без on/off — подсказка", rc == 1 and "on|off" in err, err)
 rc, out, err = run_cli("list")

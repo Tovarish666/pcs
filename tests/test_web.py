@@ -360,6 +360,26 @@ check("modlink хоста → строки для proxyveth и предупре�
 r, d = G("/api/targets/host/modlink")
 check("modlink на хосте: строки настоящих модемов хоста", d["ok"] and d["data"]["list"]["ok"]
       and [x["id"] for x in d["data"]["list"]["data"]["rows"]] == [1, 2], d)
+r, d = G("/api/targets/2000/modlink")
+check("modlink: общие настройки приходят вместе с таблицей", d["data"]["settings"]["ok"]
+      and d["data"]["settings"]["data"]["base_port"] == 10000, d["data"].get("settings"))
+r, d = P("/api/targets/2000/modlink/settings", {"base_port": 30000, "lan_ip": "", "wan_ip": "203.0.113.7"})
+ports = sorted((x["id"], x["port"], x["reconnect_port"]) for x in fake_api.S[2000]["modlink"])
+check("настройки: базовый порт — порты всех строк заново, WAN IP сохранён", d["ok"] and d["data"]["renumbered"]
+      and ports[0][1:] == (30000, 30001) and ports[1][1:] == (30002, 30003)
+      and fake_api.S[2000]["ml_settings"]["wan_ip"] == "203.0.113.7", (d, ports))
+r, d = P("/api/targets/2000/modlink/settings", {"wan_ip": "не адрес"})
+check("настройки: кривой адрес — 400", r.status == 400, d)
+r, d = P("/api/targets/2000/modlink/settings", {"base_port": 70000})
+check("настройки: порт вне 1–65534 — 400", r.status == 400, d)
+r, d = G("/api/targets/host/modlink")
+check("старый modlink-linux на хосте виден панели (unit legacy)", d["data"]["status"]["data"]["unit"] == "legacy", d)
+r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
+check("при старом modlink-linux «Применить» — понятный отказ", not d["ok"] and "migrate" in d["error"], d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"]})
+check("перенос с --force без подтверждения — 403", r.status == 403, d)
+r, d = P("/api/run", {"target": "host", "part": "modlink", "args": ["migrate", "--force", "--stop-panel"], "confirm": "host"})
+check("перенос из modlink-linux с подтверждением", d["ok"] and not fake_api.HML["legacy"], d)
 r, d = P("/api/targets/host/modlink/save", {"set": [{"id": 1, "fields": {"protect": False}}]})
 check("modlink на хосте: снять защиту и применить", d["ok"] and d["data"]["applied"]
       and fake_api.HML["modlink"][0]["protect"] is False, d)

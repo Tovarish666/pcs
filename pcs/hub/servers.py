@@ -375,15 +375,32 @@ def update_host():
     shutil.rmtree(dest + ".prev", ignore_errors=True)
     os.rename(dest, dest + ".prev")
     os.rename(dest + ".new", dest)
+    ui.ok("PCS на хосте: %s → %s (прежний — в %s.prev)" % (VERSION, ver, dest))
+    # шаги после обновления — от НОВОГО кода: прежняя версия не знает, что нужно новой
+    # (так PCS без modlink на хосте однажды обновился в PCS с ним, а modlink не поставил)
+    if subprocess.run([os.path.join(dest, "bin", "pcs"), "host-setup"]).returncode != 0:
+        ui.warn("шаги после обновления прошли не все — см. выше; повторить: pcs host-setup")
+    return ver
+
+
+def host_setup(dest=None):
+    """Хост после установки или обновления кода: команды в /usr/local/bin, hivelink, modlink,
+    перезапуск панели (если включена). Повторный вызов безопасен. → {"done": [...], "failed": [...]}."""
+    dest = dest or remote.ROOT
     for c in HOST_BIN:
         link("/usr/local/bin/" + c, os.path.join(dest, "bin", c))
-    ui.ok("PCS на хосте: %s → %s (прежний — в %s.prev)" % (VERSION, ver, dest))
-    for part, args in (("hivelink", ["install"]), ("modlink", ["setup"])):
-        r = subprocess.run([os.path.join(dest, "bin", part)] + args, capture_output=True, text=True)
-        if r.returncode != 0:
-            ui.warn("%s %s на хосте: %s" % (part, args[0], ((r.stderr or r.stdout).strip().splitlines() or ["?"])[-1].lstrip(" ✗")))
+    ui.ok("команды: %s" % ", ".join(HOST_BIN))
+    done, failed = [], []
+    for part, args, what in (("hivelink", ["install"], "hivelink — драйвер настоящих модемов"),
+                             ("modlink", ["setup"], "modlink — прокси из интерфейсов хоста")):
+        ui.hdr(what)
+        if subprocess.run([os.path.join(dest, "bin", part)] + args).returncode == 0:
+            done.append(part)
+        else:
+            failed.append(part)
+            ui.warn("%s %s на хосте не прошёл — см. выше; повторить: %s %s" % (part, args[0], part, args[0]))
     sh("systemctl", "try-restart", "pcs-web.service", check=False)
-    return ver
+    return {"done": done, "failed": failed}
 
 
 def link(path, target):
