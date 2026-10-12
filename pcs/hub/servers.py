@@ -501,14 +501,27 @@ def source():
     return os.environ.get("PCS_REPO", src["PCS_REPO"]), os.environ.get("PCS_BRANCH", src["PCS_BRANCH"])
 
 
+def head_sha(repo, branch):
+    """Последний коммит ветки (API GitHub). Архив по коммиту не устаревает: архив по имени ветки
+    GitHub несколько минут после вливания отдаёт из кэша прежним. Нет ответа — None."""
+    req = urllib.request.Request("https://api.github.com/repos/%s/commits/%s" % (repo, branch),
+                                 headers={"Accept": "application/vnd.github.sha", "User-Agent": "pcs/" + VERSION})
+    try:
+        sha = urllib.request.urlopen(req, timeout=20).read().decode().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return sha if re.fullmatch(r"[0-9a-f]{40}", sha) else None
+
+
 def update_host():
     """Хост — из GitHub (та же ветка, что при установке). → новая версия."""
     dest = remote.ROOT
     if os.path.isdir(os.path.join(dest, ".git")):
         raise Fail("%s — рабочая копия git: обнови её git pull, а не pcs update" % dest)
     repo, branch = source()
-    url = "https://codeload.github.com/%s/tar.gz/refs/heads/%s" % (repo, branch)
-    ui.hdr("PCS на хосте: из %s (%s)" % (repo, branch))
+    sha = head_sha(repo, branch)
+    url = "https://codeload.github.com/%s/tar.gz/%s" % (repo, sha or "refs/heads/" + branch)
+    ui.hdr("PCS на хосте: из %s (%s%s)" % (repo, branch, ", " + sha[:7] if sha else ""))
     d = tempfile.mkdtemp()
     try:
         try:
