@@ -173,6 +173,56 @@ def remove(name):
     return {"name": rec["name"], "revoked": revoked}
 
 
+def ws_open(name, query, timeout=20):
+    """TLS-соединение к /api/v1/ws/term хоста (сверка отпечатка, токен) и рукопожатие WebSocket.
+    → (сокет, байты после заголовков). Дальше кадры идут как есть: хаб только перекладывает."""
+    import base64
+    import secrets
+    rec = load(name)
+    raw = socket.create_connection((rec["host"], rec["port"]), timeout=timeout)
+    try:
+        sock = tls.client_context().wrap_socket(raw, server_hostname=None)
+    except (OSError, ssl.SSLError) as e:
+        raw.close()
+        raise Fail("хост %s: TLS не поднялся (%s)" % (name, e))
+    if tls.fingerprint_der(sock.getpeercert(binary_form=True)) != rec.get("fingerprint"):
+        sock.close()
+        raise Fail("сертификат хоста %s не тот, что при присоединении — это может быть подмена" % name)
+    key = base64.b64encode(secrets.token_bytes(16)).decode()
+    host = "[%s]" % rec["host"] if ":" in rec["host"] else rec["host"]
+    req = ("GET /api/v1/ws/term?%s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer %s\r\n\r\n"
+           % (query, host, rec["port"], key, rec["token"]))
+    sock.sendall(req.encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            sock.close()
+            raise Fail("хост %s закрыл соединение терминала" % name)
+        buf += chunk
+        if len(buf) > 65536:
+            sock.close()
+            raise Fail("хост %s: странный ответ на терминал" % name)
+    head, rest = buf.split(b"\r\n\r\n", 1)
+    status = head.split(b"\r\n", 1)[0].decode("latin-1")
+    if " 101 " not in status + " ":
+        sock.close()
+        raise Fail("хост %s не открыл терминал: %s" % (name, status))
+    sock.settimeout(None)
+    return sock, rest
+
+
+def set_color(name, color):
+    rec = load(name)
+    if color:
+        rec["color"] = color
+    else:
+        rec.pop("color", None)
+    jsave(path(rec["name"]), rec, 0o600)
+    return public(rec)
+
+
 def login_url(name, scheme="http"):
     """Одноразовая ссылка входа в панель хоста (60 с). http — как обычно открывают панель."""
     rec = load(name)

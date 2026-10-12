@@ -35,7 +35,7 @@ def overview(s, timeout=20, wan=False):
     vm = pve.qm_status(s["id"]) if pve.is_pve() else "running"
     d = {"id": s["id"], "name": s.get("name", ""), "ip": s.get("ip", ""), "port": s.get("port") or 22,
          "state": vm if vm in ("stopped", "paused", "absent") else "running", "mode": s.get("mode"),
-         "modems": dict(EMPTY), "mpspace": None, "version": None, "error": None}
+         "modems": dict(EMPTY), "mpspace": None, "version": None, "error": None, "color": s.get("color")}
     if d["state"] != "running":
         return d
     try:
@@ -211,19 +211,21 @@ def create(p, select=True):
     remote.forget(s["ip"])
     store.save(s)
     ui.ok("адрес %s" % s["ip"])
-    remote.wait(s, 900)
+    remote.wait_stable(s, 900)
     ui.step("жду cloud-init (apt upgrade идёт на ВМ, это несколько минут)")
-    remote.ssh(s, "cloud-init status --wait >/dev/null 2>&1; test -f /var/lib/pcs-cloud-init-done", timeout=3600)
+    wait_cloud_init(s, p["bridge"], limit=3600)
     ui.ok("cloud-init отработал за %d с" % (time.time() - t0))
     # usb: модули USB-гаджета приходят с новым ядром — без перезагрузки их нет
-    need = remote.ssh(s, "test -f /var/run/reboot-required && echo reboot" + (
-        "; modinfo libcomposite >/dev/null 2>&1 || echo reboot" if p["mode"] == "usb" else ""), check=False).stdout
+    need = remote.retry(s, lambda: remote.ssh(s, "test -f /var/run/reboot-required && echo reboot" + (
+        "; modinfo libcomposite >/dev/null 2>&1 || echo reboot" if p["mode"] == "usb" else ""), check=False).stdout,
+        "нужна ли перезагрузка")
     if "reboot" in need:
         ui.step("перезагрузка на новое ядро")
         boot = remote.boot_id(s)
         remote.ssh(s, "systemd-run --on-active=2 --collect systemctl reboot", check=False)
         remote.wait_reboot(s, boot)
-        ui.ok("ядро %s" % remote.ssh(s, "uname -r").stdout.strip())
+        remote.wait_stable(s, 600, "SSH после перезагрузки")
+        ui.ok("ядро %s" % remote.retry(s, lambda: remote.ssh(s, "uname -r").stdout.strip(), "версия ядра"))
     if select:
         store.set_active(vmid)
     setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
@@ -233,6 +235,35 @@ def create(p, select=True):
     print_info(s, show_password=not p["password"] and ui.interactive())
     return {"id": vmid, "name": name, "ip": s["ip"], "mode": p["mode"],
             "password": password if not p["password"] else None}
+
+
+def wait_cloud_init(s, bridge="vmbr0", limit=3600):
+    """cloud-init на новой ВМ — короткими опросами, а не одним долгим SSH: он перенастраивает
+    сеть, соединение рвётся (и адрес по DHCP может смениться — тогда перечитать его)."""
+    t0, fails = time.time(), 0
+    while time.time() - t0 < limit:
+        try:
+            out = remote.call(s, "test -f /var/lib/pcs-cloud-init-done && echo PCS-DONE; cloud-init status 2>/dev/null | head -1",
+                              timeout=30).stdout
+            fails = 0
+            if "PCS-DONE" in out:
+                return
+            if "status: error" in out or "status: disabled" in out:
+                raise Fail("cloud-init на ВМ %s закончился с ошибкой (%s) — см. qm terminal %s, /var/log/cloud-init-output.log"
+                           % (s["id"], out.strip().splitlines()[-1], s["id"]))
+        except Fail as e:
+            if "нет SSH" not in str(e):
+                raise
+            fails += 1
+            if fails % 4 == 0:              # долго нет SSH — не сменился ли адрес (DHCP после сетевой настройки)
+                ip = pve.vm_ip(s["id"], bridge)
+                if ip and ip != s["ip"]:
+                    ui.step("адрес ВМ сменился: %s → %s" % (s["ip"], ip))
+                    s["ip"] = ip
+                    remote.forget(ip)
+                    store.save(s)
+        time.sleep(15)
+    raise Fail("cloud-init на ВМ %s не закончился за %d мин (qm terminal %s)" % (s["id"], limit // 60, s["id"]))
 
 
 def setup(s, mode=None, sheet="", fresh=False):
@@ -283,7 +314,88 @@ def setup(s, mode=None, sheet="", fresh=False):
 
 
 # ── взять существующую ВМ ──────────────────────────────────────────────────
-def adopt(sid, ip="", password=""):
+# ── управление ВМ: питание, цвет, убрать из PCS, ВМ не под PCS ──────────────
+COLORS = ("red", "orange", "yellow", "green", "cyan", "blue", "violet")
+COLOR_RU = {"red": "красный", "orange": "оранжевый", "yellow": "жёлтый", "green": "зелёный",
+            "cyan": "голубой", "blue": "синий", "violet": "фиолетовый"}
+POWER = {"start": ("start",), "shutdown": ("shutdown", "--timeout", "120"), "reboot": ("reboot", "--timeout", "120"),
+         "stop": ("stop",)}
+POWER_RU = {"start": "включена", "shutdown": "выключена (штатно)", "reboot": "перезагружена", "stop": "остановлена (жёстко)"}
+
+
+def norm_color(color):
+    c = str(color or "").strip().lower()
+    if not c or c in ("none", "нет", "-"):
+        return ""
+    by_ru = {v: k for k, v in COLOR_RU.items()}
+    c = by_ru.get(c, c)
+    if c not in COLORS:
+        raise Fail("цвет — один из: %s (или пусто — по номеру)" % ", ".join("%s/%s" % (k, COLOR_RU[k]) for k in COLORS))
+    return c
+
+
+def power(sid, action):
+    """Питание ВМ через Proxmox: start, shutdown (штатно, до 2 мин), reboot, stop (жёстко)."""
+    pve.need_pve()
+    if action not in POWER:
+        raise Fail("действие — %s" % ", ".join(POWER))
+    s = store.load(sid)
+    st = pve.qm_status(s["id"])
+    if st == "absent":
+        raise Fail("ВМ %s нет в Proxmox — убрать из PCS: pcs server forget %s" % (s["id"], s["id"]))
+    if action == "start" and st == "running":
+        return {"id": s["id"], "action": action, "state": st, "note": "уже работает"}
+    if action in ("shutdown", "reboot", "stop") and st == "stopped":
+        return {"id": s["id"], "action": action, "state": st, "note": "уже выключена"}
+    r = sh("qm", *(POWER[action] + (str(s["id"]),)), check=False, timeout=200)
+    if r.returncode != 0:
+        raise Fail("qm %s %s: %s" % (action, s["id"], (r.stderr or r.stdout).strip()[-300:] or "код %d" % r.returncode))
+    remote.drop_masters()                # старые SSH-каналы к ней больше не годятся
+    st = pve.qm_status(s["id"])
+    for _ in range(10):                  # reboot/start: Proxmox отвечает, пока ВМ ещё поднимается
+        if action not in ("start", "reboot") or st == "running":
+            break
+        time.sleep(1)
+        st = pve.qm_status(s["id"])
+    ui.ok("ВМ %s %s (сейчас: %s)" % (s["id"], POWER_RU[action], st))
+    return {"id": s["id"], "action": action, "state": st}
+
+
+def forget(sid):
+    """Убрать сервер из PCS: ВМ, её диски и модемы не трогаются — PCS просто перестаёт ею управлять."""
+    s = store.load(sid)
+    store.drop(s["id"])
+    if s.get("key") and os.path.exists(s["key"]):
+        for f in (s["key"], s["key"] + ".pub"):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+    if s.get("ip"):
+        remote.forget(s["ip"])
+    ui.ok("ВМ %s (%s) убрана из PCS; сама ВМ не тронута" % (s["id"], s.get("name") or ""))
+    return {"id": s["id"], "forgotten": True}
+
+
+def set_color(sid, color):
+    s = store.load(sid)
+    s["color"] = norm_color(color)
+    if not s["color"]:
+        s.pop("color")
+    store.save(s)
+    return {"id": s["id"], "color": s.get("color")}
+
+
+def other_vms():
+    """ВМ этого Proxmox, которых нет в PCS: их можно добавить (pcs server adopt)."""
+    if not pve.is_pve():
+        return []
+    known = {str(s["id"]) for s in store.all_servers()}
+    return [{"id": int(i), "name": n, "state": st} for i, (n, st) in sorted(pve.qm_list().items(), key=lambda x: int(x[0]))
+            if i not in known]
+
+
+def adopt(sid, ip="", password="", select=True):
     pve.need_pve()
     pub = remote.ensure_key()
     sid = store.norm_id(sid)
@@ -324,8 +436,9 @@ def adopt(sid, ip="", password=""):
         ui.ok("ключ хаба положен на ВМ")
     store.save(s)
     setup(s)
-    store.set_active(sid)
-    ui.ok("сервер %s (%s) под управлением PCS и выбран" % (sid, ip))
+    if select:
+        store.set_active(sid)
+    ui.ok("сервер %s (%s) под управлением PCS%s" % (sid, ip, " и выбран" if select else ""))
     return {"id": int(sid), "ip": ip}
 
 
@@ -503,18 +616,18 @@ def mpspace_install(s, auth="", proxy="", no_reboot=False):
         raise Fail("установка mobileproxy.space завершилась с кодом %s (лог на сервере: /var/log/pcs/mpspace.log)" % rc)
     if not no_reboot:
         ui.step("сервер перезагружается")
-        remote.wait(s, 900, "SSH после перезагрузки")
+        remote.wait_stable(s, 900, "SSH после перезагрузки")
         time.sleep(10)
     try:
-        d = remote.node(s, "dns-fix", timeout=300)
+        d = remote.retry(s, lambda: remote.node(s, "dns-fix", timeout=300), "DNS-фикс")
         ui.ok("DNS после mp.space: %s" % " ".join(d.get("dns") or []))
     except Fail as e:
         ui.warn(str(e))
-    if remote.ssh(s, "test -e /usr/local/bin/proxyveth", check=False).returncode == 0:
+    if remote.retry(s, lambda: remote.ssh(s, "test -e /usr/local/bin/proxyveth", check=False), "proxyveth").returncode == 0:
         ui.step("proxyveth setup: сторона сервера теперь у mp.space")
         if remote.stream(s, "proxyveth setup") != 0:
             ui.warn("proxyveth setup после mp.space с ошибками — см. выше")
-    chk = remote.node(s, "mpspace", "check", timeout=60)
+    chk = remote.retry(s, lambda: remote.node(s, "mpspace", "check", timeout=60), "проверка mp.space")
     for u, st in (chk.get("units") or {}).items():
         (ui.ok if st == "active" else ui.warn)("служба %s: %s" % (u, st))
     if not chk.get("auth"):

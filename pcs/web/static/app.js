@@ -59,10 +59,10 @@
   // Долгое панель запускает заданием хаба: ждём его здесь. Обрыв связи — не беда: задание
   // идёт на хосте, а мы спрашиваем снова, пока не узнаем итог.
   let ACT_RES = null;
-  async function waitJob(jid) {
+  async function waitJob(jid, base) {
     const res = ACT_RES;
     for (let miss = 0; ;) {
-      const r = await GET("/api/jobs/" + encodeURIComponent(jid));
+      const r = await GET((base || "/api") + "/jobs/" + encodeURIComponent(jid));
       if (!r.ok) {
         if (r.net && ++miss < 200) {
           if (res) setRes(res, "run", "связь прервалась — задание идёт на хосте, жду…");
@@ -83,19 +83,20 @@
   }
   const GET = (p) => api("GET", p);
   const POST = (p, b) => api("POST", p, b);
-  const run = async (target, part, args, extra) => {
-    const r = await POST("/api/run", Object.assign({target: String(target), part, args}, extra || {}));
-    if (r && r.ok && r.data && r.data.job != null && Object.keys(r.data).length === 1) return waitJob(r.data.job);
+  const runAt = async (base, target, part, args, extra) => {
+    const r = await POST(base + "/run", Object.assign({target: String(target), part, args}, extra || {}));
+    if (r && r.ok && r.data && r.data.job != null && Object.keys(r.data).length === 1) return waitJob(r.data.job, base);
     return r;
   };
+  const run = (target, part, args, extra) => runAt("/api", target, part, args, extra);
 
   // ── формат ────────────────────────────────────────────────────────────────
   const MODE = {usb: "USB", gw: "шлюз"};
   const modeShort = (m) => MODE[m] || m || "—";
   const modeLong = (m) => m === "usb" ? "proxyveth USB" : m === "gw" ? "proxyveth шлюз" : "proxyveth: режим не задан";
   const VM_STATE = {running: "работает", stopped: "остановлена", unreachable: "нет связи", creating: "создаётся",
-    error: "ошибка", paused: "на паузе"};
-  const BAD_VM = ["stopped", "unreachable", "error", "down", "broken", "offline", "failed"];
+    error: "ошибка", paused: "на паузе", absent: "нет в Proxmox — убрать из PCS", offline: "нет SSH", old: "старый код — обновить"};
+  const BAD_VM = ["stopped", "unreachable", "error", "down", "broken", "offline", "failed", "absent"];
   const ROW_STATE = {ok: ["ok", "работает"], warn: ["warn", "апстрим"], broken: ["bad", "сломан"],
     absent: ["", "нет"], disabled: ["", "выключен"], rebooting: ["info", "перезагрузка"]};
 
@@ -132,6 +133,25 @@
   // Цвет ВМ — по месту в списке хоста: соседние ВМ всегда заметно разного цвета, красного нет
   // (красный — это «сломано»). Новые ВМ обычно с большим номером — цвета старых не меняются.
   const PALETTE = [210, 145, 275, 30, 185, 320, 95, 245, 55, 165];
+  // 7 цветов на выбор (сервер и присоединённый хост): красный … фиолетовый
+  const COLORS = [["red", "красный", 0], ["orange", "оранжевый", 28], ["yellow", "жёлтый", 50], ["green", "зелёный", 140],
+    ["cyan", "голубой", 188], ["blue", "синий", 218], ["violet", "фиолетовый", 272]];
+  function hueOf(e, X) {
+    const c = e && COLORS.find((x) => x[0] === e.color);
+    if (c) return c[2];
+    const ids = ((((X ? X.ov() : S.ov) || {}).servers) || []).map((s) => Number(s.id)).sort((a, b) => a - b);
+    const i = ids.indexOf(Number(e && e.id));
+    return PALETTE[(i >= 0 ? i : Number(e && e.id) || 0) % PALETTE.length];
+  }
+  function colorPick(cur, onPick) {
+    const box = el("span", {class: "colors"});
+    const draw = (c) => box.replaceChildren(...COLORS.map(([k, name, h]) => el("button", {type: "button", class: "sw" + (c === k ? " on" : ""),
+      title: name, style: "--h:" + h, onclick: () => onPick(k).then((ok) => { if (ok) draw(k); })})),
+      el("button", {type: "button", class: "sw none" + (!c ? " on" : ""), title: "по номеру (без своего цвета)", text: "×",
+        onclick: () => onPick("").then((ok) => { if (ok) draw(""); })}));
+    draw(cur || "");
+    return box;
+  }
   function hue(id) {
     const ids = ((S.ov && S.ov.servers) || []).map((s) => Number(s.id)).sort((a, b) => a - b);
     const i = ids.indexOf(Number(id));
@@ -206,6 +226,33 @@
     return {id: "host", name: h.name, ip: h.ip, mode: h.mode, modems: h.modems, mpspace: h.mpspace, state: "running", host: h};
   }
   const tname = (id) => String(id) === "host" ? "хост" : "ВМ " + id;
+
+  // Хост — свой (API /api) или присоединённый (/api/nodes/<имя> → его /api/v1): страницы одни и те же,
+  // так система выглядит единой. Ссылки присоединённого — #/n/<имя>/…, терминал — через хаб.
+  function nodeOv(name) {
+    const n = (S.nodes || []).find((x) => x.name === name);
+    return n ? {host: n.host_info || {}, servers: n.servers || [], host_error: n.ok ? null : n.error, node: n} : {};
+  }
+  function mkCtx(node) {
+    const base = node ? "/api/nodes/" + encodeURIComponent(node) : "/api";
+    const X = {node, base,
+      ov: () => node ? nodeOv(node) : (S.ov || {}),
+      href: (p) => (node ? "#/n/" + encodeURIComponent(node) : "#") + (p || "/"),
+      wsPath: node ? "/ws/node/" + encodeURIComponent(node) + "/term" : "/ws/term",
+      GET: (p) => GET(base + p), POST: (p, b) => POST(base + p, b),
+      run: (t, part, args, extra) => runAt(base, t, part, args, extra)};
+    X.srv = (id) => ((X.ov().servers) || []).find((s) => String(s.id) === String(id)) || null;
+    X.ent = (id) => {
+      if (String(id) !== "host") return X.srv(id);
+      const h = X.ov().host || {};
+      return {id: "host", name: h.name, ip: h.ip, mode: h.mode, modems: h.modems, mpspace: h.mpspace, state: "running", host: h};
+    };
+    X.isPve = () => ((X.ov().host || {}).kind || "proxmox") === "proxmox";
+    X.title = () => (X.ov().host || {}).name || node || "хост";
+    return X;
+  }
+  const CTX = {};
+  const ctx = (node) => node ? (CTX[node] || (CTX[node] = mkCtx(node))) : (CTX[""] || (CTX[""] = mkCtx(null)));
 
   // ── окна ──────────────────────────────────────────────────────────────────
   function modal(title, body, buttons) {
@@ -315,7 +362,7 @@
   }
 
   // ── действие с результатом строкой рядом ──────────────────────────────────
-  function setRes(res, cls, text) { res.className = "res " + cls; res.textContent = text; res.title = text; }
+  function setRes(res, cls, text) { if (!res) return; res.className = "res " + cls; res.textContent = text; res.title = text; }
   async function act(button, res, fn, okText, jobBox) {
     if (button) button.disabled = true;
     setRes(res, "run", "выполняется…");
@@ -327,7 +374,7 @@
     const d = r.data;
     if (d && typeof d === "object" && d.job != null && jobBox) {
       setRes(res, "ok", "Запущено");
-      jobBox.replaceChildren(jobView(d.job, {}));
+      jobBox.replaceChildren(jobView(d.job, jobBox.dataset.base ? {base: jobBox.dataset.base} : {}));
       return r;
     }
     setRes(res, "ok", typeof okText === "function" ? okText(d) : (okText || "Применено"));
@@ -358,7 +405,8 @@
       if (j.state === "running" || j.state === "queued") { setTimeout(tick, 1500); return; }
       if (j.state === "done") {
         setRes(st, "ok", "готово");
-        if (j.result && j.result.id != null) tail.replaceChildren(el("p", {}, link("Открыть ВМ " + j.result.id, "#/vm/" + j.result.id, "btn primary")));
+        const home = opts.base && opts.base.indexOf("/api/nodes/") === 0 ? "#/n/" + opts.base.slice(11) : "#";
+        if (j.result && j.result.id != null) tail.replaceChildren(el("p", {}, link("Открыть ВМ " + j.result.id, home + "/vm/" + j.result.id, "btn primary")));
         refresh();
         if (opts.onDone) opts.onDone(j);
       } else {
@@ -388,69 +436,69 @@
     $("#h-user").textContent = S.session ? S.session.user : "";
     $("#h-fake").hidden = !(S.session && S.session.fake);
   }
-  function hostLevel() {
-    const list = (S.ov && S.ov.servers) || [];
-    if (S.ovErr || (S.ov && (S.ov.host_error || S.ov.servers_error))) return "bad";
+  function hostLevel(X) {
+    X = X || ctx(null);
+    const list = (X.ov() && X.ov().servers) || [];
+    if ((!X.node && S.ovErr) || (X.ov() && (X.ov().host_error || X.ov().servers_error))) return "bad";
     const lv = list.map(level);
-    const h = (S.ov && S.ov.host) || {};
+    const h = (X.ov() && X.ov().host) || {};
     if (h.modems && counts(h).total) lv.push(level({state: "running", modems: h.modems}));
     return lv.includes("bad") ? "bad" : lv.includes("warn") ? "warn" : "ok";
   }
   function renderTree() {
     const nav = $("#tree");
-    const host = (S.ov && S.ov.host) || {};
     const cur = S.page || {};
-    const kids = [el("a", {class: "tree-host" + (cur.kind === "host" ? " active" : ""), href: "#/"},
-      el("span", {class: "dot " + hostLevel()}), host.name || "хост",
-      el("span", {class: "muted", text: (host.kind || "proxmox") === "proxmox" ? "Proxmox" : "VPS"}))];
-    for (const s of (S.ov && S.ov.servers) || []) {
-      const c = counts(s);
-      kids.push(el("a", {class: "tree-vm" + (cur.kind === "vm" && String(cur.id) === String(s.id) ? " active" : ""),
-        href: "#/vm/" + s.id, title: levelText(s), style: "--h:" + hue(s.id)},
-        el("span", {class: "dot " + level(s)}), el("span", {}, el("b", {text: String(s.id)}), " ", s.name || ""),
-        el("span", {class: "sub", text: modeShort(s.mode) + " · " + c.ok + "/" + c.total})));
+    const kids = [];
+    function hostBlock(X) {
+      const h = X.ov().host || {}, n = X.node ? (X.ov().node || {}) : null;
+      const here = (cur.node || null) === X.node;
+      const off = X.node && n && !n.ok;
+      kids.push(el("a", {class: "tree-host" + (here && cur.kind === "host" ? " active" : "") + (X.node ? " joined" : ""), href: X.href("/"),
+        title: off ? (n.error || "нет связи") : "", style: X.node ? "--h:" + hueOf({id: 0, color: n && n.color}) : null},
+        el("span", {class: "dot " + (off ? "bad" : hostLevel(X))}), X.node ? X.node : (h.name || "хост"),
+        el("span", {class: "muted", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"})));
+      for (const sv of X.ov().servers || []) {
+        const c = counts(sv);
+        kids.push(el("a", {class: "tree-vm" + (here && cur.kind === "vm" && String(cur.id) === String(sv.id) ? " active" : ""),
+          href: X.href("/vm/" + sv.id), title: levelText(sv), style: "--h:" + hueOf(sv, X)},
+          el("span", {class: "dot " + level(sv)}), el("span", {}, el("b", {text: String(sv.id)}), " ", sv.name || ""),
+          el("span", {class: "sub", text: sv.state === "absent" ? "нет в Proxmox" : modeShort(sv.mode) + " · " + c.ok + "/" + c.total})));
+      }
+      if (X.isPve() && !off) kids.push(el("a", {class: "tree-add", href: X.href("/create"), text: "+ Создать ВМ" + (X.node ? " на " + X.node : "")}));
     }
-    if (isPve()) kids.push(el("a", {class: "tree-add", href: "#/create", text: "+ Создать ВМ"}));
+    hostBlock(ctx(null));
     const nodes = S.nodes || [];
     if (nodes.length) kids.push(el("div", {class: "tree-sec", text: "Присоединённые хосты"}));
-    for (const n of nodes) {
-      const h = n.host_info || {}, c = counts(h);
-      const lv = !n.ok ? "bad" : level({state: "running", modems: h.modems});
-      kids.push(el("a", {class: "tree-vm node" + (cur.kind === "node" && cur.id === n.name ? " active" : ""), href: "#/node/" + n.name,
-        title: n.ok ? "" : n.error || "нет связи", style: "--h:" + hue(n.name.length * 37)},
-        el("span", {class: "dot " + lv}), el("span", {}, el("b", {text: n.name})),
-        el("span", {class: "sub", text: !n.ok ? "нет связи" : (h.kind === "proxmox" ? "Proxmox · ВМ " + (n.servers || []).length
-          : "VPS") + (c.total ? " · " + c.ok + "/" + c.total : "")})));
-    }
+    for (const n of nodes) hostBlock(ctx(n.name));
     kids.push(el("a", {class: "tree-add", href: "#/join", text: "+ Присоединить хост"}));
     nav.replaceChildren(...kids);
   }
 
   // ── страница хоста: вкладки, как у ВМ (сам хост — тоже узел: proxyveth, modlink, mp.space) ──
   const HTABS = [["", "обзор"], ["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
-  const isPve = () => (((S.ov && S.ov.host) || {}).kind || "proxmox") === "proxmox";
+  const isPve = () => ctx(null).isPve();
 
-  function plaqueHost() {
+  function plaqueHost(X) {
     const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
     const box = el("div", {class: "plaque host"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
     function update() {
-      const h = (S.ov && S.ov.host) || {}, c = counts(h);
+      const h = (X.ov() && X.ov().host) || {}, c = counts(h);
       big.textContent = "Хост " + (h.name || "");
-      line.textContent = [h.ip, h.os || (isPve() ? "Proxmox" : ""), isPve() ? "ВМ: " + ((S.ov && S.ov.servers) || []).length : "VPS — модемы на нём",
+      line.textContent = [h.ip, h.os || (X.isPve() ? "Proxmox" : ""), X.isPve() ? "ВМ: " + ((X.ov() && X.ov().servers) || []).length : "VPS — модемы на нём",
         h.mode ? "proxyveth " + modeShort(h.mode) + " · модемы " + c.ok + "/" + c.total : null,
         h.mpspace_ok ? mpText(h.mpspace) : null].filter(Boolean).join(" · ");
-      stDot.className = "dot " + hostLevel();
-      stText.textContent = hostLevel() === "ok" ? "в порядке" : hostLevel() === "warn" ? "есть замечания" : "есть проблемы";
+      stDot.className = "dot " + hostLevel(X);
+      stText.textContent = hostLevel(X) === "ok" ? "в порядке" : hostLevel(X) === "warn" ? "есть замечания" : "есть проблемы";
     }
     return {el: box, update};
   }
 
-  function pageHost() {
-    const pl = plaqueHost();
+  function pageHost(X) {
+    const pl = plaqueHost(X);
     const tabsEl = el("div", {class: "tabs"}), body = el("div"), panes = {};
     let cur = null;
-    const make = {"": () => hostOverview(), proxyveth: () => pvTab("host"), modlink: () => mlTab("host"),
-      term: () => termTab("host", true), settings: () => setTab("host")};
+    const make = {"": () => hostOverview(X), proxyveth: () => pvTab(X, "host"), modlink: () => mlTab(X, "host"),
+      term: () => termTab(X, "host", true), settings: () => setTab(X, "host")};
     function show(tab) {
       if (!make[tab]) tab = "";
       if (cur === tab) return;
@@ -459,28 +507,31 @@
       if (!panes[tab]) { panes[tab] = make[tab](); body.append(panes[tab].el); }
       panes[tab].el.hidden = false;
       cur = tab;
-      tabsEl.replaceChildren(...HTABS.map(([k, t]) => el("a", {href: k ? "#/host/" + k : "#/", class: k === tab ? "active" : "", text: t})));
+      tabsEl.replaceChildren(...HTABS.map(([k, t]) => el("a", {href: k ? X.href("/host/" + k) : X.href("/"), class: k === tab ? "active" : "", text: t})));
       if (panes[tab].show) panes[tab].show();
       if (panes[tab].update) panes[tab].update();
     }
     function update() {
       pl.update();
-      document.title = (((S.ov && S.ov.host) || {}).name || "хост") + " — PCS";
+      document.title = X.title() + " — PCS";
       for (const x of Object.values(panes)) if (x.update) x.update();
     }
     function dispose() { for (const x of Object.values(panes)) if (x.dispose) x.dispose(); }
-    return {kind: "host", el: el("div", {}, pl.el, tabsEl, body), show, update, dispose};
+    return {kind: "host", node: X.node, el: el("div", {}, pl.el, tabsEl, body), show, update, dispose};
   }
 
   // вкладка «обзор» хоста: карточки, ВМ (на Proxmox), фоновые задания
-  function hostOverview() {
+  function hostOverview(X) {
     const banner = el("div"), cards = el("div", {class: "cards"}), list = el("div", {class: "list"});
     const vmHead = el("h2", {text: "Виртуальные машины"});
     const jobsBox = el("div", {class: "list"});
-    const root = el("div", {}, banner, cards, vmHead, list, el("h2", {text: "Фоновые задания"}), jobsBox);
+    const others = otherVms(X);
+    const nodeBar = X.node ? nodeTools(X) : null;
+    const root = el("div", {}, nodeBar ? nodeBar.el : null, banner, cards, vmHead, list, others.el, el("h2", {text: "Фоновые задания"}), jobsBox);
+    let othersLoaded = 0;
     const JOB_ST = {running: ["info", "идёт"], done: ["ok", "готово"], failed: ["bad", "ошибка"]};
     async function loadJobs() {
-      const r = await GET("/api/jobs");
+      const r = await X.GET("/jobs");
       if (!r.ok) return;
       const lst = r.data || [];
       jobsBox.replaceChildren(...(lst.length ? lst.map((j) => {
@@ -488,17 +539,20 @@
         return el("div", {class: "item"}, el("span", {class: "dot " + cls, title: txt}),
           el("div", {class: "grow"}, el("div", {class: "title", text: j.title || j.id}),
             el("div", {class: "sub", text: [txt, j.started ? new Date(j.started * 1000).toLocaleString() : "", j.error || ""].filter(Boolean).join(" · ")})),
-          el("div", {class: "btns"}, link("Журнал", "#/job/" + encodeURIComponent(j.id))));
+          el("div", {class: "btns"}, link("Журнал", X.href("/job/" + encodeURIComponent(j.id)))));
       }) : [el("div", {class: "item muted", text: "заданий пока нет: долгое (обновление, установка, перенос) идёт здесь в фоне и не боится обрыва связи"})]));
     }
     function update() {
-      const ov = S.ov || {}, host = ov.host || {}, list_ = ov.servers || [];
-      const errs = [S.ovErr, ov.host_error && "хост: " + ov.host_error, ov.servers_error && "серверы: " + ov.servers_error].filter(Boolean);
+      const ov = X.ov() || {}, host = ov.host || {}, list_ = ov.servers || [];
+      const errs = [!X.node && S.ovErr, ov.host_error && (X.node ? "нет связи: " : "хост: ") + ov.host_error,
+        ov.servers_error && "серверы: " + ov.servers_error].filter(Boolean);
       banner.replaceChildren(...errs.map((t) => el("div", {class: "banner", text: t})));
+      if (nodeBar) nodeBar.update();
       loadJobs();
+      if (Date.now() - othersLoaded > 30000) { othersLoaded = Date.now(); others.load(); }
       const card = (k, v, cls) => el("div", {class: "card"}, el("div", {class: "k", text: k}), el("div", {class: "v " + (cls || ""), text: v}));
       const hc = counts(host);
-      if (!isPve()) {                      // VPS: модемы и софт прямо здесь, ВМ нет
+      if (!X.isPve()) {                      // VPS: модемы и софт прямо здесь, ВМ нет
         vmHead.hidden = true; list.hidden = true;
         cards.replaceChildren(
           card("Модемы", hc.ok + " / " + hc.total, hc.ok < hc.total ? "warn" : ""),
@@ -523,7 +577,7 @@
         card("Настоящие модемы (hivelink)", h.installed === false ? "не установлен" : String(real)),
         card("ОЗУ хоста", gb(host.ram)));
       if (!list_.length) {
-        list.replaceChildren(el("div", {class: "item"}, el("span", {class: "muted", text: "ВМ пока нет — "}), link("+ Создать ВМ", "#/create", "")));
+        list.replaceChildren(el("div", {class: "item"}, el("span", {class: "muted", text: "ВМ пока нет — "}), link("+ Создать ВМ", X.href("/create"), "")));
         return;
       }
       list.replaceChildren(...list_.map((s) => {
@@ -531,37 +585,106 @@
         return el("div", {class: "item"}, el("span", {class: "dot " + level(s), title: levelText(s)}),
           el("div", {class: "grow"}, el("div", {class: "title", text: s.id + " " + (s.name || "")}),
             el("div", {class: "sub", text: [s.ip || "—", modeShort(s.mode), "модемы " + c.ok + "/" + c.total, mpText(s.mpspace)].join(" · ")})),
-          el("div", {class: "btns"}, link("Открыть", "#/vm/" + s.id), link("Терминал", "#/vm/" + s.id + "/term"),
-            btn("Удалить", () => deleteVm(s), "danger")));
+          vmButtons(X, s));
       }));
     }
     return {el: root, update};
   }
 
-  async function deleteVm(s) {
+  // Кнопки ВМ в списке хоста: открыть, терминал, питание, убрать из PCS, удалить
+  function vmButtons(X, s) {
+    const st = String(s.state || "").toLowerCase();
+    const b = [];
+    const pw = (action, text, title, ask, cls) => btn(text, async (e) => {
+      if (ask && !window.confirm(ask)) return;
+      const r = await act(e.target, null, () => X.POST("/servers/" + s.id + "/power", {action}), "Готово");
+      if (r && !r.ok) showText("ВМ " + s.id + ": не вышло", "Ошибка: " + r.error);
+      X.node ? refreshNodes() : refresh();
+    }, "icon" + (cls ? " " + cls : ""), title);
+    if (st !== "absent") {
+      b.push(link("Открыть", X.href("/vm/" + s.id)), link("Терминал", X.href("/vm/" + s.id + "/term")));
+      if (st === "stopped") b.push(pw("start", "▶", "включить"));
+      else {
+        b.push(pw("shutdown", "⏻", "выключить штатно (до 2 мин)", "Выключить ВМ " + s.id + " (" + (s.name || "") + ")? Модемы на ней пропадут."));
+        b.push(pw("reboot", "↻", "перезагрузить", "Перезагрузить ВМ " + s.id + " (" + (s.name || "") + ")?"));
+        b.push(pw("stop", "■", "остановить жёстко (как выдернуть питание)", "Жёстко остановить ВМ " + s.id + "? Как выдернуть питание.", "danger"));
+      }
+    }
+    b.push(btn("Убрать из PCS", () => forgetVm(X, s), st === "absent" ? "danger" : "", "PCS перестанет управлять ВМ; сама ВМ, диски и модемы не трогаются"));
+    if (st !== "absent") b.push(btn("Удалить", () => deleteVm(X, s), "danger", "удалить ВМ вместе с дисками"));
+    return el("div", {class: "btns"}, b);
+  }
+
+  async function forgetVm(X, s) {
+    const v = await confirmNumber("Убрать ВМ " + s.id + " из PCS", (s.state === "absent" ? "ВМ " + s.id + " уже нет в Proxmox — уберём только её запись в PCS."
+      : "PCS перестанет управлять ВМ " + s.id + " (" + (s.name || "") + "). Сама ВМ, её диски и модемы останутся; вернуть — «Добавить в PCS»."),
+      s.id, "Убрать из PCS");
+    if (v == null) return;
+    const r = await X.POST("/servers/" + s.id + "/forget", {confirm: v});
+    if (!r.ok) { showText("ВМ " + s.id + " не убрана", "Ошибка: " + r.error); return; }
+    await (X.node ? refreshNodes() : refresh());
+    if (location.hash.indexOf("/vm/" + s.id) >= 0) location.hash = X.href("/");
+  }
+
+  // ВМ Proxmox, которых нет в PCS: «Добавить в PCS» (ключ хаба по паролю root, код, части — заданием)
+  function otherVms(X) {
+    const box = el("div", {class: "list"}), head = el("h2", {text: "ВМ Proxmox не под PCS"});
+    const jobs = el("div", {class: "joblog-slot"});
+    if (X.node) jobs.dataset.base = X.base;
+    async function load() {
+      if (!X.isPve()) { head.hidden = box.hidden = true; return; }
+      const r = await X.GET("/vms");
+      const lst = r.ok ? r.data || [] : [];
+      head.hidden = box.hidden = !lst.length;
+      box.replaceChildren(...lst.map((v) => el("div", {class: "item"}, el("span", {class: "dot " + (v.state === "running" ? "" : "off")}),
+        el("div", {class: "grow"}, el("div", {class: "title", text: v.id + " " + (v.name || "")}),
+          el("div", {class: "sub", text: v.state === "running" ? "работает · не под PCS" : (v.state || "?") + " · не под PCS"})),
+        el("div", {class: "btns"}, btn("Добавить в PCS", () => adoptVm(X, v, jobs), "", "PCS начнёт управлять этой ВМ: ключ хаба, код, proxyveth и modlink")))));
+    }
+    return {el: el("div", {}, head, box, jobs), load};
+  }
+
+  async function adoptVm(X, v, jobs) {
+    const ip = el("input", {placeholder: "пусто — узнать у гостевого агента"});
+    const pw = el("input", {type: "password", autocomplete: "new-password", placeholder: "нужен, если ключ хаба на ВМ ещё не лежит"});
+    modal("Добавить ВМ " + v.id + " (" + (v.name || "") + ") в PCS", el("div", {class: "form"},
+      el("p", {class: "muted", text: "Хаб зайдёт по паролю root один раз, положит свой ключ, поставит код PCS, proxyveth и modlink. " +
+        "Нужна Ubuntu 22.04/24.04 с SSH. Модемы и софт на ВМ не трогаются."}),
+      el("label", {}, "IP ВМ", ip), el("label", {}, "Пароль root", pw)), [
+      {text: "Отмена"},
+      {text: "Добавить", cls: "primary", onclick: async (close) => {
+        close();
+        const r = await X.POST("/vms/" + v.id + "/adopt", {ip: ip.value.trim(), password: pw.value});
+        if (!r.ok) { showText("ВМ " + v.id + " не добавлена", "Ошибка: " + r.error); return; }
+        jobs.replaceChildren(jobView(r.data.job, {title: "Добавить ВМ " + v.id + " в PCS", base: X.node ? X.base : undefined,
+          onDone: () => (X.node ? refreshNodes() : refresh())}));
+      }}]);
+  }
+
+  async function deleteVm(X, s) {
     const v = await confirmNumber("Удалить ВМ " + s.id + " · " + (s.name || ""),
       "ВМ " + s.id + " (" + (s.name || "") + ", " + (s.ip || "без IP") + ") будет остановлена и удалена вместе с дисками. Это необратимо.",
       s.id, "Удалить");
     if (v == null) return;
-    const r = await POST("/api/servers/" + s.id + "/delete", {confirm: v});
+    const r = await X.POST("/servers/" + s.id + "/delete", {confirm: v});
     if (!r.ok) { showText("ВМ " + s.id + " не удалена", "Ошибка: " + r.error); return; }
-    if (r.data && r.data.job != null) { location.hash = "#/job/" + encodeURIComponent(r.data.job); return; }
+    if (r.data && r.data.job != null) { location.hash = X.href("/job/" + encodeURIComponent(r.data.job)); return; }
     await refresh();
-    if (location.hash !== "#/") location.hash = "#/";
+    location.hash = X.href("/");
   }
 
   // ── страница ВМ ───────────────────────────────────────────────────────────
   const TABS = [["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
 
-  function plaque(id) {
+  function plaque(X, id) {
     const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
     const box = el("div", {class: "plaque"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
     function update() {
-      box.style.setProperty("--h", String(hue(id)));
-      const s = srv(id);
+      box.style.setProperty("--h", String(hueOf(X.srv(id) || {id}, X)));
+      const s = X.srv(id);
       if (!s) {
         big.textContent = "ВМ " + id;
-        line.textContent = S.ov ? "нет в списке PCS — удалена или ещё создаётся" : "загрузка…";
+        line.textContent = X.ov() ? "нет в списке PCS — удалена или ещё создаётся" : "загрузка…";
         stDot.className = "dot"; stText.textContent = "";
         return;
       }
@@ -575,13 +698,13 @@
     return {el: box, update};
   }
 
-  function pageVm(id) {
-    const pl = plaque(id);
+  function pageVm(X, id) {
+    const pl = plaque(X, id);
     const tabsEl = el("div", {class: "tabs"});
     const body = el("div");
     const panes = {};
     let cur = null;
-    const make = {proxyveth: () => pvTab(id), modlink: () => mlTab(id), term: () => termTab(id), settings: () => setTab(id)};
+    const make = {proxyveth: () => pvTab(X, id), modlink: () => mlTab(X, id), term: () => termTab(X, id), settings: () => setTab(X, id)};
     function show(tab) {
       if (!make[tab]) tab = "proxyveth";
       if (cur === tab) return;
@@ -590,7 +713,7 @@
       if (!panes[tab]) { panes[tab] = make[tab](); body.append(panes[tab].el); }
       panes[tab].el.hidden = false;
       cur = tab;
-      tabsEl.replaceChildren(...TABS.map(([k, t]) => el("a", {href: "#/vm/" + id + (k === "proxyveth" ? "" : "/" + k), class: k === tab ? "active" : "", text: t})));
+      tabsEl.replaceChildren(...TABS.map(([k, t]) => el("a", {href: X.href("/vm/" + id + (k === "proxyveth" ? "" : "/" + k)), class: k === tab ? "active" : "", text: t})));
       if (panes[tab].show) panes[tab].show();
     }
     function update() {
@@ -598,7 +721,7 @@
       for (const p of Object.values(panes)) if (p.update) p.update();
     }
     function dispose() { for (const p of Object.values(panes)) if (p.dispose) p.dispose(); }
-    return {kind: "vm", id: String(id), el: el("div", {}, pl.el, tabsEl, body), show, update, dispose};
+    return {kind: "vm", node: X.node, id: String(id), el: el("div", {}, pl.el, tabsEl, body), show, update, dispose};
   }
 
   // опрос, пока вкладка видна
@@ -616,7 +739,7 @@
   }
 
   // ── вкладка proxyveth ─────────────────────────────────────────────────────
-  function pvTab(id) {
+  function pvTab(X, id) {
     const info = el("div", {class: "kv"});
     const res = el("span", {class: "res"});
     const extra = el("div");
@@ -636,7 +759,7 @@
       const url = await askText("Источник таблицы", "Ссылка на Google-таблицу (из адресной строки) или local:",
         source && source.url || "", "https://docs.google.com/spreadsheets/d/…");
       if (!url) return;
-      await act(null, res, () => run(id, "proxyveth", ["source", url]), "Сохранено");
+      await act(null, res, () => X.run(id, "proxyveth", ["source", url]), "Сохранено");
       load(false);
     }, "link");
 
@@ -648,7 +771,7 @@
           "Таблица требует снести больше половины модемов. С --force они будут сняты.", id, "Синхронизировать");
         if (confirm == null) return;
       }
-      const r = await act(bSync, res, () => run(id, "proxyveth", force ? ["sync", "--force"] : ["sync"], force ? {confirm} : null),
+      const r = await act(bSync, res, () => X.run(id, "proxyveth", force ? ["sync", "--force"] : ["sync"], force ? {confirm} : null),
         (d) => "Применено" + (d && typeof d === "object" ? ": " + summary(d) : ""));
       if (r && !r.ok && /--force/.test(r.error || "") && !force)
         extra.replaceChildren(el("p", {}, btn("Синхронизировать с --force…", () => sync(true), "danger")));
@@ -657,7 +780,7 @@
     }
 
     function renderInfo() {
-      const s = ent(id) || {};
+      const s = X.ent(id) || {};
       const kv = [["Режим", s.mode === "usb" ? "USB — модем как USB Huawei E3372h, до 40 на сервер"
         : s.mode === "gw" ? "шлюз — без USB и без такого предела" : modeShort(s.mode)]];
       const d = source && source.ok ? source.data : null;
@@ -704,7 +827,7 @@
     async function diag(n) {
       const body = el("div", {}, el("p", {class: "muted", text: "прокси → логин → модем → SIM → интернет…"}));
       modal("Диагностика модема " + n + " · " + tname(id), body);
-      const r = await run(id, "proxyveth", ["diag", String(n)]);
+      const r = await X.run(id, "proxyveth", ["diag", String(n)]);
       if (!r.ok) { body.replaceChildren(el("p", {class: "res err", text: "Ошибка: " + r.error})); return; }
       const d = r.data || {};
       body.replaceChildren(el("ul", {class: "steps"}, (d.steps || []).map((s) =>
@@ -713,10 +836,10 @@
     }
 
     async function load(wan) {
-      const r = await GET("/api/targets/" + id + "/proxyveth" + (wan ? "?wan=1" : ""));
+      const r = await X.GET("/targets/" + id + "/proxyveth" + (wan ? "?wan=1" : ""));
       apply(r);
     }
-    async function pollStatus() { apply(await GET("/api/targets/" + id + "/proxyveth?only=status")); }
+    async function pollStatus() { apply(await X.GET("/targets/" + id + "/proxyveth?only=status")); }
     function apply(r) {
       if (!r.ok) { statusErr = r.error; renderRows(); return; }
       const st = r.data.status;
@@ -730,7 +853,7 @@
     async function openEditor() {
       bEdit.disabled = true;
       editor.replaceChildren(el("p", {class: "muted", text: "загрузка таблицы…"}));
-      const r = await GET("/api/targets/" + id + "/proxyveth/table");
+      const r = await X.GET("/targets/" + id + "/proxyveth/table");
       if (!r.ok) { editor.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + r.error})); bEdit.disabled = false; return; }
       let grid = csvParse((r.data && r.data.csv) || "n,real,proxy,enabled\n");
       if (!grid.length) grid = [["n", "real", "proxy", "enabled"]];
@@ -761,7 +884,7 @@
       });
       const bSave = btn("Сохранить в локальную копию", async () => {
         if (!textMode) toText();
-        const r2 = await act(bSave, eres, () => POST("/api/targets/" + id + "/proxyveth/table", {csv: ta.value, make_main: mainCb.checked}),
+        const r2 = await act(bSave, eres, () => X.POST("/targets/" + id + "/proxyveth/table", {csv: ta.value, make_main: mainCb.checked}),
           (d) => {
             const sd = d && d.saved && d.saved.data;
             const p = sd && Array.isArray(sd.problems) ? sd.problems : [];
@@ -827,7 +950,7 @@
     ["interval_min", "мин", "автореконнект, минут (0 — выкл)"],
     ["protect", "защита", "закрыты ЛК и сайты операторов, опасные порты (почта, SMB, торренты) и веб модема; снять — только для своих (ген1)"]];
 
-  function mlTab(id) {
+  function mlTab(X, id) {
     const where = id === "host" ? "хост" : "ВМ " + id;
     const statusLine = el("div", {class: "muted"});
     const legacyBox = el("div");
@@ -851,7 +974,7 @@
         }
         if ((Object.keys(edits).length || added.length || deleted.size) && body.base_port &&
             !window.confirm("Несохранённые правки таблицы пропадут. Продолжить?")) return;
-        const r = await act(e.target, sRes, () => POST("/api/targets/" + id + "/modlink/settings", body),
+        const r = await act(e.target, sRes, () => X.POST("/targets/" + id + "/modlink/settings", body),
           (d) => d && d.renumbered ? "порты пересчитаны — «Применить»" : "Сохранено");
         if (r && r.ok) await load();
       }, "", "сохранить базовый порт, LAN IP и WAN IP"), sRes);
@@ -919,7 +1042,7 @@
         btn("↺", () => { setEdit(r, "password", "gen"); draw(); }, "icon", "сгенерировать новый пароль"));
     }
     async function reveal(r) {
-      const x = await POST("/api/targets/" + id + "/modlink/reveal", {id: r.id});
+      const x = await X.POST("/targets/" + id + "/modlink/reveal", {id: r.id});
       if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
       revealed[r.id] = x.data.password;
       draw();
@@ -927,7 +1050,7 @@
     async function rowAct(r, what, args, ask) {
       if (ask && !window.confirm(ask)) return;
       out.textContent = "строка " + r.id + " · " + what + "…";
-      const x = await run(id, "modlink", args);
+      const x = await X.run(id, "modlink", args);
       if (!x.ok) { out.textContent = "строка " + r.id + " · " + what + " — Ошибка: " + x.error; return; }
       if (args[0] === "log") {
         const L = Array.isArray(x.data) ? x.data : x.data && Array.isArray(x.data.lines) ? x.data.lines : null;
@@ -967,7 +1090,7 @@
     }
 
     async function load() {
-      const r = await GET("/api/targets/" + id + "/modlink");
+      const r = await X.GET("/targets/" + id + "/modlink");
       if (!r.ok) { err = r.error; draw(); return; }
       const L = r.data.list, St = r.data.status;
       showSettings(r.data.settings);
@@ -987,7 +1110,7 @@
         btn("Перенести из modlink-linux", migrate, "primary", "modlink migrate: сначала покажет, что перенесётся")));
     }
     async function migrate(e) {
-      const r = await act(e.target, res, () => run(id, "modlink", ["migrate", "--dry-run"]), (d) => "к переносу строк: " + rowsOf(d).length);
+      const r = await act(e.target, res, () => X.run(id, "modlink", ["migrate", "--dry-run"]), (d) => "к переносу строк: " + rowsOf(d).length);
       if (!r || !r.ok) return;
       const rows = rowsOf(r.data), warns = (r.data && r.data.warnings) || [];
       modal("Перенос из modlink-linux · " + where, el("div", {},
@@ -998,7 +1121,7 @@
         {text: "Отмена"},
         {text: "Перенести " + rows.length, cls: "primary", onclick: async (close) => {
           close();
-          await act(e.target, res, () => run(id, "modlink", ["migrate", "--force", "--stop-panel"], {confirm: String(id)}), "Перенесено");
+          await act(e.target, res, () => X.run(id, "modlink", ["migrate", "--force", "--stop-panel"], {confirm: String(id)}), "Перенесено");
           await load();
         }}]);
     }
@@ -1020,7 +1143,7 @@
       markDirty();
     }
     async function pollStatus() {
-      const r = await GET("/api/targets/" + id + "/modlink?only=status");
+      const r = await X.GET("/targets/" + id + "/modlink?only=status");
       if (r.ok) applyStatus(r.data.status);
     }
 
@@ -1029,7 +1152,7 @@
       draw(); markDirty();
     });
     const bIf = btn("Из интерфейсов", async (e) => {
-      const r = await act(e.target, res, () => run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length);
+      const r = await act(e.target, res, () => X.run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length);
       if (!r || !r.ok) return;
       const sug = rowsOf(r.data);
       if (!sug.length) { setRes(res, "ok", "новых интерфейсов 192.168.N.100 нет — всё уже в таблице"); return; }
@@ -1039,7 +1162,7 @@
         {text: "Отмена"},
         {text: "Добавить " + sug.length, cls: "primary", onclick: async (close) => {
           close();
-          await act(bIf, res, () => run(id, "modlink", ["from-ifaces", "--add"]), (d) => "добавлено строк: " + ((d && d.added) || []).length + " — «Применить»");
+          await act(bIf, res, () => X.run(id, "modlink", ["from-ifaces", "--add"]), (d) => "добавлено строк: " + ((d && d.added) || []).length + " — «Применить»");
           await load();
         }}]);
     }, "", "modlink from-ifaces: строки по интерфейсам 192.168.N.100 сервера");
@@ -1049,19 +1172,19 @@
         del: [...deleted],
         set: Object.entries(edits).filter(([k]) => !deleted.has(Number(k)) && !deleted.has(k)).map(([k, f]) => ({id: Number(k), fields: f})),
         add: added.map((a) => a.fields), apply: true};
-      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/save", payload), "Применено");
+      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/save", payload), "Применено");
       if (r && !r.ok && r.data && r.data.steps) {
         out.textContent = r.data.steps.map((s) => (s.ok ? "✓ " : "✗ ") + s.what + (s.error ? ": " + s.error : "")).join("   ");
       }
       await load();
     }, "primary", "сохранить правки и modlink apply (sing-box check → перезапуск)");
     const bExp = btn("Экспорт для клиента", async (e) => {
-      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {}), "Готово");
+      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/export", {}), "Готово");
       if (r && r.ok) showTable("Экспорт для клиента · " + where, r.data.columns, r.data.rows,
         "Колонки — как в таблице клиента: прокси и ссылка реконнекта. «Копировать для таблицы» — вставляется по ячейкам.");
     }, "", "IP:PORT:LOGIN:PASS и ссылка реконнекта — с паролями");
     const bTbl = btn("Для proxyveth", async (e) => {
-      const r = await act(e.target, res, () => POST("/api/targets/" + id + "/modlink/export", {table: true}), "Готово");
+      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/export", {table: true}), "Готово");
       if (r && r.ok) showTable("Строки для таблицы proxyveth · " + where, r.data.columns, r.data.rows,
         el("div", {}, ...r.data.warnings.map((w) => el("div", {class: "warn-line", text: "⚠ " + w})),
           el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
@@ -1126,7 +1249,7 @@
   }
 
   class Term {
-    constructor(target, box, stateEl) { this.target = target; this.box = box; this.stateEl = stateEl; this.enc = new TextEncoder(); }
+    constructor(target, box, stateEl, wsPath) { this.target = target; this.box = box; this.stateEl = stateEl; this.wsPath = wsPath || "/ws/term"; this.enc = new TextEncoder(); }
     async open() {
       try { await loadXterm(); } catch (e) { this.state("xterm.js не загрузился", "err"); return; }
       this.t = new window.Terminal({cursorBlink: true, fontSize: 13, scrollback: 5000,
@@ -1149,7 +1272,7 @@
       if (!this.t) return;
       if (this.ws && this.ws.readyState <= 1) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const url = proto + "//" + location.host + "/ws/term?target=" + encodeURIComponent(this.target) +
+      const url = proto + "//" + location.host + this.wsPath + "?target=" + encodeURIComponent(this.target) +
         "&cols=" + this.t.cols + "&rows=" + this.t.rows;
       this.state("подключение…", "run");
       const ws = this.ws = new WebSocket(url);
@@ -1177,7 +1300,7 @@
   }
 
   const QUICK = ["proxyveth status --wan", "proxyveth problems", "modlink status", "hivelink status"];
-  function termTab(target, full) {
+  function termTab(X, target, full) {
     const st = el("span", {class: "res"});
     const box = el("div", {class: "term-box" + (full ? " full" : "")});
     let t = null;
@@ -1189,13 +1312,13 @@
       box);
     return {
       el: root,
-      show() { if (!t) { t = new Term(target, box, st); t.open(); } else { t.refit(); if (t.t) t.t.focus(); } },
+      show() { if (!t) { t = new Term(target, box, st, X.wsPath); t.open(); } else { t.refit(); if (t.t) t.t.focus(); } },
       dispose() { if (t) t.close(); },
     };
   }
 
   // ── вкладка «настройка и управление» ─────────────────────────────────────
-  function setTab(id) {
+  function setTab(X, id) {
     const T = "/api/targets/" + id;
     const H = String(id) === "host";
     const facts = el("div", {class: "muted"});
@@ -1234,33 +1357,33 @@
     const rHl = actRow(H ? "hivelink на хост" : "hivelink в эту ВМ", H ? "драйвер настоящих модемов, воткнутых в этот хост"
       : "драйвер настоящих модемов — если они воткнуты прямо в ВМ (проброс USB)", hlState,
       btn("Установить / обновить", async (e) => {
-        const r = await act(e.target, rHl.res, () => run(id, "hivelink", ["install"]), "Применено");
+        const r = await act(e.target, rHl.res, () => X.run(id, "hivelink", ["install"]), "Применено");
         if (r && r.ok) loadHl();
       }));
     const modeSel = el("select", {}, el("option", {value: "usb", text: "USB — до 40 модемов"}), el("option", {value: "gw", text: "шлюз — без USB"}));
     const modeCur = el("span", {class: "muted"});
     const rMode = actRow("Режим proxyveth", "смена снимает все модемы и поднимает их в новом режиме — подтверждение " + (H ? "словом host" : "номером ВМ"), modeCur, modeSel,
       btn("Сменить…", async (e) => {
-        const s = ent(id) || {};
+        const s = X.ent(id) || {};
         const m = modeSel.value;
         if (m === s.mode) { setRes(rMode.res, "ok", "уже " + modeShort(m)); return; }
         const v = await confirmNumber("Сменить режим proxyveth: " + tname(id),
           "Режим " + modeShort(s.mode) + " → " + modeShort(m) + ". Все модемы (" + tname(id) + ") будут сняты и подняты заново.", id, "Сменить режим");
         if (v == null) return;
-        await act(e.target, rMode.res, () => run(id, "proxyveth", ["mode", m, "--yes"], {confirm: v}), "Применено");
+        await act(e.target, rMode.res, () => X.run(id, "proxyveth", ["mode", m, "--yes"], {confirm: v}), "Применено");
         refresh();
       }, "danger"));
-    const rUp = actRow(H ? "Обновить PCS" : "Обновить агентов", H ? "код PCS с GitHub — на хост" + (isPve() ? " и все его ВМ" : "")
+    const rUp = actRow(H ? "Обновить PCS" : "Обновить агентов", H ? "код PCS с GitHub — на хост" + (X.isPve() ? " и все его ВМ" : "")
       : "код PCS и части на этой ВМ — той же версии, что на хосте", el("span", {class: "muted", text: ""}),
       btn("Обновить", (e) => act(e.target, rUp.res, () => POST(T + "/update", {}), "Применено", rUp.jobs)));
 
     async function loadHl() {
-      const r = await run(id, "hivelink", ["status"]);
+      const r = await X.run(id, "hivelink", ["status"]);
       hlState.textContent = !r.ok ? "Ошибка: " + r.error : r.data && r.data.installed === false ? "не установлен"
         : "установлен" + (r.data && r.data.version ? " · " + r.data.version : "");
     }
     async function loadFacts() {
-      const r = await GET("/api/targets/" + id);
+      const r = await X.GET("/targets/" + id);
       if (!r.ok) { facts.textContent = "Ошибка: " + r.error; return; }
       const d = r.data || {}, v = d.versions || {};
       if (H) {
@@ -1273,7 +1396,7 @@
         Object.keys(v).length && "версии: " + Object.entries(v).map(([k, x]) => k + " " + (x || "—")).join(", ")].filter(Boolean).join(" · ");
     }
     function update() {
-      const s = ent(id) || {};
+      const s = X.ent(id) || {};
       const h = s.host || {};
       mpState.textContent = H && h.mpspace_ok === false ? "на хосте Proxmox mp.space не ставится — он меняет GRUB и ядро и"
         + " перезагружает машину, легли бы все ВМ; ставь в ВМ" : mpText(s.mpspace);
@@ -1282,21 +1405,38 @@
       if (s.mode && s.mode !== shownMode) { shownMode = s.mode; modeSel.value = s.mode === "usb" ? "gw" : "usb"; }
     }
     let shownMode = null;
+    if (X.node) for (const r of [rMp, rUp]) r.jobs.dataset.base = X.base;
+    const power = (action, text, ask, cls) => btn(text, async (e) => {
+      if (ask && !window.confirm(ask)) return;
+      const r = await act(e.target, rPower.res, () => X.POST("/servers/" + id + "/power", {action}), (d) => "ВМ: " + (d && d.state || "готово"));
+      if (r && r.ok) (X.node ? refreshNodes() : refresh());
+    }, cls);
+    const rPower = actRow("Питание ВМ", "через Proxmox: включить, выключить штатно (до 2 мин), перезагрузить, остановить жёстко", el("span"),
+      power("start", "▶ Включить"), power("shutdown", "⏻ Выключить", "Выключить ВМ " + id + "? Модемы на ней пропадут."),
+      power("reboot", "↻ Перезагрузить", "Перезагрузить ВМ " + id + "?"),
+      power("stop", "■ Стоп", "Жёстко остановить ВМ " + id + "? Как выдернуть питание.", "danger"));
+    const rColor = actRow("Цвет", "цвет ВМ в дереве и на плашке — один из семи", colorPick((X.srv(id) || {}).color, async (c) => {
+      const r = await X.POST("/servers/" + id + "/color", {color: c});
+      if (r.ok) (X.node ? refreshNodes() : refresh());
+      return r.ok;
+    }));
+    const rForget = actRow("Убрать из PCS", "PCS перестанет управлять ВМ; сама ВМ, её диски и модемы останутся (вернуть — «Добавить в PCS» на обзоре хоста)",
+      el("span"), btn("Убрать из PCS…", () => forgetVm(X, X.srv(id) || {id}), "danger"));
     const fpText = el("span", {class: "mono", text: "…"});
     const rLink = actRow("Связь хостов", "чтобы управлять этим хостом с хоста Proxmox: там «+ Присоединить хост» → адрес этого хоста, логин и пароль"
       + " этой панели; отпечаток — сверить (хаб ходит сюда только по HTTPS к этому сертификату)", fpText);
-    const root = el("div", {}, facts, el("div", {class: "acts", style: "margin-top:10px"}, rDns.el, rPw.el, rKey.el, rMp.el, rHl.el, rMode.el, rUp.el,
-      H ? rLink.el : null));
+    const root = el("div", {}, facts, el("div", {class: "acts", style: "margin-top:10px"}, H ? null : rPower.el, H ? null : rColor.el,
+      rDns.el, rPw.el, rKey.el, rMp.el, rHl.el, rMode.el, rUp.el, H ? (X.node ? null : rLink.el) : rForget.el));
     let loaded = false;
     async function loadFp() {
-      const r = await GET("/api/self");
+      const r = await X.GET("/self");
       fpText.textContent = r.ok && r.data.fingerprint ? r.data.fingerprint : "HTTPS выключен — pcs web on (сертификат создастся сам)";
     }
     return {el: root, update, show() { update(); if (!loaded) { loaded = true; loadHl(); loadFacts(); if (H) loadFp(); } }};
   }
 
   // ── создать ВМ ────────────────────────────────────────────────────────────
-  function pageCreate() {
+  function pageCreate(X) {
     const f = {
       name: el("input", {placeholder: "pcs3000", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9-]*"}),
       cores: el("input", {type: "number", min: 1, max: 256, value: "4"}),
@@ -1322,16 +1462,16 @@
       ev.preventDefault();
       const body = {name: f.name.value.trim(), cores: +f.cores.value, ram_gb: +f.ram.value, disk_gb: +f.disk.value,
         mode: gw.checked ? "gw" : "usb", sheet: f.sheet.value.trim(), mpspace: f.mp.checked};
-      const r = await act(submit, res, () => POST("/api/servers", body), "Запущено");
-      if (r && r.ok && r.data && r.data.job != null) location.hash = "#/job/" + encodeURIComponent(r.data.job);
+      const r = await act(submit, res, () => X.POST("/servers", body), "Запущено");
+      if (r && r.ok && r.data && r.data.job != null) location.hash = X.href("/job/" + encodeURIComponent(r.data.job));
     });
-    return {kind: "create", el: el("div", {}, el("h1", {text: "Создать ВМ"}),
+    return {kind: "create", node: X.node, el: el("div", {}, el("h1", {text: "Создать ВМ" + (X.node ? " на хосте " + X.node : "")}),
       el("p", {class: "muted", text: "Ubuntu 24.04 под ключ: ОС, PCS, proxyveth в выбранном режиме, модемы по таблице, по желанию — mobileproxy.space. Долго — журнал ниже обновляется сам."}),
       form), update() { document.title = "Создать ВМ — PCS"; }};
   }
 
-  function pageJob(jid) {
-    return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {page: true})), update() { document.title = "Задание — PCS"; }};
+  function pageJob(X, jid) {
+    return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {page: true, base: X.node ? X.base : undefined})), update() { document.title = "Задание — PCS"; }};
   }
 
   // ── присоединить хост (VPS или другой Proxmox) ──────────────────────────
@@ -1354,83 +1494,68 @@
       const r = await act(submit, res, () => POST("/api/nodes/join", {addr: f.addr.value, user: f.user.value, password: f.pw.value,
         name: f.name.value, fingerprint: f.fp.value}), (d) => "Присоединён: " + d.name);
       f.pw.value = "";
-      if (r && r.ok) { await refreshNodes(); location.hash = "#/node/" + r.data.name; }
+      if (r && r.ok) { await refreshNodes(); location.hash = "#/n/" + encodeURIComponent(r.data.name); }
     });
     return {kind: "join", el: el("div", {}, el("h1", {text: "Присоединить хост"}), form), update() { document.title = "Присоединить хост — PCS"; }};
   }
 
-  function pageNode(name) {
-    const B = "/api/nodes/" + encodeURIComponent(name);
-    const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
-    const pl = el("div", {class: "plaque host"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
-    const banner = el("div"), cards = el("div", {class: "cards"}), list = el("div", {class: "list"}), vmHead = el("h2", {text: "Виртуальные машины"});
-    const res = el("span", {class: "res"}), jobs = el("div", {class: "joblog-slot"});
-    const bOpen = btn("Открыть панель хоста", async (e) => {
+
+  function nodeTools(X) {
+    const name = X.node;
+    const res = el("span", {class: "res"}), jobs = el("div", {class: "joblog-slot"}), fp = el("span", {class: "muted mono"});
+    const n0 = (S.nodes || []).find((x) => x.name === name) || {};
+    const bOpen = btn("Его панель в новой вкладке", async (e) => {
       const w = window.open("about:blank", "_blank");
-      const r = await act(e.target, res, () => POST(B + "/login", {}), "Открыто");
+      const r = await act(e.target, res, () => POST("/api/nodes/" + encodeURIComponent(name) + "/login", {}), "Открыто");
       if (r && r.ok && w) w.location = r.data.url; else if (w) w.close();
-    }, "primary", "вход в его панель без пароля: одноразовая ссылка на 60 с");
-    const bUp = btn("Обновить PCS на нём", (e) => act(e.target, res, () => POST(B + "/targets/host/update", {}), "Запущено", null)
-      .then((r) => { if (r && r.ok && r.data && r.data.job != null) jobs.replaceChildren(jobView(r.data.job, {base: B, title: "Обновление PCS на " + name})); }));
+    }, "", "вход в его собственную панель без пароля: одноразовая ссылка на 60 с");
+    const bUp = btn("Обновить PCS на нём", (e) => act(e.target, res, () => X.POST("/targets/host/update", {}), "Запущено")
+      .then((r) => { if (r && r.ok && r.data && r.data.job != null) jobs.replaceChildren(jobView(r.data.job, {base: X.base, title: "Обновление PCS на " + name})); }));
     const bDel = btn("Отсоединить", async () => {
-      const v = await confirmNumber("Отсоединить хост " + name, "Хаб забудет хост " + name + ", а тот отзовёт наш токен. Модемы и софт на нём не тронутся.", name, "Отсоединить");
+      const v = await confirmNumber("Отсоединить хост " + name, "Хаб забудет хост " + name + ", а тот отзовёт наш токен. Модемы, ВМ и софт на нём не тронутся.", name, "Отсоединить");
       if (v == null) return;
-      const r = await act(null, res, () => POST(B + "/remove", {confirm: v}), "Отсоединён");
+      const r = await act(null, res, () => POST("/api/nodes/" + encodeURIComponent(name) + "/remove", {confirm: v}), "Отсоединён");
       if (r && r.ok) { await refreshNodes(); location.hash = "#/"; }
     }, "danger");
-    const fp = el("div", {class: "muted mono"});
-    const root = el("div", {}, pl, banner, el("div", {class: "bar"}, bOpen, bUp, bDel, res), jobs, cards, vmHead, list, fp);
-    function update() {
-      const n = (S.nodes || []).find((x) => x.name === name);
-      document.title = name + " — PCS";
-      if (!n) { big.textContent = name; line.textContent = S.nodes ? "такого присоединённого хоста нет" : "загрузка…"; return; }
-      const h = n.host_info || {}, c = counts(h), srvs = n.servers || [];
-      big.textContent = "Хост " + name + (h.name && h.name !== name ? " (" + h.name + ")" : "");
-      line.textContent = [n.host + ":" + n.port, h.os || h.kind || n.kind, h.version && "PCS " + h.version,
-        h.mode ? "proxyveth " + modeShort(h.mode) + " · модемы " + c.ok + "/" + c.total : null, h.mpspace_ok ? mpText(h.mpspace) : null].filter(Boolean).join(" · ");
-      const lv = !n.ok ? "bad" : level({state: "running", modems: h.modems});
-      stDot.className = "dot " + lv; stText.textContent = !n.ok ? "нет связи" : lv === "ok" ? "в порядке" : "есть замечания";
-      banner.replaceChildren(...(n.error ? [el("div", {class: "banner", text: (n.ok ? "" : "Нет связи: ") + n.error})] : []));
-      fp.textContent = "сертификат: " + (n.fingerprint || "—");
-      const card = (k, v, cls) => el("div", {class: "card"}, el("div", {class: "k", text: k}), el("div", {class: "v " + (cls || ""), text: v}));
-      cards.replaceChildren(...(!n.ok ? [] : [card("Модемы", c.ok + " / " + c.total, c.ok < c.total ? "warn" : ""),
-        card("Режим proxyveth", h.mode ? modeShort(h.mode) : "не задан"), card("mp.space", h.mpspace_ok ? mpText(h.mpspace).replace("mp.space ", "") : "—"),
-        card("ВМ", String(srvs.length)), card("ОЗУ", gb(h.ram))]));
-      vmHead.hidden = list.hidden = !srvs.length;
-      list.replaceChildren(...srvs.map((s) => {
-        const sc = counts(s);
-        return el("div", {class: "item"}, el("span", {class: "dot " + level(s), title: levelText(s)}),
-          el("div", {class: "grow"}, el("div", {class: "title", text: s.id + " " + (s.name || "")}),
-            el("div", {class: "sub", text: [s.ip || "—", modeShort(s.mode), "модемы " + sc.ok + "/" + sc.total, mpText(s.mpspace)].join(" · ")})));
-      }));
-    }
-    return {kind: "node", id: name, el: root, update};
+    const colors = colorPick(n0.color, async (c) => {
+      const r = await POST("/api/nodes/" + encodeURIComponent(name) + "/color", {color: c});
+      if (r.ok) refreshNodes();
+      return r.ok;
+    });
+    const el_ = el("div", {class: "node-bar"}, el("span", {class: "muted", text: "присоединённый хост · цвет "}), colors,
+      el("span", {class: "spacer"}), bOpen, bUp, bDel, res, jobs);
+    return {el: el("div", {}, el_, fp), update() {
+      const n = (S.nodes || []).find((x) => x.name === name) || {};
+      fp.textContent = n.host ? n.host + ":" + n.port + " · сертификат " + (n.fingerprint || "—") : "";
+    }};
   }
 
   async function refreshNodes() {
     const r = await GET("/api/nodes");
-    if (r.ok) { S.nodes = r.data || []; renderTree(); if (S.page && S.page.kind === "node" && S.page.update) S.page.update(); }
+    if (r.ok) { S.nodes = r.data || []; renderTree(); if (S.page && S.page.node && S.page.update) S.page.update(); }
   }
 
   // ── маршруты и опрос ──────────────────────────────────────────────────────
   function parse() {
-    const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
-    if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {kind: "vm", id: p[1], tab: p[2] || "proxyveth"};
-    if (p[0] === "create") return {kind: "create"};
-    if (p[0] === "job" && p[1]) return {kind: "job", id: p[1]};
-    if (p[0] === "host") return {kind: "host", tab: p[1] || ""};
-    if (p[0] === "join") return {kind: "join"};
-    if (p[0] === "node" && p[1]) return {kind: "node", id: p[1]};
-    return {kind: "host", tab: ""};
+    let p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+    let node = null;
+    if (p[0] === "n" && p[1]) { node = p[1]; p = p.slice(2); }
+    if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {node, kind: "vm", id: p[1], tab: p[2] || "proxyveth"};
+    if (p[0] === "create") return {node, kind: "create"};
+    if (p[0] === "job" && p[1]) return {node, kind: "job", id: p[1]};
+    if (!node && p[0] === "join") return {kind: "join"};
+    if (p[0] === "host") return {node, kind: "host", tab: p[1] || ""};
+    return {node, kind: "host", tab: ""};
   }
   function route() {
     const r = parse();
-    if (S.page && ((S.page.kind === "vm" && r.kind === "vm" && S.page.id === r.id) || (S.page.kind === "host" && r.kind === "host"))) {
-      S.page.show(r.tab); renderTree(); return;
-    }
+    const same = S.page && (S.page.node || null) === (r.node || null) && S.page.kind === r.kind &&
+      (r.kind === "host" || (r.kind === "vm" && S.page.id === r.id));
+    if (same) { S.page.show(r.tab); renderTree(); return; }
     if (S.page && S.page.dispose) S.page.dispose();
-    const page = r.kind === "vm" ? pageVm(r.id) : r.kind === "create" ? pageCreate() : r.kind === "job" ? pageJob(r.id)
-      : r.kind === "join" ? pageJoin() : r.kind === "node" ? pageNode(r.id) : pageHost();
+    const X = ctx(r.node);
+    const page = r.kind === "vm" ? pageVm(X, r.id) : r.kind === "create" ? pageCreate(X) : r.kind === "job" ? pageJob(X, r.id)
+      : r.kind === "join" ? pageJoin() : pageHost(X);
     S.page = page;
     $("#main").replaceChildren(page.el);
     if (page.update) page.update();

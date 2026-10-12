@@ -152,6 +152,7 @@ def _summary(srv):
 
 def _public(srv):
     return {"id": srv["id"], "name": srv["name"], "ip": srv["ip"], "state": srv["state"], "mode": srv["mode"],
+            "color": srv.get("color"),
             "modems": _summary(srv), "mpspace": srv["mpspace"]}
 
 
@@ -369,6 +370,74 @@ NODES = {}
 FAKE_FP = ":".join(["AB", "12", "CD", "34"] * 8)
 
 
+# ── управление ВМ (фейк) ─────────────────────────────────────────────────────
+OTHER = {100: "vless", 4000: "vps-test"}
+
+
+def colors():
+    return [{"id": c, "name": n} for c, n in (("red", "красный"), ("orange", "оранжевый"), ("yellow", "жёлтый"),
+                                               ("green", "зелёный"), ("cyan", "голубой"), ("blue", "синий"),
+                                               ("violet", "фиолетовый"))]
+
+
+def vm_power(id, action):
+    _pause()
+    with _lock:
+        srv = _srv(id)
+        if srv["state"] == "absent":
+            raise Fail("ВМ %s нет в Proxmox — убрать из PCS" % id)
+        srv["state"] = "stopped" if action in ("shutdown", "stop") else "running"
+        return {"id": srv["id"], "action": action, "state": srv["state"]}
+
+
+def server_forget(id, confirm):
+    with _lock:
+        srv = _srv(id)
+        if str(confirm) != str(srv["id"]):
+            raise Fail("введи номер сервера")
+        del S[srv["id"]]
+        OTHER[srv["id"]] = srv["name"]
+    return {"id": srv["id"], "forgotten": True}
+
+
+def server_color(id, color):
+    with _lock:
+        srv = _srv(id)
+        if color and color not in [c["id"] for c in colors()]:
+            raise Fail("цвет — один из семи")
+        srv["color"] = color or None
+        return {"id": srv["id"], "color": srv["color"]}
+
+
+def vms_other():
+    with _lock:
+        return [{"id": i, "name": n, "state": "running"} for i, n in sorted(OTHER.items()) if i not in S]
+
+
+def server_adopt(id, ip=None, password=None):
+    sid = int(id)
+    with _lock:
+        if sid not in OTHER:
+            raise Fail("ВМ %s нет в Proxmox" % sid)
+        name = OTHER[sid]
+
+    def done():
+        with _lock:
+            S[sid] = _server(sid, name, ip or "192.168.88.%d" % (sid % 200), "usb", [41, 42])
+            OTHER.pop(sid, None)
+        return {"id": sid}
+    return _job("Добавить ВМ %s в PCS" % sid, ["вход по паролю root — ключ хаба положен", "код PCS на ВМ",
+                                                "proxyveth setup", "modlink setup"], done)
+
+
+def node_color(name, color):
+    with _lock:
+        if name not in NODES:
+            raise Fail("хоста «%s» нет" % name)
+        NODES[name]["color"] = color or None
+        return {"name": name, "color": NODES[name]["color"]}
+
+
 def self_fingerprint():
     return FAKE_FP
 
@@ -382,7 +451,15 @@ def _node_host(name):
 def nodes_overview(timeout=10):
     _pause()
     with _lock:
-        return [dict(n, host_info=_node_host(n["remote_name"]) if n["ok"] else None) for n in NODES.values()]
+        out = []
+        for n in NODES.values():
+            if n.get("pmx"):                 # фейковый Proxmox: его данные — те же, что у своего хоста
+                hi = dict(copy.deepcopy(H), name=n["remote_name"], kind="proxmox")
+                out.append(dict(n, host_info=hi, servers=[_public(s) for s in sorted((x for x in S.values() if x),
+                                                                                     key=lambda x: x["id"])]))
+            else:
+                out.append(dict(n, host_info=_node_host(n["remote_name"]) if n["ok"] else None))
+        return out
 
 
 def node_join(addr, user, password, name=None, fingerprint=None):
@@ -392,7 +469,8 @@ def node_join(addr, user, password, name=None, fingerprint=None):
     host = str(addr).split(":")[0].replace("https://", "")
     nm = (name or "vps-" + host.split(".")[-1]).lower()
     with _lock:
-        NODES[nm] = {"name": nm, "host": host, "port": 666, "kind": "ubuntu", "remote_name": "vps-msk1",
+        NODES[nm] = {"name": nm, "host": host, "port": 666, "kind": "proxmox" if "pmx" in nm else "ubuntu",
+                     "pmx": "pmx" in nm, "remote_name": "pve-" + nm if "pmx" in nm else "vps-msk1",
                      "fingerprint": FAKE_FP, "ok": not host.startswith("10."), "servers": [],
                      "error": None if not host.startswith("10.") else "хост %s:666 не отвечает по HTTPS" % host}
         return dict(NODES[nm], info=_node_host("vps-msk1"))
@@ -415,12 +493,12 @@ def node_call(name, method, path, body=None, timeout=60):
     if path == "targets/host/update" and method == "POST":
         return {"ok": True, "data": {"job": _job("Обновление PCS (хост)", ["скачиваю main с GitHub…", "код на месте",
                                                                           "proxyveth, modlink — setup"], lambda: {"host": VERSION})}}
-    if path.startswith("jobs/"):
-        try:
-            return {"ok": True, "data": job(path[5:])}
-        except Fail as e:
-            return {"ok": False, "error": str(e)}
-    return {"ok": False, "error": "фейк: %s %s не умеет" % (method, path)}
+    # остальное — как у настоящего хоста: та же панель над тем же фейком
+    from pcs.web.panel import Panel
+    rpath, _, q = path.partition("?")
+    query = dict(kv.split("=", 1) for kv in q.split("&") if "=" in kv)
+    code, out = Panel(sys.modules[__name__]).handle(method, "/api/" + rpath, query, body or {}, user="api:хаб")
+    return out
 
 
 def job(job_id):

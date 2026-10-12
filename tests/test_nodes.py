@@ -129,6 +129,81 @@ check("по ссылке — сразу в панель (сессия выдан
 r = urllib.request.urlopen(u["url"], timeout=5)
 check("второй раз та же ссылка не пускает", r.geturl().endswith("/login"), r.geturl())
 
+print("терминал хоста через хаб:")
+from pcs.web import ws  # noqa: E402
+sock, rest = nodes.ws_open("vps-msk-1", "target=host&cols=80&rows=24")
+buf = bytearray(rest)
+sock.settimeout(10)
+deadline = time.time() + 10
+while b"root@" not in buf and time.time() < deadline:
+    chunk = sock.recv(4096)
+    if not chunk:
+        break
+    buf += chunk
+check("WebSocket к терминалу хоста: рукопожатие по токену, приглашение пришло", b"root@" in buf, bytes(buf[:200]))
+sock.sendall(ws.frame(0x2, b"proxyveth mode\n", mask=b"abcd"))
+deadline, out = time.time() + 10, bytearray()
+while b"mode" not in out and time.time() < deadline:
+    chunk = sock.recv(4096)
+    if not chunk:
+        break
+    out += chunk
+check("ввод доходит, вывод возвращается", b"mode" in out, bytes(out[:300]))
+sock.close()
+rec = json.load(open(nodes.path("vps-msk-1")))
+c = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=5)
+c.request("GET", "/api/v1/ws/term?target=host", headers={"Upgrade": "websocket", "Connection": "Upgrade",
+                                                          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+                                                          "Sec-WebSocket-Version": "13", "Authorization": "Bearer pcs_xx"})
+check("терминал по чужому токену — 401", c.getresponse().status == 401)
+c.close()
+
+print("терминал присоединённого хоста в браузере хаба (ретранслятор):")
+import pcs.hub.api as hub_api  # noqa: E402
+hub_cfg = os.path.join(TMP, "hub-web.json")
+auth.set_password(hub_cfg, "admin", "hub-pass-1", iterations=1000)
+hub_port = free_port()
+hub = server.make_server(hub_port, hub_api, "127.0.0.1", hub_cfg, fail_delay=0, log_dir=None, quiet=True)
+threading.Thread(target=hub.serve_forever, daemon=True).start()
+op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+origin = "http://127.0.0.1:%d" % hub_port
+req = urllib.request.Request(origin + "/api/login", data=json.dumps({"user": "admin", "password": "hub-pass-1"}).encode(),
+                             headers={"Content-Type": "application/json", "X-CSRF": "1", "Origin": origin})
+op.open(req, timeout=5)
+cookie = "; ".join("%s=%s" % (c.name, c.value) for c in op.handlers[-1].cookiejar) if hasattr(op.handlers[-1], "cookiejar") else ""
+if not cookie:
+    for h in op.handlers:
+        if hasattr(h, "cookiejar"):
+            cookie = "; ".join("%s=%s" % (c.name, c.value) for c in h.cookiejar)
+s_ = socket.create_connection(("127.0.0.1", hub_port), timeout=10)
+s_.sendall(("GET /ws/node/vps-msk-1/term?target=host&cols=80&rows=24 HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+            "Origin: %s\r\nCookie: %s\r\n\r\n" % (hub_port, origin, cookie)).encode())
+buf, t0 = bytearray(), time.time()
+while time.time() - t0 < 10 and b"root@" not in buf:
+    chunk = s_.recv(4096)
+    if not chunk:
+        break
+    buf += chunk
+check("браузер → хаб → хост: 101 и приглашение консоли того хоста", buf.startswith(b"HTTP/1.1 101") and b"root@" in buf,
+      bytes(buf[:200]))
+s_.sendall(ws.frame(0x2, b"proxyveth mode\n", mask=b"q1w2"))
+t0, out = time.time(), bytearray()
+while time.time() - t0 < 10 and b"mode" not in out:
+    chunk = s_.recv(4096)
+    if not chunk:
+        break
+    out += chunk
+check("ввод через хаб доходит до хоста, ответ возвращается", b"mode" in out, bytes(out[:200]))
+s_.close()
+s2 = socket.create_connection(("127.0.0.1", hub_port), timeout=10)
+s2.sendall(("GET /ws/node/vps-msk-1/term?target=host HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n"
+            "Origin: %s\r\n\r\n" % (hub_port, origin)).encode())
+check("без входа в хаб — 401", s2.recv(200).startswith(b"HTTP/1.1 401"))
+s2.close()
+hub.shutdown()
+
 print("защита API:")
 c = http.client.HTTPSConnection("127.0.0.1", port, context=ctx, timeout=5)
 c.request("GET", "/api/v1/overview", headers={"Authorization": "Bearer pcs_someone-else-token"})

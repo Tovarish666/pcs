@@ -116,6 +116,12 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/modlink/settings", self.ml_settings),
             ("POST", r"/api/servers", self.create),
             ("POST", r"/api/servers/(\d+)/delete", self.delete),
+            ("POST", r"/api/servers/(\d+)/power", self.power),
+            ("POST", r"/api/servers/(\d+)/forget", self.forget_server),
+            ("POST", r"/api/servers/(\d+)/color", self.color),
+            ("GET", r"/api/vms", self.vms_other),
+            ("POST", r"/api/vms/(\d+)/adopt", self.adopt),
+            ("GET", r"/api/colors", self.colors),
             ("POST", r"/api/run", self.run),
             ("POST", r"/api/targets/(host|\d+)/dns", self.dns),
             ("POST", r"/api/targets/(host|\d+)/passwd", self.passwd),
@@ -128,6 +134,7 @@ class Panel:
             ("POST", r"/api/nodes/join", self.node_join),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/remove", self.node_remove),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/login", self.node_login),
+            ("POST", r"/api/nodes/([a-z0-9-]{1,40})/color", self.node_color),
             ("GET", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_get),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_post),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
@@ -471,6 +478,51 @@ class Panel:
         r = self.api.delete_server(int(sid), confirm)
         self.forget()
         return ok(_job_or(r))
+
+    # ── управление ВМ ────────────────────────────────────────────────────────
+
+    def power(self, sid, query, body):
+        action = body.get("action")
+        if action not in ("start", "shutdown", "reboot", "stop"):
+            raise Bad("питание: start, shutdown, reboot или stop")
+        r = self.api.vm_power(int(sid), action)
+        self.forget()
+        return ok(r)
+
+    def forget_server(self, sid, query, body):
+        confirm = str(body.get("confirm", "")).strip()
+        if confirm != sid:
+            raise Bad("подтвердите номером ВМ (%s)" % sid, 403)
+        r = self.api.server_forget(int(sid), confirm)
+        self.forget()
+        return ok(r)
+
+    def color(self, sid, query, body):
+        r = self.api.server_color(int(sid), _s(body.get("color"), "цвет", 20).strip())
+        self.forget()
+        return ok(r)
+
+    def node_color(self, name, query, body):
+        r = self.api.node_color(name, _s(body.get("color"), "цвет", 20).strip())
+        self.forget()
+        return ok(r)
+
+    def colors(self, query, body):
+        fn = getattr(self.api, "colors", None)
+        return ok(fn() if fn else [])
+
+    def vms_other(self, query, body):
+        fn = getattr(self.api, "vms_other", None)
+        return ok(fn() if fn else [])
+
+    def adopt(self, sid, query, body):
+        ip = _s(body.get("ip"), "IP", 40).strip()
+        if ip and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", ip):
+            raise Bad("IP: адрес IPv4 или пусто (узнать у гостевого агента)")
+        pw = _s(body.get("password"), "пароль", 200)
+        jid = self.api.server_adopt(int(sid), ip=ip or None, password=pw or None)
+        self.forget()
+        return ok({"job": jid})
 
     def job(self, jid, query, body):
         return ok(self.api.job(jid))

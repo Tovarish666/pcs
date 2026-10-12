@@ -204,6 +204,54 @@ def run_job(id, part, args, input=None):
                       target=key)
 
 
+# ── управление ВМ ──────────────────────────────────────────────────────────
+def vm_power(id, action):
+    """start | shutdown | reboot | stop — через Proxmox."""
+    s = _server(id)
+    if jobs.busy(target=s["id"]):
+        raise Fail("с сервером %s идёт задание — дождись его" % s["id"])
+    return srv.power(s["id"], action)
+
+
+def server_forget(id, confirm):
+    """Убрать из PCS (ВМ не трогается). confirm должен совпасть с id."""
+    s = _server(id)
+    if str(confirm).strip() != str(s["id"]):
+        raise Fail("чтобы убрать из PCS, введи номер сервера: %s" % s["id"])
+    if jobs.busy(target=s["id"]):
+        raise Fail("с сервером %s идёт задание — дождись его" % s["id"])
+    return srv.forget(s["id"])
+
+
+def server_color(id, color):
+    """Цвет сервера в дереве: red, orange, yellow, green, cyan, blue, violet или "" (по номеру)."""
+    return srv.set_color(_server(id)["id"], color)
+
+
+def vms_other():
+    """ВМ этого Proxmox, которых нет в PCS."""
+    return srv.other_vms()
+
+
+def server_adopt(id, ip=None, password=None):
+    """Добавить в PCS ВМ, которая уже есть в Proxmox (заданием: ключ хаба, код, части). → job_id."""
+    sid = store.norm_id(id)
+    if sid == store.HOST:
+        raise Fail("номер ВМ — число")
+    if jobs.busy("adopt", sid):
+        raise Fail("ВМ %s уже добавляется" % sid)
+    return jobs.start("adopt", {"id": sid, "ip": ip or "", "password": password or ""},
+                      title="Добавить ВМ %s в PCS" % sid, target=sid)
+
+
+def _job_adopt(p):
+    return srv.adopt(p["id"], ip=p.get("ip") or "", password=p.get("password") or "", select=False)
+
+
+def colors():
+    return [{"id": c, "name": srv.COLOR_RU[c]} for c in srv.COLORS]
+
+
 # ── присоединённые хосты (VPS и другие хосты Proxmox) ─────────────────────
 def nodes():
     """Присоединённые хосты (без токенов)."""
@@ -231,6 +279,17 @@ def node_call(name, method, path, body=None, timeout=60):
     """Запрос к API присоединённого хоста (path — как у панели без /api/). → конверт."""
     from . import nodes as nd
     return nd.call(name, method, path, body, timeout=timeout)
+
+
+def node_ws(name, query):
+    """WebSocket к терминалу присоединённого хоста. → (сокет, лишние байты)."""
+    from . import nodes as nd
+    return nd.ws_open(name, query)
+
+
+def node_color(name, color):
+    from . import nodes as nd
+    return nd.set_color(name, srv.norm_color(color))
 
 
 def node_login(name):
@@ -291,5 +350,5 @@ def _job_host_setup(p):
 
 
 KINDS = {"create_server": _job_create, "mpspace": _job_mpspace, "update": srv.update, "part": _job_part,
-         "host_setup": _job_host_setup, "mpspace_host": srv.mpspace_host}
+         "host_setup": _job_host_setup, "mpspace_host": srv.mpspace_host, "adopt": _job_adopt}
 summarize = node.summarize

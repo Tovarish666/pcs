@@ -20,6 +20,7 @@ import http.server
 import importlib
 import json
 import mimetypes
+import re
 import os
 import secrets
 import signal
@@ -194,6 +195,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/ws/term":
                 return self._ws_term(u)
+            if path == "/api/v1/ws/term":
+                return self._v1_ws(u)
+            m = re.fullmatch(r"/ws/node/([a-z0-9-]{1,40})/term", path)
+            if m:
+                return self._ws_node(u, m.group(1))
             if path.startswith("/api/v1/"):
                 return self._v1("GET", path, u.query)
             if path.startswith("/api/"):
@@ -407,12 +413,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # ── терминал ────────────────────────────────────────────────────────────
 
-    def _ws_term(self, u):
+    def _v1_ws(self, u):
+        """Терминал по токену — для хаба другого хоста (только по HTTPS)."""
+        app, ip = self.app, self.client_address[0]
+        if not self._tls():
+            return self._send(403, "только по HTTPS", "text/plain; charset=utf-8")
+        rec = tokens.check(self._bearer(), ip, app.tokens_path)
+        if rec is None:
+            app.throttle.failed(ip)
+            return self._send(401, "нет или неверный токен", "text/plain; charset=utf-8")
+        return self._ws_term(u, user="api:%s" % rec.get("name", rec.get("id")))
+
+    def _ws_node(self, u, name):
+        """Терминал присоединённого хоста в браузере хаба: хаб — посредник, кадры не трогает."""
         app = self.app
         s = self._session()
         if s is None:
             return self._send(401, "нужен вход", "text/plain; charset=utf-8")
         if not self._origin_ok(required=True):
+            return self._send(403, "чужой Origin", "text/plain; charset=utf-8")
+        h = self.headers
+        key = h.get("Sec-WebSocket-Key") or ""
+        if (h.get("Upgrade") or "").lower() != "websocket" or not ws.key_ok(key) \
+                or (h.get("Sec-WebSocket-Version") or "").strip() != "13":
+            return self._send(400, "нужен WebSocket 13", "text/plain; charset=utf-8")
+        fn = getattr(app.api, "node_ws", None)
+        if fn is None:
+            return self._send(501, "этот хаб не умеет терминал присоединённых хостов", "text/plain; charset=utf-8")
+        try:
+            far, rest = fn(name, u.query)
+        except Fail as e:
+            return self._send(502, str(e), "text/plain; charset=utf-8")
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ws.accept(key))
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        near = self.connection
+        near.settimeout(None)
+        app.log("%s терминал хоста %s открыт" % (s["user"], name))
+        try:
+            if rest:
+                near.sendall(rest)
+            _relay(near, far)
+        finally:
+            for x in (far,):
+                try:
+                    x.close()
+                except OSError:
+                    pass
+        app.log("%s терминал хоста %s закрыт" % (s["user"], name))
+
+    def _ws_term(self, u, user=None):
+        app = self.app
+        s = {"user": user} if user else self._session()
+        if s is None:
+            return self._send(401, "нужен вход", "text/plain; charset=utf-8")
+        if not user and not self._origin_ok(required=True):
             return self._send(403, "чужой Origin", "text/plain; charset=utf-8")
         h = self.headers
         if (h.get("Upgrade") or "").lower() != "websocket" or \
@@ -452,6 +511,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with app.tlock:
                 app.terms.pop(term.pid, None)
         app.log("%s терминал %s закрыт: %s" % (s["user"], t, why))
+
+
+def _relay(a, b, chunk=65536):
+    """Перекладывать байты a↔b, пока одна сторона не закроет (кадры WebSocket — как есть)."""
+    def pump(src, dst):
+        try:
+            while True:
+                data = src.recv(chunk)
+                if not data:
+                    break
+                dst.sendall(data)
+        except OSError:
+            pass
+        for x in (src, dst):
+            try:
+                x.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    t = threading.Thread(target=pump, args=(b, a), daemon=True)
+    t.start()
+    pump(a, b)
+    t.join(timeout=5)
 
 
 class Server(http.server.ThreadingHTTPServer):
