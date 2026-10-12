@@ -804,18 +804,21 @@
 
     function renderRows() {
       if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + statusErr})); cnt.textContent = ""; return; }
-      const c = {ok: 0, warn: 0, broken: 0};
-      for (const r of rows) if (c[r.state] != null) c[r.state] += 1;
-      cnt.textContent = "работают " + c.ok + " · апстрим " + c.warn + " · сломаны " + c.broken + " · всего " + rows.length;
+      const c = {ok: 0, warn: 0, broken: 0, server: 0};
+      for (const r of rows) if (r.state === "warn" && r.side === "server") c.server += 1; else if (c[r.state] != null) c[r.state] += 1;
+      cnt.textContent = "работают " + c.ok + " · апстрим " + c.warn + (c.server ? " · ждут сервер " + c.server : "")
+        + " · сломаны " + c.broken + " · всего " + rows.length;
       const shown = onlyBad.checked ? rows.filter((r) => r.state !== "ok") : rows;
       if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", text: "модемов нет — таблица пуста или не задана"})); return; }
       const head = el("tr", {}, ["n", "real", "прокси", "состояние", "внешний IP", "проблемы", ""].map((t) => el("th", {text: t})));
       const body = shown.map((r) => {
-        const [cls, txt] = ROW_STATE[r.state] || ["", r.state || "—"];
+        const [cls, txt] = r.state === "warn" && r.side === "server" ? ["warn", "сервер"]
+          : ROW_STATE[r.state] || ["", r.state || "—"];
         return el("tr", {},
           el("td", {class: "num", text: String(r.n)}), el("td", {class: "num", text: r.real == null ? "—" : String(r.real)}),
           el("td", {class: "mono", text: maskProxy(r.proxy)}),
-          el("td", {}, el("span", {class: "pill", title: r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : ""},
+          el("td", {}, el("span", {class: "pill", title: (r.side === "server" ? "беда на стороне сервера, не у прокси: сервер (mp.space) "
+              + "ещё не взял модем — адрес, правило маршрутизации, USB. " : "") + (r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : "")},
             el("span", {class: "dot " + cls}), txt)),
           el("td", {class: "mono", text: r.ext_ip || "—"}),
           r.note && !(r.problems || []).length ? el("td", {class: "muted note", text: r.note, title: r.note})

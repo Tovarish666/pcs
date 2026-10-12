@@ -50,8 +50,11 @@ def _modems(sid, mode, ns, bad=()):
                "since": t - 3600 * (1 + (n * 17) % 90),
                "_login": "modem%d" % real, "_pw": _pw("%s-%s" % (sid, n), 8), "_enabled": True}
         if n in bad:
-            row.update(state="warn", problems=["proxy-down: прокси 188.134.95.184:%d не отвечает" % port],
+            row.update(state="warn", side="upstream", problems=["proxy-down: прокси 188.134.95.184:%d не отвечает" % port],
                        ext_ip=None, since=t - 420)
+        elif i == 3 and mode == "usb" and len(ns) > 10:     # сервер ещё не взял модем — своя сторона, не апстрим
+            row.update(state="warn", side="server", problems=["у eth%d нет 192.168.%d.100" % (i + 1, n)],
+                       ext_ip=None, since=t - 90)
         elif i == 2 and mode == "usb":     # настоящий модем переподключается — ещё не апстрим
             row["note"] = ("у настоящего модема нет связи: модем: связь 33, SIM ок, сеть 19, сигнал 5 — 3 мин; "
                            "апстримом станет через 27 мин (при смене IP это норма)")
