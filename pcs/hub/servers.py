@@ -40,9 +40,7 @@ def overview(s, timeout=20, wan=False, pve_row=None):
                 name_pve = pve.vm_name(s["id"])
             except (OSError, Fail):
                 name_pve = None
-        if name_pve and name_pve != s.get("name") and name_pve != "vm%s" % s["id"]:
-            s["name"] = name_pve
-            store.save(s)
+        sync_name(s, name_pve)
     else:
         vm = "running"
     d = {"id": s["id"], "name": s.get("name", ""), "ip": s.get("ip", ""), "port": s.get("port") or 22,
@@ -65,6 +63,13 @@ def overview(s, timeout=20, wan=False, pve_row=None):
         s["mode"] = d["mode"]
         store.save(s)
     return d
+
+
+def sync_name(s, name_pve):
+    """Имя ВМ — то, что в Proxmox: переименовали там — запомнить."""
+    if name_pve and name_pve != s.get("name") and name_pve != "vm%s" % s["id"]:
+        s["name"] = name_pve
+        store.save(s)
 
 
 def overview_all(timeout=20):
