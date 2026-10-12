@@ -246,6 +246,21 @@ r, d = req("GET", "/login", raw=True)
 check("страница входа отдаётся", r.status == 200 and b"/static/login.js" in d)
 r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass"}, {"Origin": ORIGIN})
 check("вход без X-CSRF — 403", r.status == 403)
+c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=20)
+c.request("POST", "/api/login", body=json.dumps({"user": "admin", "password": "x"}),
+          headers={"Content-Type": "application/json", "Origin": ORIGIN})
+r1 = c.getresponse()
+r1.read()
+try:
+    c.request("GET", "/login")
+    r2 = c.getresponse()
+    r2.read()
+    st2 = r2.status
+except (OSError, http.client.HTTPException):
+    st2 = "закрыто"          # клиент переподключился бы сам — тоже правильно
+c.close()
+check("отказ до чтения тела: соединение закрыто, тело не становится «следующим запросом» (не 501)",
+      r1.status == 403 and r1.getheader("Connection") == "close" and st2 != 501, (r1.status, st2))
 r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass"},
            {"Origin": "http://evil.example", "X-CSRF": "login"})
 check("вход с чужого Origin — 403", r.status == 403)
@@ -313,8 +328,8 @@ r, d = G("/api/overview")
 ov = d["data"]
 srv = {s["id"]: s for s in ov["servers"]}
 check("обзор: хост servervolga и три ВМ", ov["host"]["name"] == "servervolga" and sorted(srv) == [200, 1000, 2000], ov)
-check("1000 USB 20/20, 2000 USB 5/5, 200 шлюз 89/90",
-      (srv[1000]["mode"], srv[1000]["modems"]["ok"], srv[1000]["modems"]["total"]) == ("usb", 20, 20)
+check("1000 USB 19/20 (один ждёт сервер), 2000 USB 5/5, 200 шлюз 89/90",
+      (srv[1000]["mode"], srv[1000]["modems"]["ok"], srv[1000]["modems"]["total"]) == ("usb", 19, 20)
       and (srv[2000]["modems"]["ok"], srv[2000]["modems"]["total"]) == (5, 5)
       and (srv[200]["mode"], srv[200]["modems"]["ok"], srv[200]["modems"]["total"]) == ("gw", 89, 90))
 r, d = G("/api/servers/2000")

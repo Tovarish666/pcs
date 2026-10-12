@@ -454,6 +454,12 @@ def test_row():
         check(name, r["state"] == want and r["problems"], r)
     r = vm.to_row(dict(base, up="proxy-auth", up_info=["логин/пароль не приняты"]), p, {})
     check("причина апстрима — по-человечески", "логин" in r["problems"][0], r["problems"])
+    check("беда за прокси — side=upstream", r.get("side") == "upstream", r)
+    r = vm.to_row(dict(base, local="wait-host", local_problems=["у eth1 нет 192.168.201.100"]), p, {})
+    check("сервер не взял модем — side=server (панель: «сервер», не «апстрим»)", r.get("side") == "server", r)
+    r = vm.to_row(dict(base, local="wait-host", local_problems=["x"], up="proxy-down", up_info=["y"]), p, {"up_since": 1}, now=10 ** 10)
+    check("и сервер, и прокси — главная беда своя: side=server", r.get("side") == "server" and len(r["problems"]) == 2, r)
+    check("у исправного side нет", "side" not in vm.to_row(base, p, {}), "")
     now = 1760000000
     r = vm.to_row(dict(base, up="no-data", up_info=["модем: связь 33, SIM ок"]), p, {"up_since": now - 120}, now=now)
     check("нет связи у настоящего модема 2 мин (реконнект) — «работает», заметка серым, не проблема",

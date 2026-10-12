@@ -966,6 +966,8 @@ def to_row(r, p, h, off=False, grace=1800, now=None):
            "ext_ip": r["ip"] or None, "since": int(h.get("since") or now)}
     if note:
         row["note"] = note
+    if state == "warn":                 # чья беда: своя сторона сервера (адрес, правило) или за прокси
+        row["side"] = "server" if r["local"] == "wait-host" else "upstream"
     return row
 
 

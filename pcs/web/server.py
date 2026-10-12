@@ -96,6 +96,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def app(self):
         return self.server.app
 
+    def parse_request(self):
+        self._body_done = False
+        return super().parse_request()
+
     # ── ответы ──────────────────────────────────────────────────────────────
 
     def _send(self, code, body=b"", ctype="application/json", headers=()):
@@ -104,6 +108,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        if not getattr(self, "_body_done", True) and (self.headers.get("Content-Length") or "0").strip() not in ("", "0"):
+            # Отказ до чтения тела (403, 413): тело осталось в сокете и стало бы «следующим запросом» (501).
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -171,6 +179,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if n > MAX_BODY:
             raise Bad("слишком большой запрос", 413)
         raw = self.rfile.read(n) if n else b""
+        self._body_done = True
         if not raw:
             return {}
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
