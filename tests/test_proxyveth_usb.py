@@ -12,6 +12,7 @@
 """
 import asyncio
 import json
+import time
 import os
 import socket
 import sys
@@ -261,7 +262,7 @@ def test_notify():
     sent = []
     undo = patch(vm, server_ip=lambda: "10.0.0.7", notify=lambda cfg, text: sent.append(text))
     try:
-        cfg = vm.DEFAULTS
+        cfg = dict(vm.DEFAULTS, up_grace=0)        # сначала — без выдержки: правило «двух проверок»
         ok_row = {"n": 201, "real": 81, "local": "ok", "local_problems": [], "up": "ok", "up_info": [], "ip": "1.2.3.4", "t": 1}
         bad_row = dict(ok_row, up="no-internet", up_info=["нет ответа"], ip="")
         vm.remember([ok_row], cfg)
@@ -277,6 +278,22 @@ def test_notify():
         vm.remember([bad_row], cfg)
         vm.remember([ok_row], cfg)
         check("мигнул и вернулся — тишина", len(sent) == 2, sent)
+        print("выдержка апстрима (up_grace):")
+        cfg = dict(vm.DEFAULTS, up_grace=1800)
+        sent.clear()
+        vm.remember([ok_row], cfg)
+        for _ in range(5):
+            vm.remember([bad_row], cfg)
+        check("беда за прокси меньше 30 мин (переподключение) — тишина, сколько бы проверок ни было", sent == [], sent)
+        hp = vm.jload(vm.health_path(), {})
+        hp["201"]["up_since"] = int(time.time()) - 1900
+        vm.jsave(vm.health_path(), hp)
+        vm.remember([bad_row], cfg)
+        check("держится дольше 30 мин — теперь оповещение", len(sent) == 1 and "нет интернета" in sent[0], sent)
+        auth_row = dict(ok_row, n=202, up="proxy-auth", up_info=["логин/пароль не приняты"], ip="")
+        vm.remember([ok_row, auth_row], cfg)
+        vm.remember([ok_row, auth_row], cfg)
+        check("неверный логин прокси — без выдержки (от ожидания не пройдёт)", any("модем 202" in t for t in sent), sent)
     finally:
         undo()
 
@@ -437,6 +454,14 @@ def test_row():
         check(name, r["state"] == want and r["problems"], r)
     r = vm.to_row(dict(base, up="proxy-auth", up_info=["логин/пароль не приняты"]), p, {})
     check("причина апстрима — по-человечески", "логин" in r["problems"][0], r["problems"])
+    now = 1760000000
+    r = vm.to_row(dict(base, up="no-data", up_info=["модем: связь 33, SIM ок"]), p, {"up_since": now - 120}, now=now)
+    check("нет связи у настоящего модема 2 мин (реконнект) — «работает», заметка серым, не проблема",
+          r["state"] == "ok" and not r["problems"] and "2 мин" in r["note"] and "28 мин" in r["note"], r)
+    r = vm.to_row(dict(base, up="no-data", up_info=["модем: связь 33, SIM ок"]), p, {"up_since": now - 1900}, now=now)
+    check("держится 31 мин — апстрим, и сколько уже", r["state"] == "warn" and "31 мин" in r["problems"][0], r)
+    r = vm.to_row(dict(base, up="no-data", up_info=["x"]), p, {"up_since": now - 60}, grace=0, now=now)
+    check("up_grace=0 — сразу апстрим (как раньше)", r["state"] == "warn", r)
 
     print("status — все модемы, и выключенные, и отбракованные:")
     rows_in = [dict(base), dict(base, n=202, real=82, local="absent", local_problems=["модема нет"], iface="", ip="")]

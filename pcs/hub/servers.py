@@ -29,10 +29,20 @@ EMPTY = {"ok": 0, "warn": 0, "broken": 0, "total": 0}
 
 
 # ── сводка ─────────────────────────────────────────────────────────────────
-def overview(s, timeout=20, wan=False):
+def overview(s, timeout=20, wan=False, pve_row=None):
     """Одна ВМ для дерева панели, меню и pcs status.
-    state: running | stopped | paused | absent (нет в Proxmox) | offline (нет SSH) | old (нет pcs-node)."""
-    vm = pve.qm_status(s["id"]) if pve.is_pve() else "running"
+    state: running | stopped | paused | absent (нет в Proxmox) | offline (нет SSH) | old (нет pcs-node).
+    pve_row — (имя, состояние) из qm list: имя ВМ — то, что в Proxmox (переименовали там — тут тоже)."""
+    if pve.is_pve():
+        name_pve, vm = pve_row if pve_row else (None, pve.qm_status(s["id"]))
+        if pve_row is None and vm != "absent":
+            try:
+                name_pve = pve.vm_name(s["id"])
+            except (OSError, Fail):
+                name_pve = None
+        sync_name(s, name_pve)
+    else:
+        vm = "running"
     d = {"id": s["id"], "name": s.get("name", ""), "ip": s.get("ip", ""), "port": s.get("port") or 22,
          "state": vm if vm in ("stopped", "paused", "absent") else "running", "mode": s.get("mode"),
          "modems": dict(EMPTY), "mpspace": None, "version": None, "error": None, "color": s.get("color")}
@@ -55,12 +65,23 @@ def overview(s, timeout=20, wan=False):
     return d
 
 
+def sync_name(s, name_pve):
+    """Имя ВМ — то, что в Proxmox: переименовали там — запомнить."""
+    if name_pve and name_pve != s.get("name") and name_pve != "vm%s" % s["id"]:
+        s["name"] = name_pve
+        store.save(s)
+
+
 def overview_all(timeout=20):
     srv = store.all_servers()
     if not srv:
         return []
+    try:
+        ql = pve.qm_list() if pve.is_pve() else {}
+    except (OSError, Fail):
+        ql = {}
     with ThreadPoolExecutor(max_workers=min(8, len(srv))) as ex:
-        return list(ex.map(lambda s: overview(s, timeout), srv))
+        return list(ex.map(lambda s: overview(s, timeout, pve_row=ql.get(str(s["id"]), (None, "absent")) if ql else None), srv))
 
 
 def host_ip():

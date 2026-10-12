@@ -818,10 +818,19 @@
           el("td", {}, el("span", {class: "pill", title: r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : ""},
             el("span", {class: "dot " + cls}), txt)),
           el("td", {class: "mono", text: r.ext_ip || "—"}),
-          el("td", {class: "problems", text: (r.problems || []).join("; ")}),
-          el("td", {}, btn("диагн.", () => diag(r.n), "icon", "proxyveth diag " + r.n)));
+          r.note && !(r.problems || []).length ? el("td", {class: "muted note", text: r.note, title: r.note})
+            : el("td", {class: "problems", text: (r.problems || []).join("; ")}),
+          el("td", {class: "acts-cell"}, btn("диагн.", () => diag(r.n), "icon", "proxyveth diag " + r.n),
+            btn("пересоздать", (e) => recreate(e.target, r.n), "icon", "снять интерфейс модема " + r.n + " и поднять заново (proxyveth restart " + r.n + ")")));
       });
       tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), el("tbody", {}, body)));
+    }
+
+    async function recreate(button, n) {
+      if (!window.confirm("Пересоздать модем " + n + " (" + tname(id) + ")? Интерфейс снимется и поднимется заново — около минуты без связи.")) return;
+      const r = await act(button, res, () => X.run(id, "proxyveth", ["restart", String(n)]), "модем " + n + " пересоздан");
+      if (r && !r.ok) showText("Модем " + n + " не пересоздан", "Ошибка: " + r.error);
+      load(false);
     }
 
     async function diag(n) {

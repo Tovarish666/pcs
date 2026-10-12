@@ -72,6 +72,9 @@ DEFAULTS = {
     "strategy": "window:5",        # сколько модемов «в пути» одновременно: у mp.space 5 слотов
     "host_timeout": 90,
     "diag_interval": 300,          # как часто перепроверять исправные модемы на прокси
+    # Беда за прокси (настоящий модем, SIM, интернет) — «апстрим», только если держится столько
+    # секунд: настоящий модем при смене IP минуту-другую без связи, и это норма (30 мин = 6 проверок)
+    "up_grace": 1800,
     "max_fail": 3,
     "hostside": "auto",            # auto | on | off — свой DHCP и маршруты на стороне сервера
     # Как модем выглядит для сервера. Значения — как у E3372h в режиме HiLink.
@@ -861,12 +864,18 @@ def remember(rows, cfg, announce=True):
         v = verdict(r)
         streak = old.get("streak", 0) + 1 if v == old.get("verdict") else 1
         told = old.get("told", "ok")
-        if v != told and (v == "ok" or streak >= 2):
-            changes.append((r["n"], v, reason(r) if v != "ok" else "снова в порядке" + (" (IP %s)" % r["ip"] if r["ip"] else "")))
-            told = v
+        upstream_only = r["local"] == "ok" and r["up"] in TRANSIENT
+        if upstream_only and time.time() - (up_since(r, old) or time.time()) < cfg.get("up_grace", 1800):
+            v_tell = told                    # беда за прокси ещё не выдержала срок — не тревожить
+        else:
+            v_tell = v
+        if v_tell != told and (v_tell == "ok" or streak >= 2):
+            changes.append((r["n"], v_tell, reason(r) if v_tell != "ok" else "снова в порядке" + (" (IP %s)" % r["ip"] if r["ip"] else "")))
+            told = v_tell
         hp[key] = {"verdict": v, "streak": streak, "told": told,
                    "since": old.get("since", time.time()) if old.get("verdict") == v else time.time(),
-                   "up": r["up"], "up_info": r["up_info"], "ip": r["ip"] or old.get("ip", ""), "t": r["t"] or old.get("t", 0)}
+                   "up": r["up"], "up_info": r["up_info"], "ip": r["ip"] or old.get("ip", ""), "t": r["t"] or old.get("t", 0),
+                   "up_since": up_since(r, old)}
     for key in list(hp):
         if int(key) not in {r["n"] for r in rows}:
             del hp[key]
@@ -877,6 +886,21 @@ def remember(rows, cfg, announce=True):
             "%s модем %d: %s" % (icon[v], n, why) for n, v, why in changes)
         notify(cfg, text)
     return changes
+
+
+# Что бывает, пока настоящий модем переподключается (смена IP, перезагрузка), — ждём up_grace.
+# Неверный логин, блокировка, неоплаченная SIM от ожидания не пройдут — о них сразу.
+TRANSIENT = ("proxy-down", "proxy-error", "modem-unreachable", "sim", "no-data", "no-internet")
+
+
+def up_since(r, old):
+    """С какого времени беда за прокси без перерыва (None — апстрим в порядке)."""
+    if r["up"] in ("ok", "?", "—"):
+        return None
+    prev = old.get("up_since")
+    if prev and old.get("up") not in ("ok", "?", "—", None):
+        return prev
+    return int(time.time())
 
 
 def server_ip():
@@ -915,17 +939,34 @@ def running():
         return []
 
 
-def to_row(r, p, h, off=False):
-    """Строка состояния для панели и меню — одинаковая для usb и gw (§6)."""
+def to_row(r, p, h, off=False, grace=1800, now=None):
+    """Строка состояния для панели и меню — одинаковая для usb и gw (§6).
+    Беда за прокси (апстрим) короче grace секунд — модем «работает», а в note — что настоящий
+    модем переподключается: при смене IP это норма, тревога — только если держится дольше."""
+    now = now or time.time()
     probs = list(r["local_problems"]) if r["local"] != "ok" else []
-    if r["local"] in ("ok", "wait-host") and r["up"] != "ok":
+    state, note = state_of(r), None
+    upstream = r["local"] in ("ok", "wait-host") and r["up"] in TRANSIENT
+    if upstream:
+        since_up = h.get("up_since") or h.get("since") or now
+        mins = int((now - since_up) // 60)
+        if r["local"] == "ok" and now - since_up < grace:
+            state = "ok"
+            note = "%s — %d мин; апстримом станет через %d мин (при смене IP это норма)" % (
+                up_reason(r), mins, max(1, int((grace - (now - since_up)) // 60)))
+        else:
+            probs.append("%s (уже %d мин)" % (up_reason(r), mins) if mins >= 1 else up_reason(r))
+    elif r["local"] in ("ok", "wait-host") and r["up"] != "ok":
         probs.append(up_reason(r))
     if off:
         probs.append("выключен в таблице — снимется при следующем sync")
-    return {"n": r["n"], "real": p["real"] if p else r.get("real"),
-            "proxy": "%s:%d" % (p["host"], p["port"]) if p else None,
-            "state": state_of(r), "problems": probs, "iface": r["iface"] or None,
-            "ext_ip": r["ip"] or None, "since": int(h.get("since") or time.time())}
+    row = {"n": r["n"], "real": p["real"] if p else r.get("real"),
+           "proxy": "%s:%d" % (p["host"], p["port"]) if p else None,
+           "state": state, "problems": probs, "iface": r["iface"] or None,
+           "ext_ip": r["ip"] or None, "since": int(h.get("since") or now)}
+    if note:
+        row["note"] = note
+    return row
 
 
 def blank_row(n, st, problem, p=None):
@@ -1467,7 +1508,8 @@ def status(wan=False):
     else:
         rows = evaluate(specs, cfg, upstream=False)
     hp = jload(health_path(), {})
-    out = [to_row(r, specs.get(r["n"]), hp.get(str(r["n"]), {}), r["n"] in disabled) for r in rows]
+    out = [to_row(r, specs.get(r["n"]), hp.get(str(r["n"]), {}), r["n"] in disabled, grace=cfg.get("up_grace", 1800))
+           for r in rows]
     seen = {r["n"] for r in rows}
     out += [blank_row(n, "disabled", "выключен в таблице") for n in sorted(disabled - seen)]
     out += [blank_row(n, "absent", "строка таблицы отбракована — proxyveth lint") for n in sorted(invalid - seen)]

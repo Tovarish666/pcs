@@ -526,7 +526,8 @@ def print_rows(rows):
     for r in rows:
         say("  %-4d %-5s %-22s %-2s %-9s %-16s %s" % (
             r["n"], r["real"] or "—", r["proxy"] or "—", ICON.get(r["state"], "?"), r["iface"] or "—",
-            r["ext_ip"] or "—", "в порядке" if r["state"] == "ok" else "; ".join(r["problems"]) or r["state"]))
+            r["ext_ip"] or "—", ("в порядке" + ("  · " + r["note"] if r.get("note") else "")) if r["state"] == "ok"
+            else "; ".join(r["problems"]) or r["state"]))
     c = {s: sum(1 for r in rows if r["state"] == s) for s in ICON}
     say("\n  модемов %d: в порядке %d, с предупреждением %d, сломано %d, нет %d, выключено %d%s" % (
         len(rows), c["ok"], c["warn"], c["broken"], c["absent"], c["disabled"],

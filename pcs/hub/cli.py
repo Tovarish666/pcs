@@ -264,6 +264,8 @@ def print_rows(rows):
 def c_server_list(a):
     known = store.all_servers()
     vms = pve.qm_list() if pve.is_pve() else {}
+    for s in known:
+        servers.sync_name(s, (vms.get(str(s["id"])) or (None, None))[0])
     rows = [{"id": s["id"], "name": s.get("name"), "ip": s.get("ip"), "mode": s.get("mode"),
              "vm": (vms.get(str(s["id"])) or (None, "absent"))[1] if vms or pve.is_pve() else None} for s in known]
     other = [{"id": int(k), "name": v[0], "vm": v[1]} for k, v in sorted(vms.items(), key=lambda x: int(x[0]))
