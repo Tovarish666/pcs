@@ -105,9 +105,10 @@ class Panel:
         self.routes = [
             ("GET", r"/api/overview", self.overview),
             ("GET", r"/api/servers/(\d+)", self.server),
-            ("GET", r"/api/servers/(\d+)/proxyveth", self.proxyveth),
-            ("GET", r"/api/servers/(\d+)/proxyveth/table", self.pv_table),
-            ("POST", r"/api/servers/(\d+)/proxyveth/table", self.pv_table_save),
+            ("GET", r"/api/targets/(host|\d+)", self.target_info),
+            ("GET", r"/api/targets/(host|\d+)/proxyveth", self.proxyveth),              # и на ВМ, и на хосте
+            ("GET", r"/api/targets/(host|\d+)/proxyveth/table", self.pv_table),
+            ("POST", r"/api/targets/(host|\d+)/proxyveth/table", self.pv_table_save),
             ("GET", r"/api/targets/(host|\d+)/modlink", self.modlink),        # modlink — и на ВМ, и на хосте
             ("POST", r"/api/targets/(host|\d+)/modlink/save", self.ml_save),
             ("POST", r"/api/targets/(host|\d+)/modlink/reveal", self.ml_reveal),
@@ -122,6 +123,13 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/mpspace", self.mpspace),
             ("POST", r"/api/targets/(host|\d+)/update", self.update),
             ("GET", r"/api/jobs", self.jobs),
+            ("GET", r"/api/self", self.self_info),
+            ("GET", r"/api/nodes", self.nodes),
+            ("POST", r"/api/nodes/join", self.node_join),
+            ("POST", r"/api/nodes/([a-z0-9-]{1,40})/remove", self.node_remove),
+            ("POST", r"/api/nodes/([a-z0-9-]{1,40})/login", self.node_login),
+            ("GET", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_get),
+            ("POST", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_post),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
@@ -202,10 +210,17 @@ class Panel:
     def server(self, sid, query, body):
         return ok(self.api.server(int(sid)))
 
+    def target_info(self, t, query, body):
+        fn = getattr(self.api, "target_info", None)
+        t = target(t)
+        if fn:
+            return ok(fn(t))
+        return ok(self.api.host_info() if t == "host" else self.api.server(t))
+
     # ── proxyveth ───────────────────────────────────────────────────────────
 
     def proxyveth(self, sid, query, body):
-        sid = int(sid)
+        sid = target(sid)
         st = ["status"] + (["--wan"] if query.get("wan") in ("1", "true") else [])
         jobs = {"status": (self._run, sid, "proxyveth", st)}
         if query.get("only") != "status":
@@ -213,7 +228,7 @@ class Panel:
         return ok(self._parallel(**jobs))
 
     def pv_table(self, sid, query, body):
-        e = self._run(int(sid), "proxyveth", ["table", "show"])
+        e = self._run(target(sid), "proxyveth", ["table", "show"])
         if not e["ok"]:
             return e
         d = e["data"]
@@ -229,7 +244,7 @@ class Panel:
                    if isinstance(d, dict) else {}})
 
     def pv_table_save(self, sid, query, body):
-        sid = int(sid)
+        sid = target(sid)
         text = body.get("csv")
         if not isinstance(text, str) or len(text) > 2000000 or "\0" in text:
             raise Bad("таблица: нужен текст CSV")
@@ -459,6 +474,55 @@ class Panel:
 
     def job(self, jid, query, body):
         return ok(self.api.job(jid))
+
+    # ── присоединённые хосты ────────────────────────────────────────────────
+
+    def self_info(self, query, body):
+        fn = getattr(self.api, "self_fingerprint", None)
+        return ok({"fingerprint": fn() if fn else ""})
+
+    def nodes(self, query, body):
+        fn = getattr(self.api, "nodes_overview", None)
+        if fn is None:
+            return ok([])
+        return ok(self._cached("nodes", fn))
+
+    def node_join(self, query, body):
+        addr = _s(body.get("addr"), "адрес", 300, empty=False).strip()
+        user = _s(body.get("user"), "логин", 200, empty=False).strip()
+        pw = _s(body.get("password"), "пароль", 1000, empty=False)
+        name = _s(body.get("name"), "имя", 40).strip() or None
+        fp = _s(body.get("fingerprint"), "отпечаток", 200).strip() or None
+        r = self.api.node_join(addr, user, pw, name=name, fingerprint=fp)
+        self.forget()
+        return ok(r)
+
+    def node_remove(self, name, query, body):
+        if str(body.get("confirm", "")).strip() != name:
+            raise Bad("подтвердите отсоединение именем хоста (%s)" % name, 403)
+        r = self.api.node_remove(name)
+        self.forget()
+        return ok(r)
+
+    def node_login(self, name, query, body):
+        return ok(self.api.node_login(name))
+
+    def _node(self, method, name, rest, query, body):
+        """/api/nodes/<имя>/<путь> → /api/v1/<путь> того хоста (тот же конверт)."""
+        if rest.startswith(("nodes", "self", "login", "v1/")) or ".." in rest:
+            raise Bad("этот адрес через хаб не ходит")
+        q = "&".join("%s=%s" % (k, v) for k, v in (query or {}).items() if re.fullmatch(r"[a-z_]{1,20}", k)
+                     and re.fullmatch(r"[A-Za-z0-9_.-]{0,40}", str(v)))
+        e = self.api.node_call(name, method, rest + ("?" + q if q else ""), body if method == "POST" else None)
+        if method == "POST":
+            self.forget()
+        return e
+
+    def node_get(self, name, rest, query, body):
+        return self._node("GET", name, rest, query, body)
+
+    def node_post(self, name, rest, query, body):
+        return self._node("POST", name, rest, query, body)
 
     def jobs(self, query, body):
         fn = getattr(self.api, "jobs_recent", None)

@@ -10,7 +10,7 @@
 | **modlink** | из любого интерфейса — прокси (HTTP и SOCKS5 с логином), смена IP по ссылке и таймеру; у каждой строки галочка «защита» (ЛК операторов, опасные порты, веб модема); на хост ставится сам |
 | **hivelink** | драйвер настоящих модемов Huawei/Vodafone; на хост ставится сам |
 
-## Установка (хост Proxmox VE)
+## Установка — хост Proxmox VE или Ubuntu 24.04+ (VPS)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
@@ -20,6 +20,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
 спросит установщик), а на хосте — hivelink и modlink: настоящие модемы, воткнутые в хост,
 становятся прокси (`pcs modlink from-ifaces --add --host && pcs modlink apply --host`), а
 из них — виртуальные модемы в ВМ этого же хоста (`modlink export --table`, docs/PCS.md §9.6).
+
+На **Ubuntu (VPS)** тот же скрипт ставит модемы прямо на машину: спросит режим proxyveth
+(`usb` — для mobileproxy.space) и нужен ли mp.space; ВМ там не создаются. Чтобы управлять
+VPS с хоста Proxmox — там «+ Присоединить хост» (адрес, логин и пароль панели VPS) или
+`pcs node add IP` ([docs/PCS.md §19](docs/PCS.md)).
 
 ## Первый сервер
 

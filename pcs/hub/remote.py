@@ -21,7 +21,7 @@ from . import store, ui
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 RUN = os.environ.get("PCS_RUN", "/run/pcs")
 PARTS = ("proxyveth", "modlink", "hivelink")
-HOST_PARTS = ("hivelink", "modlink")       # на самом хосте: настоящие модемы → интерфейсы → прокси
+HOST_PARTS = ("hivelink", "modlink", "proxyveth")   # и на самом хосте: Proxmox или Ubuntu (VPS)
 SERVER_BIN = ("proxyveth", "modlink", "hivelink", "pcs-node")
 SKIP = {".git", "tests", "__pycache__", ".source", ".DS_Store", ".idea", ".vscode"}
 

@@ -90,6 +90,7 @@ main#main { overflow: auto; padding: 20px 26px 40px; min-width: 0; }
 .tree-vm.active { background: hsl(var(--h, 210) var(--plaque-s) var(--plaque-l)); font-weight: 600; }
 .tree-host { border-left: 4px solid transparent; }
 .tree-host.active { background: var(--panel2); border-left-color: var(--accent); }
+.tree-sec { margin: 14px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .tree-add { display: block; margin: 12px 14px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 6px; text-align: center; }
 
 .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; align-self: center; }

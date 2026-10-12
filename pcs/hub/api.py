@@ -10,6 +10,8 @@
   servers()[i]["mpspace"] None (не спрашивали) или {"installed", "ok", "units": {юнит: состояние}, "port", "auth"}
   target                 номер сервера (int или str) или "host"
 """
+import os
+
 from .. import VERSION
 from ..core.util import Fail
 from . import jobs, node, ops, remote, servers as srv, store
@@ -38,6 +40,11 @@ def host_info():
 def servers():
     """[{"id", "name", "ip", "state", "mode", "modems": {"ok","warn","broken","total"}, "mpspace", "version", "error"}]."""
     return [{k: v for k, v in d.items() if k != "info"} for d in srv.overview_all()]
+
+
+def target_info(target):
+    """Сводка цели: сам хост (host_info) или сервер (server)."""
+    return host_info() if _target(target) == store.HOST else server(target)
 
 
 def server(id):
@@ -117,7 +124,25 @@ def set_key(target, pubkey=None, rotate=False):
 
 
 def mpspace(target, action, **kw):
-    """install → job_id (kw: auth, proxy, no_reboot); auth → dict (kw: auth); check → dict."""
+    """install → job_id (kw: auth, proxy, no_reboot); auth → dict (kw: auth); check → dict.
+    target "host" — сам хост, только Ubuntu (VPS): на Proxmox mp.space положил бы все ВМ."""
+    if _target(target) == store.HOST:
+        ok_, why = srv.mpspace_allowed()
+        if action == "check":
+            return node.mpspace_info()
+        if not ok_:
+            raise Fail(why)
+        if action == "install":
+            if jobs.busy("mpspace_host", "host"):
+                raise Fail("mp.space на этот хост уже ставится")
+            return jobs.start("mpspace_host", {"auth": kw.get("auth") or "", "proxy": kw.get("proxy") or "",
+                                               "no_reboot": bool(kw.get("no_reboot"))},
+                              title="mp.space на этот хост", target="host")
+        if action == "auth":
+            if not kw.get("auth"):
+                raise Fail("нужен auth.mp из ЛК: {\"auth\": \"…\", \"port\": …}")
+            return node.mp_auth(str(kw["auth"]).strip())
+        raise Fail("действие mp.space — install, auth или check")
     s = _server(target)
     if action == "install":
         if jobs.busy("mpspace", s["id"]):
@@ -179,6 +204,48 @@ def run_job(id, part, args, input=None):
                       target=key)
 
 
+# ── присоединённые хосты (VPS и другие хосты Proxmox) ─────────────────────
+def nodes():
+    """Присоединённые хосты (без токенов)."""
+    from . import nodes as nd
+    return nd.listing()
+
+
+def nodes_overview(timeout=10):
+    """Сводка всех присоединённых хостов параллельно: [{name, host, port, kind, ok, error, host_info, servers}]."""
+    from . import nodes as nd
+    return nd.overview(timeout)
+
+
+def node_join(addr, user, password, name=None, fingerprint=None):
+    from . import nodes as nd
+    return nd.join(addr, user, password, name=name, fingerprint=fingerprint)
+
+
+def node_remove(name):
+    from . import nodes as nd
+    return nd.remove(name)
+
+
+def node_call(name, method, path, body=None, timeout=60):
+    """Запрос к API присоединённого хоста (path — как у панели без /api/). → конверт."""
+    from . import nodes as nd
+    return nd.call(name, method, path, body, timeout=timeout)
+
+
+def node_login(name):
+    """Одноразовая ссылка входа в панель присоединённого хоста (60 с)."""
+    from . import nodes as nd
+    return nd.login_url(name)
+
+
+def self_fingerprint():
+    """Отпечаток сертификата этой панели — сверить при присоединении с другого хоста."""
+    from ..web import tls
+    cert = tls.paths()[0]
+    return tls.fingerprint_file(cert) if os.path.exists(cert) else ""
+
+
 def job(job_id):
     """{"state": "running|done|failed", "log": [...], "result": ..., "error", "title", "kind", …}.
     И задания хаба, и фоновые запуски частей на хосте (pcs/core/bg)."""
@@ -217,12 +284,12 @@ def _job_part(p):
 
 
 def _job_host_setup(p):
-    d = srv.host_setup()
+    d = srv.host_setup(mode=p.get("mode"))
     if d["failed"]:
         raise Fail("не прошло: %s — см. журнал выше" % ", ".join(d["failed"]))
     return d
 
 
 KINDS = {"create_server": _job_create, "mpspace": _job_mpspace, "update": srv.update, "part": _job_part,
-         "host_setup": _job_host_setup}
+         "host_setup": _job_host_setup, "mpspace_host": srv.mpspace_host}
 summarize = node.summarize

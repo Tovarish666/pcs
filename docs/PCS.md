@@ -15,8 +15,12 @@ HTTP API, решения и грабли. Его можно отдать нов�
   **виртуальный модем**. Агрегатор mobileproxy.space (mp.space) или свой софт видит его
   как настоящий USB-модем Huawei E3372h HiLink. Обратное направление — из любого
   интерфейса сделать прокси с логином и паролем для клиента.
-- **Где живёт.** Хаб `pcs` стоит на хосте Proxmox VE (Debian) и создаёт ВМ Ubuntu 24.04
-  — «серверы». На серверах работают части:
+- **Где живёт.** PCS ставится одним `install.sh` на два вида машин — «хосты»:
+  - **хост Proxmox VE** (Debian): хаб `pcs` создаёт на нём ВМ Ubuntu 24.04 — «серверы»;
+  - **хост Ubuntu 24.04+ (VPS у хостера)**: ВМ нет, модемы и софт — прямо на нём (§5).
+
+  Хосты связываются между собой по API (§19): на хосте Proxmox «+ Присоединить хост» →
+  адрес, логин и пароль панели VPS. На серверах и хостах работают части:
   - `proxyveth` — прокси → интерфейс;
   - `modlink` — интерфейс → прокси;
   - `hivelink` — драйвер настоящих модемов (на хосте стоит всегда, в ВМ — по запросу).
@@ -24,16 +28,14 @@ HTTP API, решения и грабли. Его можно отдать нов�
   На самом хосте стоят `hivelink` и `modlink`: настоящие модемы, воткнутые в хост, сразу
   становятся прокси, а из них — виртуальные модемы в ВМ этого же хоста (§9.6).
 - **Как управлять.** Терминал (команды и меню `pcs`) и веб-панель на порту 666.
-- **Состояние на 10.10.2026.** PCS 5 — в `main` (PR #3). Сверху — PR #4 (панель при
-  повторной установке) и защита строк modlink + modlink на хосте (§9.5, §9.6).
-  - Проверено на стенде: установка на хост, создание ВМ в обоих режимах, переезд со
-    старого vmodem 4.1, трафик, DNS, modlink, hivelink, вход в панель и её API.
-  - Тесты: около 1020 проверок, все зелёные.
-- **Сейчас всё рассчитано на один хост Proxmox.** Следующий этап — **связать несколько
-  хостов через API** (см. §19). HTTP API панели уже есть (§13), но рассчитан на
-  браузер: вход по паролю, cookie, CSRF. Для связи машина-машина нужны токены (§19).
-- **Отложено по решению пользователя:** PCS прямо на VPS с Ubuntu (без Proxmox), yaspeed
-  (спидтест), оповещения в Telegram (код есть, в меню и панели нет).
+- **Состояние на 12.10.2026.** Всё в `main`; проверенное на стенде вливается сразу.
+  - Проверено на стенде: установка на хост Proxmox и на Ubuntu-VPS (ВМ 4000 как VPS),
+    создание ВМ в обоих режимах, переезд со старого vmodem 4.1, трафик, DNS, modlink
+    (защита, перенос с modlink-linux), hivelink, фоновые задания при обрыве связи,
+    присоединение VPS к хосту Proxmox и работа с ней через хаб.
+  - Тесты: около 1130 проверок, все зелёные (`bash tests/run-all.sh`).
+- **Отложено по решению пользователя:** yaspeed (спидтест), оповещения в Telegram (код
+  есть, в меню и панели нет).
 
 ---
 
@@ -160,14 +162,17 @@ tests/                      run-all.sh, singbox_check.py, test_*.py
 
 ## 5. Установка и обновление
 
-### Хост
+### Хост — Proxmox или Ubuntu (VPS)
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 ```
 
-**Требования:** root, Proxmox VE (`qm`, `pvesm`, `/etc/pve`), Python 3.11+. На не-Proxmox —
-отказ: режим VPS отложен.
+**Требования:** root, Python 3.11+ и одно из двух:
+- **Proxmox VE** (`qm`, `pvesm`, `/etc/pve`) — хост с ВМ;
+- **Ubuntu 24.04 или новее** — хост-VPS: модемы и софт прямо на нём, ВМ не создаются.
+
+Другие системы — понятный отказ.
 
 **Что делает `install.sh`:**
 1. Скачивает `PCS_REPO@PCS_BRANCH` (по умолчанию `Tovarish666/pcs@main`) или берёт
@@ -175,7 +180,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
 2. Проверяет, что код компилируется. Кладёт его в `/opt/pcs`, прежний — в `/opt/pcs.prev`
    (откат — переименовать обратно). Пишет `/opt/pcs/.source` (`PCS_REPO`, `PCS_BRANCH`):
    отсюда же берёт код `pcs update`.
-3. Ставит команды `/usr/local/bin/pcs`, `/usr/local/bin/hivelink` и `/usr/local/bin/modlink`.
+3. Ставит команды `/usr/local/bin/{pcs,proxyveth,modlink,hivelink,pcs-node}`.
 4. Спрашивает логин и пароль панели (или берёт `PCS_WEB_USER`, `PCS_WEB_PASS`), сохраняет
    хэшем и включает `pcs-web.service` на порту 666. Если вход уже задан — не спрашивает,
    но панель всё равно включает (`pcs web on`).
@@ -191,6 +196,19 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
    **`pcs update --host` выполняет `pcs host-setup` уже новым кодом.** Раньше шаги после
    обновления шли из прежней версии: так PCS без modlink на хосте обновился в PCS с ним,
    а modlink не поставил (случай megavolgadata, 10.10).
+
+**На Ubuntu (VPS) по-другому:**
+- до долгих шагов спрашивает режим proxyveth (`usb` — для mp.space, по умолчанию; `gw`)
+  и нужен ли mobileproxy.space (+ auth.mp). Без вопросов: `PCS_MODE=usb|gw`,
+  `PCS_MPSPACE=1`, `PCS_MP_AUTH='{…}'`;
+- `pcs host-setup --mode …`: proxyveth (сам ставит dnsmasq-base, udhcpc,
+  linux-modules-extra, собирает dummy_hcd через dkms), modlink; hivelink — только если уже
+  стоит (у VPS обычно нет USB-модемов; поставить: настройка хоста → hivelink);
+- mp.space (если выбран) — заданием, в конце машина перезагрузится;
+- в конце — адрес панели; если включён ufw — подсказка `ufw allow 666/tcp`.
+
+Проверено 12.10.2026 на чистой Ubuntu 24.04.5 (ВМ 4000 стенда как VPS): установка с
+`PCS_MODE=usb`, модем 41 из прокси modem8 поднялся (USB, внешний IP оператора).
 
 ### Серверы
 
@@ -222,7 +240,7 @@ pcs server create [--mode usb|gw] [--sheet URL] [--mpspace] [--id N] [--name …
                   [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
                   [--storage …] [--bridge vmbr0] [--dns "…"] [--replace] [--yes]
 pcs server adopt ID [--ip IP] | delete ID [--yes]
-pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
+pcs proxyveth …  [--server ID|--host] команда proxyveth на сервере или самом хосте (как есть)
 pcs modlink …    [--server ID|--host]
 pcs hivelink …   [--server ID|--host]
 pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
@@ -230,12 +248,15 @@ pcs passwd  [--server ID|--host]      пароль root (Enter — сгенер�
 pcs key     [--server ID|--host] [--add PUBKEY | --rotate]
 pcs ssh [ID] | pcs exec [ID] 'cmd'    консоль / команда на сервере
 pcs ssh-port PORT [--server ID]       порт SSH сервера (на 24.04 — через ssh.socket)
-pcs mpspace install|auth|check [--server ID]
+pcs mpspace install|auth|check [--server ID|--host]   на хост — только Ubuntu (VPS)
 pcs update [--host | --server ID | --all]
 pcs web on|off|status|passwd|serve    веб-панель :666
 pcs doctor [--server ID|--host] | pcs log | pcs version
 pcs job [ID] [--server ID]            фоновые задания и запуски (§7.1): список, журнал, смотреть до конца
-pcs host-setup                        хост после установки/обновления: команды, hivelink, modlink
+pcs host-setup [--mode usb|gw]        хост после установки/обновления: команды и части
+pcs node [list|add АДРЕС|remove ИМЯ|open ИМЯ]   присоединённые хосты (§19): pcs node help
+pcs node ИМЯ proxyveth|modlink|hivelink …       команда части на том хосте
+pcs token [list|revoke ID]            кто присоединил этот хост (токены хабов)
 ```
 
 - Без `--server` команда идёт на **выбранный сервер** (`pcs server use ID`; хранится в
@@ -1010,9 +1031,10 @@ curl -s -b $J -H "X-CSRF: $T" -H 'Content-Type: application/json' \
 |---|---|---|
 | `GET /api/overview` | приветственная страница | → `{host, host_error, servers: [§14 servers()], servers_error, ts}` |
 | `GET /api/servers/{id}` | один сервер | → §14 `server(id)` |
-| `GET /api/servers/{id}/proxyveth` | состояние модемов и источник | `?wan=1` — с внешними IP; `?only=status` → `{status: конверт proxyveth status, source: конверт proxyveth source}` |
-| `GET /api/servers/{id}/proxyveth/table` | локальная копия таблицы | → `{csv, meta}` |
-| `POST /api/servers/{id}/proxyveth/table` | сохранить копию (`table put`) | `{csv, make_main?}`; `make_main` — сразу `source local` → `{saved, source?}` |
+| `GET /api/targets/{id\|host}` | сводка ВМ или самого хоста | хост → `{name, kind: proxmox\|ubuntu, os, vms, proxyveth, mode, modems, mpspace, mpspace_ok, …}` |
+| `GET /api/targets/{id\|host}/proxyveth` | состояние модемов и источник (ВМ или хост) | `?wan=1` — с внешними IP; `?only=status` → `{status: конверт proxyveth status, source: конверт proxyveth source}` |
+| `GET /api/targets/{id\|host}/proxyveth/table` | локальная копия таблицы | → `{csv, meta}` |
+| `POST /api/targets/{id\|host}/proxyveth/table` | сохранить копию (`table put`) | `{csv, make_main?}`; `make_main` — сразу `source local` → `{saved, source?}` |
 | `GET /api/targets/{id\|host}/modlink` | таблица и состояние modlink (ВМ или хост) | `?only=status` → `{list: {rows (без паролей, password_set), pending}, status}` |
 | `POST /api/targets/{id\|host}/modlink/save` | правки разом и apply | `{del: [id], set: [{id, fields}], add: [{lan_ip, name?, login?, password?, port?, modem_ip?, reconnect_port?, interval_min?, enabled?, protect?}], apply?: true}` → `{steps: [{what, ok, error, data}], applied}`. Набранный пароль идёт на сервер через stdin; `protect: false` → `set ID protect=0` / `add --no-protect` |
 | `POST /api/targets/{id\|host}/modlink/reveal` | пароль одной строки | `{id}` → `{id, password}` |
@@ -1020,7 +1042,7 @@ curl -s -b $J -H "X-CSRF: $T" -H 'Content-Type: application/json' \
 | `POST /api/targets/{id\|host}/modlink/settings` | общие настройки modlink (§9.7) | `{base_port?, lan_ip?, wan_ip?}` (пустой адрес — авто) → данные `modlink settings`. `GET …/modlink` отдаёт их же в `settings` |
 | `POST /api/servers` | создать ВМ (задание) | `{name, cores=4, ram_gb=8, disk_gb=40, mode: usb\|gw, sheet?: "https://…", mpspace?: bool}` → `{job}` |
 | `POST /api/servers/{id}/delete` | удалить ВМ | `{confirm: "<id>"}`, иначе 403 → `{job}` или `{result}` |
-| `POST /api/run` | любая команда части на сервере или хосте | `{target: id\|"host", part: proxyveth\|modlink\|hivelink, args: [...], confirm?}`. С `--yes`/`--force` нужен `confirm` = номер сервера, иначе 403. На хосте — hivelink и modlink. → конверт команды; **долгая** (§7.1) → сразу `{job}`, итог — в `/api/jobs/{job}` (`result`) |
+| `POST /api/run` | любая команда части на сервере или хосте | `{target: id\|"host", part: proxyveth\|modlink\|hivelink, args: [...], confirm?}`. С `--yes`/`--force` нужен `confirm` = номер сервера (у хоста — `host`), иначе 403. На хосте — все три части. → конверт команды; **долгая** (§7.1) → сразу `{job}`, итог — в `/api/jobs/{job}` (`result`) |
 | `GET /api/jobs` | последние задания хаба и фоновые запуски хоста | → `[{id, title, state, started, finished, error, kind}]` |
 | `POST /api/targets/{id\|host}/dns` | DNS-фикс | `{dns?: "1.1.1.1 8.8.8.8"}` |
 | `POST /api/targets/{id\|host}/passwd` | пароль root | `{password}` |
@@ -1028,6 +1050,12 @@ curl -s -b $J -H "X-CSRF: $T" -H 'Content-Type: application/json' \
 | `POST /api/targets/{id\|host}/mpspace` | mp.space | `{action: install\|auth\|check, auth?}` → `{job}` или `{result}` |
 | `POST /api/targets/{id\|host}/update` | обновить код | → `{job}` или `{result}` |
 | `GET /api/jobs/{job}` | ход задания | → §14 `job()` |
+| `GET /api/self` | отпечаток своего сертификата | → `{fingerprint}` |
+| `GET /api/nodes` | присоединённые хосты со сводкой (кэш 4 с) | → `[{name, host, port, kind, fingerprint, ok, error, host_info, servers}]` |
+| `POST /api/nodes/join` | присоединить хост | `{addr, user, password, name?, fingerprint?}` → `{name, host, port, fingerprint, info}` |
+| `POST /api/nodes/{имя}/remove` | отсоединить | `{confirm: "<имя>"}`, иначе 403 → `{name, revoked}` |
+| `POST /api/nodes/{имя}/login` | одноразовая ссылка входа в его панель | → `{url, ttl: 60}` |
+| `GET\|POST /api/nodes/{имя}/{путь}` | любой адрес этой таблицы на том хосте | → его конверт (хаб ходит в `/api/v1/{путь}`, §19) |
 | `GET /api/session`, `POST /api/login`, `POST /api/logout` | вход | §13.2 |
 | `GET /ws/term?target=<id\|host>&cols=100&rows=30` | терминал | §13.5 |
 
@@ -1196,53 +1224,73 @@ Telegram в интерфейсе.
 
 ---
 
-## 19. Следующий этап: связать хосты через API
+## 19. Связь хостов (с 12.10.2026)
 
-Сейчас один хаб на одном хосте Proxmox управляет своими ВМ. Нужно связать несколько хостов
-(и потом, возможно, VPS). Ниже — что есть, чего не хватает и что надо решить.
+Хосты PCS — Proxmox (с ВМ) и Ubuntu-VPS (модемы прямо на нём) — связываются по API.
+Один хост (обычно Proxmox, где ты работаешь) — **хаб**: он видит присоединённые хосты,
+их состояние, открывает их панели и управляет ими.
 
-### Что уже есть
+### Как присоединить VPS
 
-- **Готовый слой операций** — `pcs/hub/api.py`: сводка, серверы, создание/удаление ВМ,
-  команда любой части, DNS, пароль, ключ, mp.space, обновление, задания. Всё возвращает
-  JSON-совместимые данные, ошибки — текстом.
-- **HTTP API панели** (§13) — тонкий и полный: каждая функция хаба доступна по HTTP с
-  конвертом `{ok, data|error}`.
-- **Единый `--json` у всех команд** и служебная `pcs-node` на серверах. Хаб уже работает
-  с серверами как с удалёнными узлами по SSH и разбирает их JSON.
-- **Фоновые задания** с журналом и состоянием — модель для долгих операций по сети.
+1. Арендовать VPS с Ubuntu 24.04, поставить PCS: `bash <(curl -fsSL …/install.sh)` —
+   спросит логин и пароль панели, режим proxyveth (`usb` для mp.space) и mp.space.
+2. Открыть её панель `http://IP:666`: модемы во вкладке proxyveth, mp.space — в
+   «настройке и управлении». Там же, в «Связь хостов», — **отпечаток** её сертификата.
+3. На хосте Proxmox: в дереве «+ Присоединить хост» → адрес VPS, логин и пароль её
+   панели (по желанию — отпечаток из п. 2). Или в терминале:
+   `pcs node add IP --user admin --fingerprint AB:CD:…` (пароль — вопросом или
+   `PCS_NODE_PASSWORD`).
+4. VPS появилась в дереве в разделе «Присоединённые хосты»: модемы, режим, mp.space,
+   версия PCS. Кнопки: **«Открыть панель хоста»** (вход без пароля, одноразовая ссылка
+   на 60 с), «Обновить PCS на нём», «Отсоединить».
 
-### Чего не хватает для машина-машина
+Порт один — **666**: тот же, что у панели. Открыть его на VPS (у хостера, ufw).
 
-1. **Аутентификация для программ.** Сейчас вход паролем, cookie, CSRF и Origin — это для
-   браузера. Нужны токены (Bearer) с правами (чтение / действия / опасное), отзывом и
-   журналом. Хранить хэши токенов в `/etc/pcs`.
-2. **Транспорт.** Панель — HTTP на 666, порт открывается вручную. Для связи хостов нужно
-   решить:
-   - HTTPS со своим CA и mTLS между хостами, или SSH-туннели (ключи PCS уже есть), или
-     WireGuard-сеть хостов;
-   - кто к кому ходит: центральный хаб опрашивает хосты, или хосты сами регистрируются
-     у центра.
-3. **Реестр хостов.** Сейчас `/etc/pcs/servers/*.json` — только ВМ своего хоста. Нужна
-   модель «хост → его серверы» и глобальная адресация, например `host-a/2000`.
-4. **Версионирование API.** Префикс `/api/v1/`, версия в ответе (`VERSION` уже есть в
-   `/api/session`), совместимость при разных версиях кода на хостах. `pcs update` уже
-   выравнивает версию внутри хоста, между хостами — пока нет.
-5. **Идемпотентность и долгие операции.** Создание ВМ и установка mp.space идут минутами.
-   Нужны ключ идемпотентности на POST и опрос `/jobs/{id}` (модель есть), возможно — поток событий.
-6. **Номера ВМ и модемов.** Номера ВМ уникальны только внутри своего Proxmox, номера
-   модемов N — внутри сервера. Для общего обзора нужна составная адресация.
-7. **Права на опасное.** «Подтверждение номером сервера» — правило для человека. Для API
-   нужен отдельный класс прав или явный флаг подтверждения в запросе.
+### Как устроено
 
-### С чего начать
+- **HTTPS на том же порту.** Панель различает HTTP и TLS по первому байту соединения:
+  браузер открывает `http://IP:666`, хосты между собой — `https://IP:666`. Сертификат
+  свой, создаётся при первом запуске панели: RSA 2048, 10 лет, `/etc/pcs/tls/` (ключ 600).
+  Отпечаток (SHA-256) — `pcs web status`, панель → настройка хоста → «Связь хостов».
+- **Отпечаток запоминается при присоединении** (TOFU; если его ввели — сверяется сразу).
+  Дальше хаб сверяет его **до отправки токена**: другой сертификат на том же адресе —
+  отказ «это может быть подмена».
+- **Логин и пароль нужны один раз.** `POST /api/v1/join` (только по HTTPS) проверяет их
+  как вход в панель (с той же паузой после неудач) и выдаёт **токен**; пароль нигде не
+  хранится. У хаба — `/etc/pcs/nodes/<имя>.json` (600: адрес, порт, отпечаток, токен);
+  у VPS — только SHA-256 токена в `/etc/pcs/tokens.json` (`pcs token list`, `revoke`).
+- **`/api/v1/<путь>`** с `Authorization: Bearer …` — те же адреса, что `/api/<путь>` у
+  браузера (§13.4), тот же конверт. Только по HTTPS; запрос с заголовком `Origin`
+  (страница в браузере) — отказ. Плюс: `POST /api/v1/login-link` (одноразовая ссылка
+  входа, 60 с), `POST /api/v1/leave` (отозвать свой токен — так отсоединяется хаб).
+- **Хаб проксирует**: `/api/nodes/<имя>/<путь>` → `/api/v1/<путь>` того хоста.
+  Долгие команды там — задания того хоста; хаб показывает их журнал.
+- **Терминал** (`pcs node …`):
+  - `pcs node [list]` — список и состояние;
+  - `pcs node add|remove|open`;
+  - `pcs node ИМЯ status`;
+  - `pcs node ИМЯ proxyveth|modlink|hivelink …` — команда части там. Долгая идёт заданием
+    там же, журнал печатается здесь;
+  - `pcs node ИМЯ job [ID]`.
+- Сводка присоединённых хостов опрашивается параллельно, с таймаутом. Недоступный —
+  «нет связи» с причиной, а не падение всей панели.
 
-1. Вынести из `pcs/web/panel.py` маршруты в отдельный слой `/api/v1` с двумя видами
-   входа: сессия браузера (как сейчас) и Bearer-токен.
-2. Добавить `pcs token add|list|revoke`.
-3. Сделать `pcs host add|list|remove` — реестр соседних хостов (адрес, токен, отпечаток
-   сертификата).
-4. Агрегирующая сводка: `GET /api/v1/overview?all=1` опрашивает соседей параллельно с
-   таймаутом и честно показывает недоступных.
-5. Транспорт — по выбору пользователя (см. выше); проще всего начать с SSH-туннеля на
-   уже существующих ключах PCS.
+**Проверено 12.10.2026 на стенде:**
+- ВМ 4000 (чистая Ubuntu 24.04.5) с PCS как VPS присоединена к хосту `servervolga`;
+- неверный пароль и чужой отпечаток — отказ;
+- `pcs node list` — «модемы 1/1»;
+- `pcs node vps-test proxyveth status` и `… sync` (заданием там);
+- одноразовая ссылка пускает один раз;
+- на VPS `pcs token list` — «хаб servervolga».
+- Автотесты: `tests/test_nodes.py` — настоящий TLS, присоединение, вызовы, задания,
+  подмена сертификата, чужой токен, отсоединение.
+
+### Что дальше (не сделано)
+
+- Страницы присоединённого хоста прямо в хабе (вкладки proxyveth/modlink/терминал, как у
+  своих ВМ) — сейчас это «Открыть панель хоста» в новой вкладке. API для этого уже есть
+  (`/api/nodes/<имя>/…`).
+- Управление ВМ другого хоста Proxmox из хаба (создать/удалить) — через его панель.
+- Права токенов (только чтение / действия) и журнал действий по токену.
+- Связь «хаб ← хост» (VPS за NAT сама стучится к хабу) — пока хаб ходит к хосту, порт
+  666 хоста должен быть доступен хабу.

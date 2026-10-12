@@ -291,6 +291,10 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
 - Долгие команды частей из терминала (setup, migrate, install, mode, sync…) — `pcs/core/bg.py`:
   команда перезапускает себя юнитом `pcs-bg-ID` и показывает журнал. Обрыв SSH ей не мешает
   (PCS.md §7.1).
+- **Хосты:** Proxmox (с ВМ) или Ubuntu-VPS (части прямо на нём, `pcs/hub/node.host_kind`).
+  Связь хостов — `pcs/hub/nodes.py` ↔ `/api/v1` панели: HTTPS на том же порту 666 (свой
+  сертификат, `pcs/web/tls.py`), токен Bearer (`pcs/web/tokens.py`), отпечаток запоминается
+  при присоединении и сверяется до отправки токена (PCS.md §19).
 - **API хаба для панели** — `pcs/hub/api.py` (пишет A, использует E). Все функции
   возвращают `dict`/`list`, исключения — `pcs.core.util.Fail`:
 
