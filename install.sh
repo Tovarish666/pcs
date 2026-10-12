@@ -56,10 +56,14 @@ if [[ -n "${PCS_SRC:-}" ]]; then
     from="$PCS_SRC"
 else
     command -v curl >/dev/null || die "нет curl: apt install curl"
-    curl -fsSL --retry 3 "https://codeload.github.com/${PCS_REPO}/tar.gz/refs/heads/${PCS_BRANCH}" -o "$tmp/pcs.tgz" \
+    # архив по коммиту: по имени ветки GitHub ещё минуты отдаёт прежний из кэша после вливания
+    sha="$(curl -fsS -m 20 -H 'Accept: application/vnd.github.sha' \
+        "https://api.github.com/repos/${PCS_REPO}/commits/${PCS_BRANCH}" 2>/dev/null || true)"
+    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && ref="$sha" || ref="refs/heads/${PCS_BRANCH}"
+    curl -fsSL --retry 3 "https://codeload.github.com/${PCS_REPO}/tar.gz/${ref}" -o "$tmp/pcs.tgz" \
         || die "не скачался ${PCS_REPO}@${PCS_BRANCH}"
     tar -xzf "$tmp/pcs.tgz" -C "$tmp/src" --strip-components=1
-    from="${PCS_REPO}@${PCS_BRANCH}"
+    from="${PCS_REPO}@${PCS_BRANCH}${sha:+ ${sha:0:7}}"
 fi
 [[ -f "$tmp/src/bin/pcs" && -f "$tmp/src/pcs/__init__.py" ]] || die "в ${from} нет PCS 5 (bin/pcs, pcs/)"
 python3 -m compileall -q "$tmp/src/pcs" >/dev/null || die "код из ${from} не компилируется — не ставлю"
