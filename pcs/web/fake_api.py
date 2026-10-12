@@ -52,6 +52,9 @@ def _modems(sid, mode, ns, bad=()):
         if n in bad:
             row.update(state="warn", problems=["proxy-down: прокси 188.134.95.184:%d не отвечает" % port],
                        ext_ip=None, since=t - 420)
+        elif i == 2 and mode == "usb":     # настоящий модем переподключается — ещё не апстрим
+            row["note"] = ("у настоящего модема нет связи: модем: связь 33, SIM ок, сеть 19, сигнал 5 — 3 мин; "
+                           "апстримом станет через 27 мин (при смене IP это норма)")
         rows.append(row)
     return rows
 

@@ -90,6 +90,7 @@ main#main { overflow: auto; padding: 20px 26px 40px; min-width: 0; }
 .tree-vm.active { background: hsl(var(--h, 210) var(--plaque-s) var(--plaque-l)); font-weight: 600; }
 .tree-host { border-left: 4px solid transparent; }
 .tree-host.active { background: var(--panel2); border-left-color: var(--accent); }
+td.note { font-size: 12px; }
 .colors { display: inline-flex; gap: 6px; align-items: center; }
 .colors .sw { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent;
   background: hsl(var(--h) 70% 52%); cursor: pointer; }

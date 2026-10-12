@@ -123,9 +123,17 @@ remote.call = net.call
 VM = {"1000": "running", "2000": "running", "200": "stopped", "20000": "running"}
 pve.is_pve = lambda: True
 pve.qm_status = lambda vmid: VM.get(str(vmid), "absent")
+NAMES = {"1000": "server1", "2000": "pcs2000", "200": "LTEspace", "20000": "LTEspace"}
+pve.qm_list = lambda: {k: (NAMES.get(k, "vm" + k), v) for k, v in VM.items() if v != "absent"}
+pve.vm_name = lambda vmid: NAMES.get(str(vmid), "vm%s" % vmid)
 servers.host_ip = lambda: "88.87.69.240"
 
 print("API: серверы:")
+NAMES["2000"] = "MskAn3"
+lst = api.servers()
+check("имя ВМ — из Proxmox: переименовали там — PCS подхватил и запомнил",
+      [d["name"] for d in lst if d["id"] == 2000] == ["MskAn3"] and store.load(2000)["name"] == "MskAn3", lst)
+NAMES["2000"] = "pcs2000"
 lst = api.servers()
 by = {d["id"]: d for d in lst}
 check("все серверы, порядок по номерам", [d["id"] for d in lst] == [200, 1000, 2000, 20000])
