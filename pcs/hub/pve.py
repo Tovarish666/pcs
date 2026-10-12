@@ -31,7 +31,8 @@ def need_pve():
     if os.geteuid() != 0:
         raise Fail("нужен root")
     if not is_pve():
-        raise Fail("qm не найден — pcs работает на хосте Proxmox VE")
+        raise Fail("это хост без Proxmox (VPS): ВМ здесь не создаются — модемы и софт прямо на нём; "
+                   "ВМ создаёт хост Proxmox")
 
 
 def qm_status(vmid):

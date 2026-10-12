@@ -19,6 +19,7 @@ from pcs.core.util import Fail
 DELAY = 0.15          # «сеть»: пауза на каждый вызов
 STEP = 0.7            # пауза между строками журнала заданий
 HOST = "servervolga"
+KIND = os.environ.get("PCS_WEB_FAKE_KIND", "proxmox")     # ubuntu — хост-VPS: без ВМ, модемы на нём
 
 _lock = threading.RLock()
 _jobs = {}
@@ -92,24 +93,31 @@ def reset():
     with _lock:
         _jobs.clear()
         S.clear()
-        S[1000] = _server(1000, "server1", "192.168.88.5", "usb", list(range(201, 221)), ml=6,
-                          cores=8, ram_gb=16, disk_gb=80)
-        S[2000] = _server(2000, "pcs2000", "192.168.88.7", "usb", list(range(201, 206)), ml=5)
-        S[200] = _server(200, "LTEspace", "192.168.88.20", "gw",
-                         [n for n in range(11, 102) if n != 88], bad=(57,), ml=3, cores=16, ram_gb=32,
-                         disk_gb=120)
+        if KIND == "proxmox":
+            S[1000] = _server(1000, "server1", "192.168.88.5", "usb", list(range(201, 221)), ml=6,
+                              cores=8, ram_gb=16, disk_gb=80)
+            S[2000] = _server(2000, "pcs2000", "192.168.88.7", "usb", list(range(201, 206)), ml=5)
+            S[200] = _server(200, "LTEspace", "192.168.88.20", "gw",
+                             [n for n in range(11, 102) if n != 88], bad=(57,), ml=3, cores=16, ram_gb=32,
+                             disk_gb=120)
         H.clear()
-        H.update({"name": HOST, "kind": "proxmox", "version": VERSION, "pve": "9.1",
+        H.update({"name": HOST if KIND == "proxmox" else "vps-msk1", "kind": KIND, "version": VERSION,
+                  "os": "Proxmox VE 9.1 (Debian 13)" if KIND == "proxmox" else "Ubuntu 24.04.1 LTS",
+                  "vms": KIND == "proxmox", "mpspace_ok": KIND != "proxmox", "pve": "9.1",
                   "cpu": {"cores": 32, "load": 2.4},
                   "ram": {"total_gb": 128, "used_gb": 71.3},
                   "disk": {"total_gb": 1863, "used_gb": 412},
                   "hivelink": {"installed": True, "version": VERSION, "modems": 3, "ok": 3},
                   "modlink": {"installed": True, "state": {"modlink": "active", "modlink-sb": "active"}}})
         HML.clear()
-        HML.update({"id": "host", "ip": "88.87.69.240", "modlink": [], "ml_log": {}, "ml_pending": False,
-                    "ml_applied": {}, "modems": [{"n": n, "iface": "enx0c5b8f279a6%d" % n} for n in (1, 2, 3)]})
-        HML["modlink"] = _modlink("host", [1, 2], 2)
-        HML["legacy"] = True        # как на живом хосте со старым modlink-linux
+        if KIND == "proxmox":       # хост Proxmox: proxyveth не задан, modlink — по настоящим модемам
+            HML.update(_server("host", HOST, "88.87.69.240", None, []))
+            HML["modlink"] = _modlink("host", [1, 2], 2)
+            HML["legacy"] = True    # как на живом хосте со старым modlink-linux
+            HML["mpspace"] = None
+        else:                       # VPS: виртуальные модемы прямо на нём
+            HML.update(_server("host", "vps-msk1", "95.165.83.236", "usb", list(range(41, 49)), bad=(44,), ml=4))
+            HML["mpspace"] = None
         HML["ml_applied"] = {r["id"]: dict(r) for r in HML["modlink"]}
 
 
@@ -156,7 +164,14 @@ def _row(m):
 def host_info():
     _pause()
     with _lock:
-        return copy.deepcopy(H)
+        h = copy.deepcopy(H)
+        h.update(mode=HML.get("mode"), modems=_summary(HML), mpspace=HML.get("mpspace"),
+                 proxyveth={"installed": True, "mode": HML.get("mode"), "modems": _summary(HML)})
+        return h
+
+
+def target_info(t):
+    return host_info() if t in ("host", None) else server(t)
 
 
 def servers():
@@ -287,7 +302,10 @@ def set_key(target, pubkey=None, rotate=False):
 
 def mpspace(target, action, **kw):
     _pause()
-    srv = _srv(target)
+    if target in ("host", None) and KIND == "proxmox" and action != "check":
+        raise Fail("на хосте Proxmox mp.space не ставится: он меняет GRUB и ядро и перезагружает машину — "
+                   "легли бы все ВМ; ставь в ВМ")
+    srv = HML if target in ("host", None) else _srv(target)
     if action == "check":
         return {"installed": bool(srv["mpspace"]), "running": srv["mpspace"] == "running",
                 "auth_mp": srv["auth_mp"], "version": "2.4.1" if srv["mpspace"] else None}
@@ -344,6 +362,65 @@ def jobs_recent(n=15):
     with _lock:
         lst = [{k: v for k, v in j.items() if k != "log"} for j in _jobs.values()]
     return sorted(lst, key=lambda d: d.get("started") or 0, reverse=True)[:n]
+
+
+# ── присоединённые хосты (хаб) ─────────────────────────────────────────────
+NODES = {}
+FAKE_FP = ":".join(["AB", "12", "CD", "34"] * 8)
+
+
+def self_fingerprint():
+    return FAKE_FP
+
+
+def _node_host(name):
+    return {"name": name, "kind": "ubuntu", "os": "Ubuntu 24.04.1 LTS", "version": VERSION, "mode": "usb",
+            "modems": {"ok": 7, "warn": 1, "broken": 0, "total": 8}, "mpspace": "running", "mpspace_ok": True,
+            "ram": {"total_gb": 8, "used_gb": 3.1}, "vms": False}
+
+
+def nodes_overview(timeout=10):
+    _pause()
+    with _lock:
+        return [dict(n, host_info=_node_host(n["remote_name"]) if n["ok"] else None) for n in NODES.values()]
+
+
+def node_join(addr, user, password, name=None, fingerprint=None):
+    _pause()
+    if password != "pcs-fake":
+        raise Fail("хост %s не присоединился: неверный логин или пароль панели" % addr)
+    host = str(addr).split(":")[0].replace("https://", "")
+    nm = (name or "vps-" + host.split(".")[-1]).lower()
+    with _lock:
+        NODES[nm] = {"name": nm, "host": host, "port": 666, "kind": "ubuntu", "remote_name": "vps-msk1",
+                     "fingerprint": FAKE_FP, "ok": not host.startswith("10."), "servers": [],
+                     "error": None if not host.startswith("10.") else "хост %s:666 не отвечает по HTTPS" % host}
+        return dict(NODES[nm], info=_node_host("vps-msk1"))
+
+
+def node_remove(name):
+    with _lock:
+        if NODES.pop(name, None) is None:
+            raise Fail("хоста «%s» нет среди присоединённых" % name)
+    return {"name": name, "revoked": True}
+
+
+def node_login(name):
+    return {"url": "http://localhost:16667/login", "ttl": 60}
+
+
+def node_call(name, method, path, body=None, timeout=60):
+    if name not in NODES:
+        return {"ok": False, "error": "хоста «%s» нет" % name}
+    if path == "targets/host/update" and method == "POST":
+        return {"ok": True, "data": {"job": _job("Обновление PCS (хост)", ["скачиваю main с GitHub…", "код на месте",
+                                                                          "proxyveth, modlink — setup"], lambda: {"host": VERSION})}}
+    if path.startswith("jobs/"):
+        try:
+            return {"ok": True, "data": job(path[5:])}
+        except Fail as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "фейк: %s %s не умеет" % (method, path)}
 
 
 def job(job_id):
@@ -415,7 +492,7 @@ def run(sid, part, args, input=None):
     try:
         with _lock:
             if sid is None:
-                return {"ok": True, "data": _host_run(part, args)}
+                return {"ok": True, "data": _host_run(part, args, input)}
             srv = _srv(sid)
             fn = {"proxyveth": _pv, "modlink": _ml, "hivelink": _hl}.get(part)
             if fn is None:
@@ -425,11 +502,15 @@ def run(sid, part, args, input=None):
         return {"ok": False, "error": str(e)}
 
 
-def _host_run(part, args):
+def _host_run(part, args, inp=None):
     if part == "modlink":
-        return _ml(HML, args, None)
+        return _ml(HML, args, inp)
+    if part == "proxyveth":
+        if not HML.get("mode") and args[:1] not in (["mode"], ["source"], ["table"]):
+            raise Fail("режим сервера не задан: proxyveth mode usb|gw")
+        return _pv(HML, args, inp)
     if part != "hivelink":
-        raise Fail("на хосте есть hivelink и modlink; %s — на серверах" % part)
+        raise Fail("на хосте нет части %s" % part)
     if args[:1] == ["status"]:
         return {"installed": True, "version": VERSION,
                 "modems": [{"n": 1, "iface": "enx0c5b8f279a64", "state": "ok", "imei": "86xxxxxxxxx0412"},

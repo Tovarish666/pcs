@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-#  install.sh — поставить или обновить PCS на хост Proxmox VE.
+#  install.sh — поставить или обновить PCS: на хост Proxmox VE или на Ubuntu 24.04+ (VPS).
 #
 #      bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)
 #
-#  Кладёт код в /opt/pcs, команды pcs, hivelink и modlink в /usr/local/bin, спрашивает
-#  логин и пароль веб-панели (порт 666) и включает её, ставит на хост hivelink
-#  (настоящие модемы → интерфейсы) и modlink (интерфейсы → прокси).
-#  Серверы (ВМ Ubuntu) дальше создаёт сам pcs: pcs server create или меню pcs.
+#  Кладёт код в /opt/pcs, команды pcs, proxyveth, modlink, hivelink, pcs-node в /usr/local/bin,
+#  спрашивает логин и пароль веб-панели (порт 666) и включает её. Дальше — по виду машины:
+#    Proxmox — hivelink (настоящие модемы) и modlink на хост; серверы (ВМ) создаёт pcs;
+#    Ubuntu (VPS) — модемы прямо на ней: proxyveth (спросит режим usb|gw), modlink и,
+#                   по желанию, mobileproxy.space. ВМ на VPS не создаются.
 #
 #  PCS_REPO=owner/repo PCS_BRANCH=main   откуда брать (pcs update берёт оттуда же)
 #  PCS_SRC=/путь/к/дереву                поставить из готового дерева, без GitHub
 #  PCS_WEB_USER=admin PCS_WEB_PASS=…     вход в панель без вопросов
+#  PCS_MODE=usb|gw  PCS_MPSPACE=1  PCS_MP_AUTH='{…}'   Ubuntu: режим и mp.space без вопросов
 # ═══════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -24,12 +26,26 @@ warn() { printf '  \033[33m⚠\033[0m %s\n' "$*"; }
 die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "нужен root: sudo bash install.sh"
-if ! command -v qm >/dev/null 2>&1 || ! command -v pvesm >/dev/null 2>&1 || [[ ! -d /etc/pve ]]; then
-    die "PCS ставится на хост Proxmox VE (qm, pvesm, /etc/pve). Режим «PCS прямо на VPS с Ubuntu» пока не сделан."
+OS_ID=""; OS_VER=""; OS_NAME=""
+if [[ -r /etc/os-release ]]; then
+    OS_ID="$(. /etc/os-release; echo "${ID:-}")"; OS_VER="$(. /etc/os-release; echo "${VERSION_ID:-}")"
+    OS_NAME="$(. /etc/os-release; echo "${PRETTY_NAME:-}")"
 fi
-command -v python3 >/dev/null || die "нет python3: apt install python3"
+if command -v qm >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && [[ -d /etc/pve ]]; then
+    KIND=proxmox
+elif [[ "$OS_ID" == ubuntu ]]; then
+    [[ "${OS_VER%%.*}" =~ ^[0-9]+$ && "${OS_VER%%.*}" -ge 24 ]] \
+        || die "нужна Ubuntu 24.04 или новее, а здесь ${OS_NAME:-Ubuntu $OS_VER}"
+    KIND=ubuntu
+else
+    die "PCS ставится на хост Proxmox VE или на Ubuntu 24.04+ (VPS); здесь ${OS_NAME:-неизвестная ОС}"
+fi
+if ! command -v python3 >/dev/null; then
+    [[ $KIND == ubuntu ]] && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 >/dev/null
+    command -v python3 >/dev/null || die "нет python3: apt install python3"
+fi
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
-    || die "нужен Python 3.11+ (Debian 12/13), а стоит $(python3 -V 2>&1)"
+    || die "нужен Python 3.11+, а стоит $(python3 -V 2>&1)"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -58,10 +74,10 @@ if [[ -d "$DEST" ]]; then
     mv "$DEST" "${DEST}.prev"
 fi
 mv "${DEST}.new" "$DEST"
-for c in pcs hivelink modlink; do ln -sfn "$DEST/bin/$c" "/usr/local/bin/$c"; done
+for c in pcs proxyveth modlink hivelink pcs-node; do ln -sfn "$DEST/bin/$c" "/usr/local/bin/$c"; done
 install -d -m 700 /etc/pcs
 install -d -m 755 /var/lib/pcs /var/log/pcs
-ok "PCS $("$DEST/bin/pcs" version) → ${DEST} (из ${from}), команды: pcs, hivelink, modlink"
+ok "PCS $("$DEST/bin/pcs" version) → ${DEST} (из ${from}) · ${OS_NAME:-$KIND} · команды: pcs, proxyveth, modlink, hivelink"
 
 # ── веб-панель: логин и пароль ─────────────────────────────────────────────
 ask() {   # ask "вопрос" [тихо] → ответ на stdout; без терминала — пусто
@@ -101,11 +117,49 @@ else
     fi
 fi
 
-# ── hivelink и modlink на хост — тем же шагом, что после pcs update ────────
-if "$DEST/bin/pcs" host-setup; then
-    ok "hivelink и modlink на хосте (строки modlink: modlink from-ifaces --add && modlink apply)"
+# ── Ubuntu (VPS): режим proxyveth и mp.space — вопросы до долгих шагов ────
+MODE="${PCS_MODE:-}"
+MP="${PCS_MPSPACE:-}"
+if [[ $KIND == ubuntu ]]; then
+    if [[ -z "$MODE" && ! -f /etc/proxyveth/config.json && -r /dev/tty ]]; then
+        echo "  Режим proxyveth на этой машине:"
+        echo "    usb — модем выглядит как USB Huawei E3372h (для mobileproxy.space), до ~40"
+        echo "    gw  — шлюз, без USB и без такого предела"
+        MODE="$(ask "Режим [usb]")"
+        MODE="${MODE:-usb}"
+    fi
+    [[ -z "$MODE" || "$MODE" == usb || "$MODE" == gw ]] || die "режим — usb или gw, а не «$MODE»"
+    if [[ -z "$MP" ]]; then
+        a="$(ask "Поставить mobileproxy.space сейчас? (y/N)")"
+        [[ "$a" =~ ^[yYдД] ]] && MP=1
+    fi
+    if [[ "$MP" == 1 && -z "${PCS_MP_AUTH:-}" ]]; then
+        echo "  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже в панели)"
+        PCS_MP_AUTH="$(ask "auth.mp")"
+    fi
+fi
+
+# ── части PCS на эту машину — тем же шагом, что после pcs update ───────────
+if "$DEST/bin/pcs" host-setup ${MODE:+--mode "$MODE"}; then
+    if [[ $KIND == proxmox ]]; then
+        ok "hivelink и modlink на хосте (строки modlink: modlink from-ifaces --add && modlink apply)"
+    else
+        ok "proxyveth${MODE:+ ($MODE)} и modlink на этой машине"
+    fi
 else
     warn "не всё встало (см. выше) — PCS работает и так; повторить: pcs host-setup"
 fi
 
-ok "дальше: pcs   (меню)   или   pcs server create --mode usb|gw"
+ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+if [[ $KIND == proxmox ]]; then
+    ok "дальше: pcs   (меню)   или   pcs server create --mode usb|gw"
+else
+    command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active" \
+        && warn "включён ufw — панель снаружи не откроется, пока не открыть порт: ufw allow 666/tcp"
+    ok "панель: http://${ip:-IP-этой-машины}:666 — таблица модемов во вкладке proxyveth"
+    if [[ "$MP" == 1 ]]; then
+        echo "  mobileproxy.space ставится; в конце машина перезагрузится"
+        PCS_MP_AUTH="${PCS_MP_AUTH:-}" "$DEST/bin/pcs" mpspace install --host \
+            || warn "mp.space не встал (см. выше); повторить: pcs mpspace install --host"
+    fi
+fi

@@ -21,7 +21,7 @@ ROOT = os.path.join(HERE, os.pardir)
 sys.path.insert(0, ROOT)
 from pcs import VERSION  # noqa: E402
 from pcs.core.util import Fail  # noqa: E402
-from pcs.hub import api, cli, jobs, menu, pve, remote, servers, store, ui, web  # noqa: E402
+from pcs.hub import api, cli, jobs, menu, node, pve, remote, servers, store, ui, web  # noqa: E402
 
 passed = failed = 0
 
@@ -145,10 +145,25 @@ try:
     check("server('host') — отказ", False)
 except Fail:
     check("server('host') — отказ", True)
+real_kind = node.host_kind
+node.host_kind = lambda root="/": "proxmox"
 h = api.host_info()
+node.host_kind = real_kind
 check("host_info: §9 ключи; hivelink не готов — не падение", set(("name", "kind", "version", "cpu", "ram", "disk",
-                                                                   "hivelink")) <= set(h)
-      and h["kind"] == "proxmox" and h["version"] == VERSION and h["hivelink"].get("installed") is False, h)
+                                                                   "hivelink", "proxyveth", "mode", "modems", "mpspace",
+                                                                   "mpspace_ok", "vms")) <= set(h)
+      and h["kind"] == "proxmox" and h["vms"] is True and h["mpspace_ok"] is False
+      and h["version"] == VERSION and h["hivelink"].get("installed") is False, h)
+real_kind, real_os = node.host_kind, node.os_info
+node.host_kind = lambda root="/": "proxmox"
+ok_, why = servers.mpspace_allowed()
+check("mp.space на хост Proxmox: отказ и объяснение", not ok_ and "GRUB" in why and "ВМ" in why, why)
+node.host_kind = lambda root="/": "ubuntu"
+node.os_info = lambda root="/": {"id": "ubuntu", "version": "24.04", "pretty": "Ubuntu 24.04.1 LTS"}
+check("mp.space на хост Ubuntu (VPS) — можно", servers.mpspace_allowed() == (True, ""))
+node.os_info = lambda root="/": {"id": "debian", "version": "12", "pretty": "Debian 12"}
+check("mp.space на Debian — нельзя", not servers.mpspace_allowed()[0])
+node.host_kind, node.os_info = real_kind, real_os
 
 print("API: команды частей:")
 net.cmds.clear()
@@ -160,7 +175,7 @@ check("аргументы экранированы — из таблицы мо�
       net.cmds[-1][1] == "proxyveth source 'https://x?a=1&b=2; rm -rf /' --json", net.cmds[-1])
 env = api.run(2000, "modlink", ["weird"])
 check("не JSON — конверт с ошибкой, без исключения", env["ok"] is False and "сломалось" in env["error"], env)
-for args, why in (((None, "proxyveth", ["status"]), "на хосте нет proxyveth"), ((2000, "bash", ["-c", "id"]), "чужая часть"),
+for args, why in (((None, "pcs-node", ["info"]), "на хосте — только части"), ((2000, "bash", ["-c", "id"]), "чужая часть"),
                   ((2000, "proxyveth", "status"), "args не список"), ((3000, "proxyveth", []), "неизвестный сервер")):
     try:
         api.run(*args)
@@ -269,7 +284,7 @@ try:
 except Fail:
     check("второй install на тот же сервер — отказ", True)
 check("mp.space check", api.mpspace(2000, "check") == {"installed": True, "ok": True})
-for args in (("host", "check"), (2000, "remove")):
+for args in ((2000, "remove"),):
     try:
         api.mpspace(*args)
         check("mp.space: отказ %s" % (args,), False)
@@ -423,12 +438,16 @@ try:
     err = io.StringIO()
     real_err, sys.stderr = sys.stderr, err
     try:
-        rc = cli.passthru("proxyveth", ["status", "--host"])
+        rc = cli.passthru("bash", ["-c", "id", "--host"])
         rc2 = cli.passthru("proxyveth", ["status", "--server", "4242"])
     finally:
         sys.stderr = real_err
-    check("proxyveth --host — отказ, неизвестный сервер — отказ", rc == 1 and rc2 == 1 and "4242" in err.getvalue()
-          and "proxyveth" in err.getvalue(), err.getvalue())
+    check("чужая часть на хосте — отказ, неизвестный сервер — отказ", rc == 1 and rc2 == 1 and "4242" in err.getvalue(),
+          err.getvalue())
+    called.clear()
+    cli.passthru("proxyveth", ["status", "--host"])
+    check("proxyveth --host — на самом хосте (VPS или модемы прямо на хосте)",
+          called and called[-1][0].endswith("bin/proxyveth") and called[-1][1:] == ["status"], called)
     out = io.StringIO()
     with redirect_stdout(out):
         rc = cli.passthru("proxyveth", ["status", "--json", "--server", "4242"])

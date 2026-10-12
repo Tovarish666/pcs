@@ -121,6 +121,22 @@ def mpspace_info(root="/", run=sh):
     return d
 
 
+def os_info(root="/"):
+    """/etc/os-release → {"id": "ubuntu", "version": "24.04", "pretty": "Ubuntu 24.04.1 LTS"}."""
+    kv = {}
+    for ln in (rd(at(root, "etc/os-release")) or "").splitlines():
+        k, _, v = ln.partition("=")
+        kv[k.strip()] = v.strip().strip('"')
+    return {"id": kv.get("ID", ""), "version": kv.get("VERSION_ID", ""), "pretty": kv.get("PRETTY_NAME", "")}
+
+
+def host_kind(root="/"):
+    """proxmox — хост с ВМ; иначе id ОС (ubuntu — хост-VPS без ВМ)."""
+    if os.path.isdir(at(root, "etc/pve")):
+        return "proxmox"
+    return os_info(root)["id"] or "linux"
+
+
 def primary_ip(run=sh):
     m = re.search(r"src (\S+)", run("ip", "-4", "route", "get", "1.1.1.1", check=False).stdout)
     return m.group(1) if m else ""

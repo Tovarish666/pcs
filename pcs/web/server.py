@@ -1,4 +1,4 @@
-"""Веб-панель PCS: HTTP на порту 666 (docs/ARCHITECTURE.md §10).
+"""Веб-панель PCS: HTTP и HTTPS на одном порту 666 (docs/ARCHITECTURE.md §10).
 
     pcs web serve            → main([...])          (pcs-web.service)
     PCS_WEB_FAKE=1 python3 -c 'from pcs.web.server import main; main(["--port", "6660"])'
@@ -6,6 +6,12 @@
 Вход — логин и пароль из /etc/pcs/web.json (auth.set_password), сессия — cookie
 HttpOnly; SameSite=Strict, каждый POST — с заголовком X-CSRF из GET /api/session.
 CORS нет. Терминал — WebSocket /ws/term?target=<id|host> ↔ pty (api.term_argv).
+
+Связь хостов (PCS.md §19): тот же порт отвечает по TLS (свой сертификат, pcs/web/tls.py).
+  POST /api/v1/join {user, password, name}   — логин и пароль панели → токен (только HTTPS)
+  /api/v1/<путь> с Authorization: Bearer     — те же адреса, что /api/<путь> у браузера
+  POST /api/v1/login-link                     — одноразовая ссылка входа (хаб открывает панель)
+  POST /api/v1/leave                          — отозвать свой токен (хаб отсоединяется)
 """
 import argparse
 import getpass
@@ -15,8 +21,10 @@ import importlib
 import json
 import mimetypes
 import os
+import secrets
 import signal
 import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -26,7 +34,7 @@ import urllib.parse
 
 from pcs import VERSION
 from pcs.core.util import Fail
-from pcs.web import auth, ws
+from pcs.web import auth, tls, tokens, ws
 from pcs.web.auth import WEB_JSON, set_password  # noqa: F401  (set_password зовёт `pcs web passwd`)
 from pcs.web.panel import Bad, Panel, target
 
@@ -45,7 +53,7 @@ class App:
     """Состояние панели: api, сессии, пауза входа, открытые терминалы."""
 
     def __init__(self, api, config=WEB_JSON, port=666, fake=False, fail_delay=1.0, throttle=None,
-                 log_dir=LOG_DIR, quiet=False):
+                 log_dir=LOG_DIR, quiet=False, tokens_path=None):
         self.api, self.config, self.port, self.fake = api, config, port, fake
         self.fail_delay, self.log_dir, self.quiet = fail_delay, log_dir, quiet
         self.sessions = auth.Sessions()
@@ -54,6 +62,9 @@ class App:
         self.terms = {}
         self.tlock = threading.Lock()
         self.cookie = "pcs_sid_%d" % port      # куки не различают порты — у фейка и панели свои
+        self.ott = {}                          # одноразовые ссылки входа: токен → (до, логин)
+        self.fingerprint = ""                  # отпечаток своего сертификата (если HTTPS включён)
+        self.tokens_path = tokens_path or tokens.PATH
 
     def log(self, msg):
         line = "%s %s" % (time.strftime("%F %T"), msg)
@@ -140,6 +151,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(origin)
         return bool(host) and u.scheme in ("http", "https") and u.netloc.lower() == host.lower()
 
+    def _tls(self):
+        return isinstance(self.connection, ssl.SSLSocket)
+
+    def _bearer(self):
+        h = self.headers.get("Authorization") or ""
+        return h[7:].strip() if h[:7].lower() == "bearer " else ""
+
     def _csrf_ok(self, s):
         got = self.headers.get("X-CSRF") or ""
         return bool(got) and hmac.compare_digest(got.encode(), s["csrf"].encode())
@@ -176,9 +194,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/ws/term":
                 return self._ws_term(u)
+            if path.startswith("/api/v1/"):
+                return self._v1("GET", path, u.query)
             if path.startswith("/api/"):
                 return self._api("GET", path, u.query)
             if path == "/login":
+                ott = urllib.parse.parse_qs(u.query).get("ott", [""])[-1]
+                if ott:
+                    return self._login_ott(ott)
                 if self._session():
                     return self._redirect("/")
                 return self._static("login.html")
@@ -199,6 +222,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if u.path == "/api/login":
                 return self._login()
+            if u.path.startswith("/api/v1/"):
+                return self._v1("POST", u.path, u.query)
             if u.path.startswith("/api/"):
                 return self._api("POST", u.path, u.query)
             return self._json(404, {"ok": False, "error": "нет такого адреса"})
@@ -237,6 +262,89 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.app.log("сбой %s %s: %s\n%s" % (method, path, e, traceback.format_exc()))
             return self._json(500, {"ok": False, "error": "сбой панели (%s) — подробности: journalctl -u pcs-web"
                                     % e.__class__.__name__})
+
+    # ── связь хостов: /api/v1 по токену, только по HTTPS ────────────────────
+
+    def _v1(self, method, path, query):
+        app, ip = self.app, self.client_address[0]
+        if not self._tls():
+            return self._json(403, {"ok": False, "error": "связь хостов — только по HTTPS: https://<адрес>:%d" % app.port})
+        if self.headers.get("Origin"):
+            return self._json(403, {"ok": False, "error": "/api/v1 — для программ, не для страниц"})
+        try:
+            if path == "/api/v1/join" and method == "POST":
+                return self._join()
+            wait = app.throttle.wait(ip)
+            if wait:
+                return self._json(429, {"ok": False, "error": "много неудачных попыток — подождите %d с" % wait})
+            rec = tokens.check(self._bearer(), ip, app.tokens_path)
+            if rec is None:
+                app.throttle.failed(ip)
+                return self._json(401, {"ok": False, "error": "нет или неверный токен — присоедините хост заново"})
+            body = self._body() if method == "POST" else None
+            who = "api:%s" % rec.get("name", rec.get("id"))
+            if path == "/api/v1/leave" and method == "POST":
+                tokens.revoke(rec["id"], app.tokens_path)
+                app.log("%s %s отсоединился (токен %s отозван)" % (ip, who, rec["id"]))
+                return self._json(200, {"ok": True, "data": {"revoked": rec["id"]}})
+            if path == "/api/v1/login-link" and method == "POST":
+                user = auth.load(app.config).get("user")
+                if not user:
+                    return self._json(200, {"ok": False, "error": "вход в панель не настроен: pcs web passwd"})
+                ott = secrets.token_urlsafe(24)
+                now = time.time()
+                app.ott = {k: v for k, v in app.ott.items() if v[0] > now}
+                app.ott[ott] = (now + 60, user)
+                app.log("%s %s: одноразовая ссылка входа" % (ip, who))
+                return self._json(200, {"ok": True, "data": {"path": "/login?ott=" + ott, "ttl": 60}})
+            q = {k: v[-1] for k, v in urllib.parse.parse_qs(query).items()}
+            code, out = app.panel.handle(method, "/api/" + path[len("/api/v1/"):], q, body, user=who)
+            return self._json(code, out)
+        except Bad as e:
+            return self._json(e.code, {"ok": False, "error": str(e)})
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except Exception as e:
+            self.app.log("сбой %s %s: %s\n%s" % (method, path, e, traceback.format_exc()))
+            return self._json(500, {"ok": False, "error": "сбой панели (%s)" % e.__class__.__name__})
+
+    def _join(self):
+        """Хаб другого хоста присоединяет этот: логин и пароль панели → токен (пароль не хранится)."""
+        app, ip = self.app, self.client_address[0]
+        wait = app.throttle.wait(ip)
+        if wait:
+            return self._json(429, {"ok": False, "error": "много неудачных попыток — подождите %d с" % wait})
+        body = self._body()
+        user, pw, name = body.get("user"), body.get("password"), str(body.get("name") or "хаб")[:60]
+        if not isinstance(user, str) or not isinstance(pw, str) or len(user) > 200 or len(pw) > 1000:
+            return self._json(400, {"ok": False, "error": "нужны логин и пароль панели этого хоста"})
+        if not auth.configured(app.config):
+            return self._json(503, {"ok": False, "error": "вход в панель здесь не настроен: pcs web passwd"})
+        if not auth.check(app.config, user, pw):
+            app.throttle.failed(ip)
+            app.log("%s присоединение «%s»: неверный логин или пароль" % (ip, name))
+            time.sleep(app.fail_delay)
+            return self._json(401, {"ok": False, "error": "неверный логин или пароль панели"})
+        app.throttle.passed(ip)
+        tid, token = tokens.issue("хаб " + name, ip, app.tokens_path)
+        app.log("%s присоединён к хабу «%s» (токен %s)" % (ip, name, tid))
+        try:
+            info = app.api.host_info()
+        except Fail as e:
+            info = {"error": str(e)}
+        return self._json(200, {"ok": True, "data": {"token": token, "token_id": tid, "version": VERSION,
+                                                     "fingerprint": app.fingerprint, "host": info}})
+
+    def _login_ott(self, ott):
+        """Вход по одноразовой ссылке от хаба: 60 с, один раз."""
+        app = self.app
+        rec = app.ott.pop(ott, None)
+        if not rec or rec[0] < time.time():
+            return self._redirect("/login")
+        s = app.sessions.new(rec[1], auth.stamp(app.config))
+        app.log("%s вход по ссылке хаба (%s)" % (self.client_address[0], rec[1]))
+        return self._send(302, b"", "text/plain", (("Location", "/"), ("Cache-Control", "no-store"))
+                          + self._cookie_hdr(s["sid"], int(app.sessions.ttl)))
 
     def _cookie_hdr(self, sid, max_age):
         return (("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d"
@@ -350,20 +458,60 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, app):
+    def __init__(self, addr, app, ssl_ctx=None):
         if ":" in addr[0]:
             self.address_family = socket.AF_INET6
         self.app = app
+        self.ssl_ctx = ssl_ctx
         super().__init__(addr, Handler)
 
+    def finish_request(self, request, client_address):
+        """HTTP и HTTPS на одном порту: первый байт TLS-приветствия — 0x16."""
+        if self.ssl_ctx is not None:
+            try:
+                request.settimeout(15)
+                first = request.recv(1, socket.MSG_PEEK)
+            except OSError:
+                return
+            if first == b"\x16":
+                try:
+                    tls_sock = self.ssl_ctx.wrap_socket(request, server_side=True)
+                except (ssl.SSLError, OSError):
+                    return
+                try:
+                    return super().finish_request(tls_sock, client_address)
+                finally:
+                    try:
+                        tls_sock.close()
+                    except OSError:
+                        pass
+            request.settimeout(None)
+        return super().finish_request(request, client_address)
 
-def make_server(port=666, api=None, bind="0.0.0.0", config=WEB_JSON, **kw):
+    def handle_error(self, request, client_address):
+        """Клиент оборвал соединение (закрыл вкладку, моргнула сеть) — не ошибка, без трассы в журнале."""
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def make_server(port=666, api=None, bind="0.0.0.0", config=WEB_JSON, tls_dir=None, **kw):
+    """tls_dir — где свой сертификат (None — без HTTPS, как в старых тестах; "" — по умолчанию /etc/pcs/tls)."""
     if api is None:
         api = importlib.import_module("pcs.hub.api")
-    return Server((bind, port), App(api, config=config, port=port, **kw))
+    app = App(api, config=config, port=port, **kw)
+    ctx = None
+    if tls_dir is not None:
+        try:
+            ctx = tls.server_context(tls_dir or None)
+            app.fingerprint = tls.fingerprint_file(tls.paths(tls_dir or None)[0])
+        except (Fail, OSError, ssl.SSLError) as e:
+            app.log("HTTPS выключен: %s" % e)
+    return Server((bind, port), app, ctx)
 
 
 def serve(port=666, api=None, bind="0.0.0.0", config=WEB_JSON, **kw):
+    kw.setdefault("tls_dir", "")
     httpd = make_server(port, api, bind, config, **kw)
 
     def stop(*_):
@@ -424,7 +572,11 @@ def main(argv=None):
             if not auth.configured(config):
                 print("  ⚠ пароль панели не задан — вход закрыт: pcs web passwd", file=sys.stderr, flush=True)
         try:
-            serve(a.port, api, bind, config, fake=a.fake, log_dir=log_dir)
+            extra = {}
+            if a.fake:            # у фейка свой сертификат и токены — во временном каталоге
+                extra = {"tls_dir": os.path.join(tempfile.gettempdir(), "pcs-web-fake-tls"),
+                         "tokens_path": os.path.join(tempfile.gettempdir(), "pcs-web-fake-tokens-%d.json" % a.port)}
+            serve(a.port, api, bind, config, fake=a.fake, log_dir=log_dir, **extra)
         except OSError as e:
             raise Fail("не открыть порт %s:%d: %s" % (bind, a.port, e.strerror or e))
         return 0

@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 
 from .. import VERSION
@@ -26,7 +27,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs server create [--mode usb|gw] [--sheet URL] [--mpspace] [--id N] [--name …]
                     [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
   pcs server adopt ID [--ip IP] | delete ID [--yes]
-  pcs proxyveth …  [--server ID]        команда proxyveth на сервере (аргументы — как есть)
+  pcs proxyveth …  [--server ID|--host] команда proxyveth на сервере или самом хосте (как есть)
   pcs modlink …    [--server ID|--host]   без выбранного сервера — на хосте
   pcs hivelink …   [--server ID|--host]
   pcs dns     [--server ID|--host] [--dns "1.1.1.1 8.8.8.8"]
@@ -34,10 +35,13 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs key     [--server ID|--host] [--add PUBKEY | --rotate]
   pcs ssh [ID] | pcs exec [ID] 'cmd'    консоль / команда на сервере
   pcs ssh-port PORT [--server ID]       порт SSH сервера
-  pcs mpspace install|auth|check [--server ID]
+  pcs mpspace install|auth|check [--server ID|--host]   на хост — только Ubuntu (VPS)
   pcs update [--host | --server ID | --all]   без флагов — хост из GitHub и все серверы
   pcs web on|off|status|passwd          веб-панель :666
   pcs doctor [--server ID|--host] | pcs log | pcs version
+  pcs node [list|add АДРЕС|remove ИМЯ|open ИМЯ]   присоединённые хосты (VPS, другой Proxmox): pcs node help
+  pcs node ИМЯ proxyveth|modlink|hivelink …       команда части на том хосте
+  pcs token [list | revoke ID]          кто присоединил этот хост (токены его хабов)
   pcs job [ID] [--server ID]            долгое (update, установка, перенос…) идёт в фоне: обрыв
                                         связи ему не мешает; здесь — список, журнал, «смотреть дальше»
   pcs host-setup                        хост после установки/обновления: команды, hivelink, modlink
@@ -102,8 +106,10 @@ def parser():
     c = sub.add_parser("mpspace")
     c.add_argument("action", choices=("install", "auth", "check"))
     c.add_argument("--server")
+    c.add_argument("--host", action="store_true")
     c.add_argument("--no-reboot", action="store_true")
-    sub.add_parser("host-setup")
+    c = sub.add_parser("host-setup")
+    c.add_argument("--mode", choices=servers.MODES)
     c = sub.add_parser("update")
     g = c.add_mutually_exclusive_group()
     g.add_argument("--host", action="store_true", help="только хост из GitHub")
@@ -113,6 +119,9 @@ def parser():
     c.add_argument("action", choices=("on", "off", "status", "passwd", "serve"))
     c.add_argument("--user")
     c.add_argument("rest", nargs=argparse.REMAINDER)
+    c = sub.add_parser("token")
+    c.add_argument("action", nargs="?", choices=("list", "revoke"), default="list")
+    c.add_argument("id", nargs="?")
     c = sub.add_parser("job")
     c.add_argument("id", nargs="?")
     c.add_argument("run_id", nargs="?")
@@ -150,7 +159,8 @@ def passthru(part, args):
     as_json = "--json" in rest
     try:
         # modlink и hivelink есть и на хосте: без выбранного сервера — туда
-        t = store.target(server, host, default_host=part in remote.HOST_PARTS)
+        t = store.target(server, host, default_host=part in remote.HOST_PARTS
+                         and (part != "proxyveth" or not pve.is_pve()))
         if not rest:
             rest = ["help"] if not as_json else ["status", "--json"]
         if t == store.HOST:
@@ -405,9 +415,9 @@ def c_ssh_port(a):
 
 
 def c_mpspace(a):
-    s = store.target(a.server)
+    s = store.target(a.server, getattr(a, "host", False), default_host=not pve.is_pve())
     if s == store.HOST:
-        raise Fail("mp.space ставится на сервер, а не на хост: --server ID")
+        return mpspace_here(a)
     if a.action == "check":
         d = remote.node(s, "mpspace", "check", timeout=60)
         if not a.json:
@@ -465,11 +475,37 @@ def c_update(a):
 
 
 def c_host_setup(a):
-    r = as_job(a, "host_setup", {}, "Хост: команды, hivelink, modlink", target="host")
+    r = as_job(a, "host_setup", {"mode": a.mode}, "Хост: команды и части PCS", target="host")
     if r:
         return r
-    d = servers.host_setup()
+    d = servers.host_setup(mode=a.mode)
     return (1 if d["failed"] else 0), d
+
+
+def mpspace_here(a):
+    """mp.space прямо на этом хосте (Ubuntu, VPS)."""
+    from . import api
+    if a.action == "check":
+        d = api.mpspace("host", "check")
+        if not a.json:
+            (ui.ok if d.get("installed") else ui.warn)("mobileproxy.space на этом хосте: %s"
+                                                       % ("стоит" if d.get("installed") else "не стоит"))
+        return 0, d
+    auth = os.environ.get("PCS_MP_AUTH", "")
+    if a.action == "auth":
+        auth = auth or (ui.ask("auth.mp из ЛК ({\"auth\": \"…\", \"port\": …})") if ui.interactive()
+                        else sys.stdin.readline().strip())
+        return 0, api.mpspace("host", "auth", auth=auth)
+    ok_, why = servers.mpspace_allowed()
+    if not ok_:
+        raise Fail(why)
+    # PCS_MP_AUTH задан (пусть и пустым — «позже») — не спрашивать второй раз (так зовёт install.sh)
+    if not auth and "PCS_MP_AUTH" not in os.environ and ui.interactive() and not a.json:
+        print("  auth.mp из ЛК: Мой прокси-бизнес → Сервера → иконка ↓ (Enter — задать позже: pcs mpspace auth)")
+        auth = ui.ask("auth.mp", "")
+    params = {"auth": auth, "proxy": os.environ.get("PCS_MP_PROXY", ""), "no_reboot": a.no_reboot}
+    r = as_job(a, "mpspace_host", params, "mp.space на этот хост", target="host")
+    return r if r else (0, servers.mpspace_host(params))
 
 
 def c_web(a):
@@ -495,10 +531,163 @@ def c_web(a):
         ui.ok("вход в панель: %s, пароль сохранён хэшем в %s" % (user, web.creds_path()))
         return 0, d
     d = web.status()
+    from . import api
+    d["fingerprint"] = api.self_fingerprint()
     if not a.json:
         print("  панель: %s, автозапуск: %s, порт %d, логин: %s" % (
             "работает" if d["active"] else d["state"], "да" if d["enabled"] else "нет", d["port"], d["user"] or "не задан"))
+        if d["fingerprint"]:
+            print("  HTTPS на том же порту; отпечаток (сверить при присоединении): %s" % d["fingerprint"])
     return 0, d
+
+
+# ── присоединённые хосты: pcs node … ──────────────────────────────────────
+NODE_HELP = """  pcs node [list]                              присоединённые хосты и их состояние
+  pcs node add АДРЕС [--user admin] [--name ИМЯ] [--fingerprint FP]
+                                               присоединить хост (VPS или другой Proxmox): логин и
+                                               пароль его панели; пароль — PCS_NODE_PASSWORD или вопрос
+  pcs node remove ИМЯ [--yes]                  отсоединить (хост отзовёт наш токен)
+  pcs node open ИМЯ                            одноразовая ссылка входа в его панель (60 с)
+  pcs node ИМЯ status                          сводка хоста
+  pcs node ИМЯ proxyveth|modlink|hivelink …    команда части на том хосте (долгая — заданием)
+  pcs node ИМЯ job [ID]                        его фоновые задания"""
+
+
+def node_cmd(argv):
+    """pcs node … — свой разбор: после имени хоста идёт команда части как есть."""
+    as_json = "--json" in argv
+    argv = [x for x in argv if x != "--json"]
+
+    def opt(name, default=None):
+        if name in argv:
+            i = argv.index(name)
+            if i + 1 >= len(argv):
+                raise Fail("%s: нужно значение" % name)
+            v = argv[i + 1]
+            del argv[i:i + 2]
+            return v
+        return default
+
+    def fn(_):
+        from . import api, nodes
+        if not argv or argv[0] == "list":
+            lst = api.nodes_overview()
+            if not as_json:
+                if not lst:
+                    print("  присоединённых хостов нет — присоединить: pcs node add АДРЕС")
+                for d in lst:
+                    h = d.get("host_info") or {}
+                    m = h.get("modems") or {}
+                    print("  %s %-14s %-22s %-8s %s" % (
+                        "✓" if d["ok"] else "✗", d["name"], "%s:%s" % (d["host"], d["port"]), h.get("kind") or d.get("kind") or "?",
+                        ("модемы %s/%s · ВМ %d · PCS %s" % (m.get("ok", 0), m.get("total", 0), len(d.get("servers") or []),
+                                                          h.get("version") or "?")) if d["ok"] else d.get("error")))
+            return 0, lst
+        if argv[0] in ("help", "-h", "--help"):
+            print(NODE_HELP)
+            return 0, None
+        if argv[0] == "add":
+            fp, user, name = opt("--fingerprint"), opt("--user", "admin"), opt("--name")
+            if len(argv) != 2:
+                raise Fail("pcs node add АДРЕС [--user admin] [--name ИМЯ] [--fingerprint FP]")
+            pw = os.environ.get("PCS_NODE_PASSWORD") or (ui.ask("Пароль панели того хоста (логин %s)" % user, secret=True)
+                                                         if ui.interactive() else sys.stdin.readline().rstrip("\n"))
+            d = api.node_join(argv[1], user, pw, name=name, fingerprint=fp)
+            if not as_json:
+                info = d.get("info") or {}
+                ui.ok("присоединён: %s (%s:%s, %s, PCS %s)" % (d["name"], d["host"], d["port"], info.get("kind") or "?",
+                                                              d.get("version") or "?"))
+                print("  отпечаток сертификата: %s — дальше хаб ходит только к нему" % d["fingerprint"])
+            return 0, d
+        if argv[0] == "remove":
+            yes = "--yes" in argv
+            argv[:] = [x for x in argv if x != "--yes"]
+            if len(argv) != 2:
+                raise Fail("pcs node remove ИМЯ [--yes]")
+            if not yes and not (ui.interactive() and ui.confirm("Отсоединить хост %s?" % argv[1], False)):
+                raise Fail("отсоединение хоста %s — подтверди: pcs node remove %s --yes" % (argv[1], argv[1]))
+            d = api.node_remove(argv[1])
+            if not as_json:
+                ui.ok("отсоединён: %s%s" % (d["name"], "" if d["revoked"] else " (хост не ответил — токен на нём отзови: pcs token)"))
+            return 0, d
+        if argv[0] == "open":
+            if len(argv) != 2:
+                raise Fail("pcs node open ИМЯ")
+            d = api.node_login(argv[1])
+            if not as_json:
+                print("  %s   (одноразовая, %d с)" % (d["url"], d["ttl"]))
+            return 0, d
+        name, rest = argv[0], argv[1:]
+        nodes.load(name)
+        if not rest or rest[0] == "status":
+            d = nodes.overview_one(nodes.load(name))
+            if not as_json:
+                print(json.dumps(d, ensure_ascii=False, indent=1))
+            return (0 if d["ok"] else 1), d
+        if rest[0] == "job":
+            e = api.node_call(name, "GET", "jobs/" + rest[1] if len(rest) > 1 else "jobs")
+            if not e.get("ok"):
+                raise Fail(e.get("error"))
+            if not as_json:
+                print(json.dumps(e["data"], ensure_ascii=False, indent=1))
+            return 0, e["data"]
+        if rest[0] not in PASSTHRU:
+            raise Fail("на хосте %s — части %s; справка: pcs node help" % (name, ", ".join(PASSTHRU)))
+        e = api.node_call(name, "POST", "run", {"target": "host", "part": rest[0], "args": rest[1:],
+                                                "confirm": "host" if any(x in ("--yes", "--force") for x in rest) else ""},
+                          timeout=600)
+        if not e.get("ok"):
+            raise Fail(e.get("error"))
+        d = e.get("data")
+        if isinstance(d, dict) and set(d) == {"job"}:
+            d = node_follow(name, d["job"], quiet=as_json)
+        elif not as_json:
+            print(json.dumps(d, ensure_ascii=False, indent=1))
+        return 0, d
+    return util.run_cli(fn, None, as_json)
+
+
+def node_follow(name, jid, quiet=False):
+    """Долгая команда на присоединённом хосте: печатать её журнал, пока не кончится. → итог."""
+    import time
+    from . import api
+    seen = 0
+    if not quiet:
+        print("  ▸ задание %s на хосте %s — связь оборвётся, задание доработает там" % (jid, name))
+    while True:
+        e = api.node_call(name, "GET", "jobs/" + jid, timeout=30)
+        if not e.get("ok"):
+            raise Fail(e.get("error"))
+        j = e["data"]
+        log = j.get("log") or []
+        if not quiet:
+            for ln in log[seen:]:
+                print("  │ " + ln)
+        seen = len(log)
+        if j.get("state") not in ("running", "queued"):
+            if j.get("state") != "done":
+                raise Fail(j.get("error") or "задание на хосте %s не удалось" % name)
+            return j.get("result")
+        time.sleep(1.5)
+
+
+def c_token(a):
+    from ..web import tokens
+    if a.action == "revoke":
+        if not a.id:
+            raise Fail("pcs token revoke ID — ID из pcs token list")
+        d = tokens.revoke(a.id)
+        ui.ok("токен %s отозван — тот хаб больше не управляет этим хостом" % a.id)
+        return 0, d
+    lst = tokens.listing()
+    if not a.json:
+        if not lst:
+            print("  токенов нет — этот хост никто не присоединял")
+        for t in lst:
+            print("  %s  %-24s выдан %s с %s, последний раз %s" % (
+                t["id"], t.get("name", ""), time.strftime("%F %T", time.localtime(t["created"])), t.get("from") or "?",
+                time.strftime("%F %T", time.localtime(t["last"])) if t.get("last") else "—"))
+    return 0, lst
 
 
 def c_job(a):
@@ -612,7 +801,7 @@ HANDLERS = {
     ("server", "delete"): c_server_delete, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
     ("ssh-port", None): c_ssh_port, ("mpspace", None): c_mpspace, ("update", None): c_update, ("web", None): c_web,
     ("host-setup", None): c_host_setup,
-    ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor,
+    ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor, ("token", None): c_token,
 }
 
 
@@ -644,6 +833,9 @@ def main(argv=None):
         if cmd in PASSTHRU:
             util.need_root()
             return passthru(cmd, argv[1:])
+        if cmd == "node":
+            util.need_root()
+            return node_cmd(argv[1:])
         if cmd in ("ssh", "exec"):
             util.need_root()
             return shell(cmd, argv[1:])

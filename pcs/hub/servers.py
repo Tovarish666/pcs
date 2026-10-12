@@ -21,7 +21,7 @@ from ..core.util import Fail, sh
 from . import node, pve, remote, store, ui
 
 MODES = ("usb", "gw")
-HOST_BIN = ("pcs", "hivelink", "modlink")     # команды в /usr/local/bin хоста
+HOST_BIN = ("pcs", "proxyveth", "modlink", "hivelink", "pcs-node")   # команды в /usr/local/bin хоста
 DEFAULTS = {"id": None, "name": "", "cores": 4, "ram_gb": 4, "disk_gb": 40, "storage": "", "bridge": "vmbr0",
             "ip": "", "gw": "", "dns": None, "password": "", "mode": "usb", "sheet": "", "mpspace": False,
             "auth": "", "proxy": "", "replace": False}
@@ -69,12 +69,40 @@ def host_ip():
 
 
 def host_overview():
-    hl = remote.local_part("hivelink", ["status"], timeout=30)
-    return {"name": socket.gethostname(), "kind": "proxmox" if pve.is_pve() else "other", "version": VERSION,
+    """Сам хост: Proxmox (с ВМ) или Ubuntu (VPS — модемы и софт прямо на нём)."""
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        f_hl = ex.submit(remote.local_part, "hivelink", ["status"], timeout=30)
+        f_pv = ex.submit(node.proxyveth_info)
+        f_mp = ex.submit(node.mpspace_info)
+        hl, pv, mp = f_hl.result(), f_pv.result(), f_mp.result()
+    kind, osi = node.host_kind(), node.os_info()
+    return {"name": socket.gethostname(), "kind": kind, "os": osi["pretty"], "version": VERSION,
             "ip": host_ip(), "cpu": {"cores": os.cpu_count() or 0, "load": list(os.getloadavg())},
             "ram": node.mem(), "disk": node.disk("/var/lib/vz" if os.path.isdir("/var/lib/vz") else "/"),
             "hivelink": hl.get("data") if hl.get("ok") else {"installed": False, "error": hl.get("error")},
+            "proxyveth": pv, "mode": pv.get("mode"), "modems": pv.get("modems"), "mpspace": mp,
+            "mpspace_ok": mpspace_allowed()[0], "vms": kind == "proxmox",
             "modlink": node.modlink_info(), "dns": dnsfix.current()}
+
+
+def mpspace_allowed():
+    """mp.space прямо на хост — только Ubuntu: он меняет GRUB и ядро и перезагружает машину.
+    На хосте Proxmox так легли бы все ВМ. → (можно, почему нет)."""
+    kind, osi = node.host_kind(), node.os_info()
+    if kind == "proxmox":
+        return False, "на хосте Proxmox mp.space не ставится: он меняет GRUB и ядро и перезагружает машину — легли бы все ВМ; ставь в ВМ"
+    if osi["id"] != "ubuntu":
+        return False, "mp.space ставится на Ubuntu, а здесь %s" % (osi["pretty"] or osi["id"] or "неизвестная ОС")
+    return True, ""
+
+
+def mpspace_host(params):
+    """Задание: mp.space прямо на этот хост (Ubuntu). В конце — перезагрузка хоста, если не no_reboot."""
+    ok_, why = mpspace_allowed()
+    if not ok_:
+        raise Fail(why)
+    ui.hdr("mobileproxy.space на этом хосте (%s)" % socket.gethostname())
+    return node.mp_install(params, no_reboot=bool(params.get("no_reboot")))
 
 
 # ── создание ───────────────────────────────────────────────────────────────
@@ -383,16 +411,24 @@ def update_host():
     return ver
 
 
-def host_setup(dest=None):
-    """Хост после установки или обновления кода: команды в /usr/local/bin, hivelink, modlink,
-    перезапуск панели (если включена). Повторный вызов безопасен. → {"done": [...], "failed": [...]}."""
+def host_setup(dest=None, mode=None):
+    """Хост после установки или обновления кода: команды в /usr/local/bin, части, перезапуск панели
+    (если включена). Повторный вызов безопасен. → {"done": [...], "failed": [...]}.
+    Proxmox: hivelink и modlink. Ubuntu (VPS): proxyveth (mode — режим при первой установке) и
+    modlink; hivelink — если уже стоит (настоящих USB-модемов у VPS обычно нет)."""
     dest = dest or remote.ROOT
     for c in HOST_BIN:
         link("/usr/local/bin/" + c, os.path.join(dest, "bin", c))
     ui.ok("команды: %s" % ", ".join(HOST_BIN))
     done, failed = [], []
-    for part, args, what in (("hivelink", ["install"], "hivelink — драйвер настоящих модемов"),
-                             ("modlink", ["setup"], "modlink — прокси из интерфейсов хоста")):
+    steps = []
+    if node.host_kind() == "proxmox" or os.path.isdir("/etc/hivelink"):
+        steps.append(("hivelink", ["install"], "hivelink — драйвер настоящих модемов"))
+    if node.host_kind() != "proxmox":
+        pv = ["mode", mode, "--yes"] if mode in MODES else ["setup"]
+        steps.append(("proxyveth", pv, "proxyveth — модемы из прокси на этом хосте"))
+    steps.append(("modlink", ["setup"], "modlink — прокси из интерфейсов хоста"))
+    for part, args, what in steps:
         ui.hdr(what)
         if subprocess.run([os.path.join(dest, "bin", part)] + args).returncode == 0:
             done.append(part)

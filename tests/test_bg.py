@@ -184,11 +184,14 @@ try:
     jid = api.run_job(None, "modlink", ["migrate", "--force"], input=None)
     check("run_job: задание part на хост", jid == "j1" and started[-1][0] == "part" and started[-1][1]["id"] is None
           and started[-1][1]["args"] == ["migrate", "--force"] and started[-1][3] == "host", started)
+    jid = api.run_job(None, "proxyveth", ["sync"])
+    check("run_job: proxyveth на хосте — тоже заданием (VPS)", started[-1][1]["part"] == "proxyveth"
+          and started[-1][3] == "host", started[-1])
     try:
-        api.run_job(None, "proxyveth", ["sync"])
-        check("run_job: proxyveth на хосте — отказ", False)
+        api.run_job(None, "pcs-node", ["info"])
+        check("run_job: чужая часть — отказ", False)
     except Fail:
-        check("run_job: proxyveth на хосте — отказ", True)
+        check("run_job: чужая часть — отказ", True)
 finally:
     jobs.start, jobs.busy, api._target = real_start, real_busy, real_target
 check("в задании хаба части в фон не уходят (PCS_BG=1 в окружении юнита)",
