@@ -165,6 +165,63 @@ node.os_info = lambda root="/": {"id": "debian", "version": "12", "pretty": "Deb
 check("mp.space на Debian — нельзя", not servers.mpspace_allowed()[0])
 node.host_kind, node.os_info = real_kind, real_os
 
+print("API: управление ВМ:")
+qm = []
+real_sh = servers.sh
+servers.sh = lambda *c, **k: (qm.append(c), types.SimpleNamespace(returncode=0, stdout="", stderr=""))[1]
+real_qmlist, real_need = pve.qm_list, pve.need_pve
+pve.need_pve = lambda: None
+pve.qm_list = lambda: {"100": ("vless", "running"), "1000": ("server1", "running"), "2000": ("pcs2000", "running"),
+                       "4000": ("vps-test", "stopped"), "200": ("LTEspace", "stopped")}
+try:
+    d = api.vm_power(2000, "reboot")
+    check("питание: reboot → qm reboot с таймаутом", ("qm", "reboot", "--timeout", "120", "2000") in qm and d["action"] == "reboot", qm)
+    d = api.vm_power(2000, "start")
+    check("уже работает — start ничего не делает", d.get("note") == "уже работает", d)
+    d = api.vm_power(200, "shutdown")
+    check("уже выключена — shutdown ничего не делает", d.get("note") == "уже выключена", d)
+    VM["20000"] = "absent"
+    try:
+        api.vm_power(20000, "start")
+        check("ВМ нет в Proxmox — питание: отказ", False)
+    except Fail as e:
+        check("ВМ нет в Proxmox — питание: отказ и подсказка убрать из PCS", "forget" in str(e), e)
+    try:
+        api.vm_power(2000, "explode")
+        check("неизвестное действие — отказ", False)
+    except Fail:
+        check("неизвестное действие — отказ", True)
+    d = api.server_color(2000, "синий")
+    check("цвет по-русски → blue, сохранён", d["color"] == "blue" and store.load(2000)["color"] == "blue", d)
+    d = api.server_color(2000, "")
+    check("цвет сброшен — по номеру", d["color"] is None and "color" not in store.load(2000), d)
+    try:
+        api.server_color(2000, "розовый")
+        check("чужой цвет — отказ", False)
+    except Fail as e:
+        check("чужой цвет — отказ со списком семи", "красный" in str(e) and "фиолетовый" in str(e), e)
+    check("ВМ не под PCS: те, что есть в Proxmox, но без записи",
+          [v["id"] for v in api.vms_other()] == [100, 4000], api.vms_other())
+    try:
+        api.server_forget(20000, "2000")
+        check("убрать из PCS: не тот номер — отказ", False)
+    except Fail:
+        check("убрать из PCS: не тот номер — отказ", True)
+    d = api.server_forget(20000, "20000")
+    check("убрать из PCS: записи нет, ВМ не трогали (ни одного qm)", d["forgotten"] and not os.path.exists(store.path(20000))
+          and not any(c[1:2] == ("destroy",) for c in qm), qm)
+    started = []
+    real_start = jobs.start
+    jobs.start = lambda kind, params, title="", target=None, launcher=None: (started.append((kind, params, target)), "j9")[1]
+    jid = api.server_adopt(4000, ip="192.168.88.11", password="pw")
+    jobs.start = real_start
+    check("добавить в PCS — заданием adopt (ключ, код, части), выбор человека не трогает",
+          jid == "j9" and started[-1][0] == "adopt" and started[-1][1]["ip"] == "192.168.88.11" and "adopt" in api.KINDS, started)
+finally:
+    servers.sh, pve.qm_list, pve.need_pve = real_sh, real_qmlist, real_need
+    VM["20000"] = "running"
+    store.save({"id": 20000, "name": "LTEspace", "ip": "192.168.88.2"})
+
 print("API: команды частей:")
 net.cmds.clear()
 env = api.run(2000, "proxyveth", ["status"])

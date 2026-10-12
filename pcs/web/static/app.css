@@ -90,6 +90,15 @@ main#main { overflow: auto; padding: 20px 26px 40px; min-width: 0; }
 .tree-vm.active { background: hsl(var(--h, 210) var(--plaque-s) var(--plaque-l)); font-weight: 600; }
 .tree-host { border-left: 4px solid transparent; }
 .tree-host.active { background: var(--panel2); border-left-color: var(--accent); }
+.colors { display: inline-flex; gap: 6px; align-items: center; }
+.colors .sw { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid transparent;
+  background: hsl(var(--h) 70% 52%); cursor: pointer; }
+.colors .sw.on { border-color: var(--fg); box-shadow: 0 0 0 2px var(--panel); }
+.colors .sw.none { background: var(--panel2); color: var(--muted); font-size: 12px; line-height: 18px; }
+.node-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }
+.node-bar .spacer { flex: 1; }
+.tree-host.joined { margin-top: 6px; border-left: 4px solid hsl(var(--h, 210) 60% 50%); }
+.dot.off { background: var(--off); }
 .tree-sec { margin: 14px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .tree-add { display: block; margin: 12px 14px; padding: 6px 10px; border: 1px dashed var(--line); border-radius: 6px; text-align: center; }
 

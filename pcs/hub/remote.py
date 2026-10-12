@@ -63,8 +63,33 @@ def call(s, cmd, input=None, timeout=None, key=None):
     except FileNotFoundError:
         raise Fail("нет программы ssh")
     if r.returncode == 255 and not r.stdout:
-        raise Fail("нет SSH до сервера %s (%s): %s" % (s["id"], s["ip"], (r.stderr.strip().splitlines() or ["?"])[-1]))
+        if not key:
+            close_master(s)              # общий канал мог остаться от сервера до перезагрузки — следующий заход заново
+        why = (r.stderr.strip().splitlines() or [""])[-1] or "соединение оборвалось (сервер перезагружается или сеть моргнула)"
+        raise Fail("нет SSH до сервера %s (%s): %s" % (s["id"], s["ip"], why))
     return r
+
+
+def close_master(s):
+    """Закрыть общее SSH-соединение с этим сервером (ControlMaster): после перезагрузки сервера
+    старое висит до 45 с и не пускает новые заходы — «Failed to connect to new control master»."""
+    try:
+        subprocess.run(base(s)[:-1] + ["-O", "exit", "root@" + s["ip"]], capture_output=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def retry(s, fn, what, tries=6, pause=10):
+    """Шаг по SSH, который можно повторить: сразу после загрузки сервера сеть ещё перестраивается
+    (mp.space, cloud-init) — несколько обрывов подряд нормальны. → результат fn()."""
+    for i in range(tries):
+        try:
+            return fn()
+        except Fail as e:
+            if "нет SSH" not in str(e) or i == tries - 1:
+                raise
+            ui.step("…%s: SSH оборвался, повтор через %d с (%d/%d)" % (what, pause, i + 1, tries - 1))
+            time.sleep(pause)
 
 
 def ssh(s, cmd, check=True, timeout=None, input=None):
@@ -112,6 +137,24 @@ def wait(s, limit=600, what="SSH"):
             said = int(time.time() - t0) // 60
             ui.step("…жду %s на %s (%d мин)" % (what, s["ip"], said))
         time.sleep(5)
+    raise Fail("%s на %s не поднялся за %d с" % (what, s["ip"], limit))
+
+
+def wait_stable(s, limit=900, what="SSH", in_row=3, gap=5):
+    """Ждать, пока SSH ответит in_row раз подряд: один удачный заход сразу после загрузки
+    ничего не значит — сеть сервера ещё перестраивается."""
+    t0, said, row = time.time(), 0, 0
+    while time.time() - t0 < limit:
+        if alive(s, timeout=20):
+            row += 1
+            if row >= in_row:
+                return time.time() - t0
+        else:
+            row = 0
+        if int(time.time() - t0) // 60 > said:
+            said = int(time.time() - t0) // 60
+            ui.step("…жду %s на %s (%d мин)" % (what, s["ip"], said))
+        time.sleep(gap)
     raise Fail("%s на %s не поднялся за %d с" % (what, s["ip"], limit))
 
 

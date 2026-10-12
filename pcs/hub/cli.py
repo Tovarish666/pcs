@@ -26,7 +26,10 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs server list | info [ID] [--password] | use ID|host
   pcs server create [--mode usb|gw] [--sheet URL] [--mpspace] [--id N] [--name …]
                     [--ip A.B.C.D/M --gw …|--dhcp] [--cores N] [--ram ГБ] [--disk ГБ]
-  pcs server adopt ID [--ip IP] | delete ID [--yes]
+  pcs server adopt ID [--ip IP] | delete ID [--yes]   добавить ВМ в PCS / удалить ВМ с дисками
+  pcs server start|shutdown|reboot|stop ID           питание ВМ (shutdown — штатно, stop — жёстко)
+  pcs server forget ID [--yes]          убрать из PCS (ВМ не трогается) — так чистят удалённые мимо PCS
+  pcs server color ID [красный|оранжевый|жёлтый|зелёный|голубой|синий|фиолетовый]   цвет в дереве
   pcs proxyveth …  [--server ID|--host] команда proxyveth на сервере или самом хосте (как есть)
   pcs modlink …    [--server ID|--host]   без выбранного сервера — на хосте
   pcs hivelink …   [--server ID|--host]
@@ -92,6 +95,14 @@ def parser():
     c = srv.add_parser("delete")
     c.add_argument("id")
     c.add_argument("--yes", action="store_true")
+    for name in ("start", "shutdown", "reboot", "stop"):
+        srv.add_parser(name).add_argument("id")
+    c = srv.add_parser("forget")
+    c.add_argument("id")
+    c.add_argument("--yes", action="store_true")
+    c = srv.add_parser("color")
+    c.add_argument("id")
+    c.add_argument("color", nargs="?", default="")
     for name in ("dns", "passwd", "key", "doctor"):
         c = sub.add_parser(name)
         c.add_argument("--server")
@@ -361,6 +372,24 @@ def c_server_delete(a):
                                        % (s["id"], s.get("name")), s["id"]):
         raise Fail("отменено (в скриптах — --yes)")
     return 0, servers.delete(s["id"])
+
+
+def c_server_power(a):
+    return 0, servers.power(store.load(a.id)["id"], a.scmd)
+
+
+def c_server_forget(a):
+    s = store.load(a.id)
+    if not a.yes and not ui.confirm_id("Убрать ВМ %s (%s) из PCS? Сама ВМ, её диски и модемы останутся"
+                                       % (s["id"], s.get("name")), s["id"]):
+        raise Fail("отменено (в скриптах — --yes)")
+    return 0, servers.forget(s["id"])
+
+
+def c_server_color(a):
+    d = servers.set_color(store.load(a.id)["id"], a.color)
+    ui.ok("цвет ВМ %s: %s" % (d["id"], servers.COLOR_RU.get(d.get("color"), "по номеру")))
+    return 0, d
 
 
 def c_dns(a):
@@ -798,7 +827,9 @@ def c_doctor(a):
 HANDLERS = {
     ("status", None): c_status, ("server", "list"): c_server_list, ("server", "info"): c_server_info,
     ("server", "use"): c_server_use, ("server", "create"): c_server_create, ("server", "adopt"): c_server_adopt,
-    ("server", "delete"): c_server_delete, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
+    ("server", "delete"): c_server_delete, ("server", "start"): c_server_power, ("server", "shutdown"): c_server_power,
+    ("server", "reboot"): c_server_power, ("server", "stop"): c_server_power, ("server", "forget"): c_server_forget,
+    ("server", "color"): c_server_color, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
     ("ssh-port", None): c_ssh_port, ("mpspace", None): c_mpspace, ("update", None): c_update, ("web", None): c_web,
     ("host-setup", None): c_host_setup,
     ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor, ("token", None): c_token,
