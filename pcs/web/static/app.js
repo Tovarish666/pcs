@@ -98,7 +98,7 @@
     error: "ошибка", paused: "на паузе", absent: "нет в Proxmox — убрать из PCS", offline: "нет SSH", old: "старый код — обновить"};
   const BAD_VM = ["stopped", "unreachable", "error", "down", "broken", "offline", "failed", "absent"];
   const ROW_STATE = {ok: ["ok", "работает"], warn: ["warn", "апстрим"], broken: ["bad", "сломан"],
-    absent: ["", "нет"], disabled: ["", "выключен"], rebooting: ["info", "перезагрузка"]};
+    absent: ["", "нет"], disabled: ["", "выключен"], stopped: ["", "остановлен"], rebooting: ["info", "перезагрузка"]};
 
   function mpText(v) {
     if (v && typeof v === "object") v = v.running ? "running" : v.installed ? "installed" : null;
@@ -751,10 +751,18 @@
 
     const bSync = btn("Синхронизировать", () => sync(false), "primary", "привести модемы к таблице");
     const bEdit = btn("Править локально", () => openEditor(), "", "править локальную копию таблицы прямо здесь");
-    const bWan = btn("Проверить внешний IP", async (e) => {
-      e.target.disabled = true; setRes(res, "run", "проверяю внешний IP через каждый модем…");
-      await load(true); e.target.disabled = false; setRes(res, "ok", "внешний IP обновлён");
-    }, "", "proxyveth status --wan");
+    const bQuick = btn("Быстрый тест", async (e) => {
+      e.target.disabled = true; setRes(res, "run", "проверяю свою сторону…");
+      await load(false); e.target.disabled = false; setRes(res, "ok", "быстрый тест готов");
+    }, "", "proxyveth status — своя сторона: юниты, адреса, маршруты, USB (секунды)");
+    const bWan = btn("Долгий тест (внешний IP)", async (e) => {
+      e.target.disabled = true; setRes(res, "run", "проверяю внешний IP через каждый модем — минута-две…");
+      await load(true); e.target.disabled = false; setRes(res, "ok", "долгий тест готов, внешний IP обновлён");
+    }, "", "proxyveth status --wan — выход в интернет через каждый модем");
+    const allBar = el("div", {class: "bar"}, el("span", {class: "muted", text: "все модемы:"}),
+      btn("поднять", (e) => updown(e.target, "up"), "", "proxyveth up all — поднять всех из таблицы, снять «остановлен»"),
+      btn("остановить", (e) => updown(e.target, "down"), "", "proxyveth down all — снять всех; таймер не поднимет, пока не «поднять»"),
+      btn("пересоздать", (e) => updown(e.target, "restart"), "", "proxyveth restart all — снять и поднять всех заново"));
     const bSrc = btn("Сменить ссылку", async () => {
       const url = await askText("Источник таблицы", "Ссылка на Google-таблицу (из адресной строки) или local:",
         source && source.url || "", "https://docs.google.com/spreadsheets/d/…");
@@ -804,11 +812,11 @@
 
     function renderRows() {
       if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + statusErr})); cnt.textContent = ""; return; }
-      const c = {ok: 0, warn: 0, broken: 0, server: 0};
+      const c = {ok: 0, warn: 0, broken: 0, server: 0, stopped: 0};
       for (const r of rows) if (r.state === "warn" && r.side === "server") c.server += 1; else if (c[r.state] != null) c[r.state] += 1;
       cnt.textContent = "работают " + c.ok + " · апстрим " + c.warn + (c.server ? " · ждут сервер " + c.server : "")
-        + " · сломаны " + c.broken + " · всего " + rows.length;
-      const shown = onlyBad.checked ? rows.filter((r) => r.state !== "ok") : rows;
+        + " · сломаны " + c.broken + (c.stopped ? " · остановлены " + c.stopped : "") + " · всего " + rows.length;
+      const shown = onlyBad.checked ? rows.filter((r) => !["ok", "stopped", "disabled"].includes(r.state)) : rows;
       if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", text: "модемов нет — таблица пуста или не задана"})); return; }
       const head = el("tr", {}, ["n", "real", "прокси", "состояние", "внешний IP", "проблемы", ""].map((t) => el("th", {text: t})));
       const body = shown.map((r) => {
@@ -823,16 +831,27 @@
           el("td", {class: "mono", text: r.ext_ip || "—"}),
           r.note && !(r.problems || []).length ? el("td", {class: "muted note", text: r.note, title: r.note})
             : el("td", {class: "problems", text: (r.problems || []).join("; ")}),
-          el("td", {class: "acts-cell"}, btn("диагн.", () => diag(r.n), "icon", "proxyveth diag " + r.n),
-            btn("пересоздать", (e) => recreate(e.target, r.n), "icon", "снять интерфейс модема " + r.n + " и поднять заново (proxyveth restart " + r.n + ")")));
+          el("td", {class: "acts-cell"}, btn("диагн.", () => diag(r.n), "icon", "долгий тест модема: прокси → логин → модем → SIM → интернет (proxyveth diag " + r.n + ")"),
+            r.state === "stopped"
+              ? btn("поднять", (e) => updown(e.target, "up", r.n), "icon", "proxyveth up " + r.n)
+              : btn("остановить", (e) => updown(e.target, "down", r.n), "icon", "снять модем " + r.n + "; таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")"),
+            btn("пересоздать", (e) => updown(e.target, "restart", r.n), "icon", "снять интерфейс модема " + r.n + " и поднять заново (proxyveth restart " + r.n + ")")));
       });
       tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), el("tbody", {}, body)));
     }
 
-    async function recreate(button, n) {
-      if (!window.confirm("Пересоздать модем " + n + " (" + tname(id) + ")? Интерфейс снимется и поднимется заново — около минуты без связи.")) return;
-      const r = await act(button, res, () => X.run(id, "proxyveth", ["restart", String(n)]), "модем " + n + " пересоздан");
-      if (r && !r.ok) showText("Модем " + n + " не пересоздан", "Ошибка: " + r.error);
+    // up / down / restart — один модем (n) или все (n не задан)
+    async function updown(button, cmd, n) {
+      const all = n == null, what = all ? "все модемы" : "модем " + n;
+      const ask = {down: "Остановить " + what + " (" + tname(id) + ")? Таймер не поднимет, пока не нажмёшь «поднять».",
+        restart: "Пересоздать " + what + " (" + tname(id) + ")? Интерфейс снимется и поднимется заново — около минуты без связи"
+          + (all ? " у каждого, по одному." : "."),
+        up: all ? "Поднять все модемы из таблицы (" + tname(id) + ")? Остановленные вручную тоже поднимутся." : null}[cmd];
+      if (ask && !window.confirm(ask)) return;
+      const args = [cmd, all ? "all" : String(n)].concat(all && cmd !== "up" ? ["--yes"] : []);
+      const done = {up: "поднят", down: "остановлен", restart: "пересоздан"}[cmd] + (all ? "ы" : "");
+      const r = await act(button, res, () => X.run(id, "proxyveth", args), what + ": " + done);
+      if (r && !r.ok) showText(what[0].toUpperCase() + what.slice(1) + ": не " + done, "Ошибка: " + r.error);
       load(false);
     }
 
@@ -922,7 +941,7 @@
     }
 
     const pl = poller(10000, pollStatus);
-    const root = el("div", {}, info, el("div", {class: "bar"}, bSync, bEdit, bWan, bSrc, res), extra, editor,
+    const root = el("div", {}, info, el("div", {class: "bar"}, bSync, bQuick, bWan, bEdit, bSrc, res), allBar, extra, editor,
       el("div", {class: "bar"}, cnt, el("span", {class: "spacer"}), el("label", {class: "pill"}, onlyBad, "только проблемные")), tbl);
     let loaded = false;
     return {

@@ -85,6 +85,7 @@ ETC = os.path.join(TMP, "etc", "proxyveth")
 PATHS = dict(ETC=ETC, CONFIG=ETC + "/config.json", TABLE=ETC + "/table.csv", OLD_GW=ETC + "/env",
              RUN=os.path.join(TMP, "run", "proxyveth"), UNITD=os.path.join(TMP, "etc", "systemd", "system"))
 PATHS["LOCK"] = PATHS["RUN"] + "/lock"
+PATHS["STOPPED"] = os.path.join(TMP, "var", "lib", "proxyveth", "stopped.json")
 for k, v in PATHS.items():
     setattr(cli, k, v)
 for k in ("ETC", "CONFIG", "TABLE", "RUN"):
@@ -225,7 +226,9 @@ def test_sync():
         units = cli.sync_units()
         check("общий таймер proxyveth-sync: при загрузке и раз в 2 минуты",
               "sync --quiet" in units["proxyveth-sync.service"] and "OnUnitInactiveSec=120" in units["proxyveth-sync.timer"]
-              and "OnBootSec=15" in units["proxyveth-sync.timer"])
+              and "OnBootSec=40" in units["proxyveth-sync.timer"])
+        check("sync — фоновой работой: Nice и приоритет диска пониже",
+              "Nice=10" in units["proxyveth-sync.service"] and "IOSchedulingPriority=7" in units["proxyveth-sync.service"])
 
         failing = Fake("usb", running=[1])
         failing.apply = lambda d, cfg, force=False: {"created": [], "recreated": [], "removed": [], "failed": {2: "нет слота"}}
@@ -275,6 +278,34 @@ def test_commands():
             rc, d = ok_json(*argv)
             got = [(c[0], c[1]) for c in fake.calls if c[0] in ("up", "down")]
             check("%s → %s" % (" ".join(argv), want), rc == 0 and got == want, (d, got))
+
+        print("остановлен вручную — держится, пока не up:")
+        os.path.exists(cli.STOPPED) and os.unlink(cli.STOPPED)
+        rc, d = ok_json("down", "2")
+        check("down 2 — отметка «остановлен»", rc == 0 and set(cli.stopped()) == {2}, cli.stopped())
+        fake.rows = rows + [{"n": 3, "real": 83, "proxy": "10.0.0.3:1080", "state": "absent", "problems": ["модема нет"],
+                             "iface": None, "ext_ip": None, "since": 1}]
+        fake.rows[1] = dict(rows[1], state="absent", problems=["модема нет"])
+        rc, d = ok_json("status")
+        st = {r["n"]: r for r in d["data"]}
+        check("status: 2 — «stopped» и как поднять; 3 (просто нет) — absent",
+              st[2]["state"] == "stopped" and "proxyveth up 2" in st[2]["problems"][0] and st[3]["state"] == "absent", st)
+        rc, d = ok_json("problems")
+        check("problems: остановленный вручную — не проблема", 2 not in [r["n"] for r in d["data"]], d)
+        fake.calls.clear()
+        rc, d = ok_json("sync")
+        ap = [c for c in fake.calls if c[0] == "apply"]
+        check("sync не поднимает остановленный (нет в desired) и говорит об этом",
+              ap and 2 not in ap[0][1][0] and 1 in ap[0][1][0] and any("не поднимаю: 2" in m for m in said), ap)
+        rc, d = ok_json("up", "2")
+        check("up 2 — отметка снята, модем поднят", rc == 0 and not cli.stopped() and ("up", (2,), {}) in fake.calls)
+        ok_json("down", "all", "--yes")
+        check("down all — остановлены все из таблицы и работающие", {1, 2, 3, 4, 5} <= set(cli.stopped()), cli.stopped())
+        ok_json("restart", "4")
+        check("restart N снимает отметку только с N", 4 not in cli.stopped() and 5 in cli.stopped())
+        ok_json("up", "all")
+        check("up all — отметок не осталось", not cli.stopped())
+        fake.rows = rows
 
         rc, d = ok_json("rotate", "3")
         check("rotate N → mod.rotate(N)", d["ok"] and d["data"]["after"] == "2.2.2.2", d)
@@ -438,7 +469,7 @@ def test_migrate():
               and d["data"]["migrated"], d)
         check("источник и настройки перенесены, DNS — нет (это хаб)",
               cfg["source"] == sheet and cfg["sheet"] == sheet and cfg["slots"] == 40 and cfg["hostside"] == "off"
-              and cfg["strategy"] == "window:3" and cfg["proxy"]["base_port"] == 21000 and cfg["notify"]["telegram_token"] == "T"
+              and "strategy" not in cfg and cfg["proxy"]["base_port"] == 21000 and cfg["notify"]["telegram_token"] == "T"
               and "dns" not in cfg, cfg)
         check("конфиг — 600, каталог — 700",
               oct(os.stat(cli.CONFIG).st_mode & 0o777) == "0o600" and oct(os.stat(cli.ETC).st_mode & 0o777) == "0o700")

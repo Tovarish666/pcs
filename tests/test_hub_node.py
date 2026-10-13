@@ -69,6 +69,8 @@ class World:
 print("сводка модемов:")
 check("Row → ok/warn/broken/total, выключенные не в счёт", node.summarize(ROWS)
       == {"ok": 2, "warn": 2, "broken": 2, "total": 6}, node.summarize(ROWS))
+check("остановленные вручную — тоже не в счёт (и не «сломаны»)",
+      node.summarize(ROWS + [{"n": 99, "state": "stopped"}]) == node.summarize(ROWS))
 check("данные списком или {rows: …}", node.rows_of({"rows": ROWS}) == ROWS and node.rows_of(ROWS) == ROWS
       and node.rows_of(None) == [])
 

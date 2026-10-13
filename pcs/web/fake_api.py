@@ -686,7 +686,14 @@ def _pv(srv, a, inp):
         return {"n": n, "steps": steps, "verdict": "proxy-down: прокси не отвечает — проверьте мини-сервер "
                                                    "модема %d" % m["real"] if bad else "всё в порядке"}
     if cmd in ("up", "down", "restart"):
-        return {"done": a[1:] or ["all"]}
+        which = a[1] if len(a) > 1 else "all"
+        for m in srv["modems"]:
+            if which == "all" or str(m["n"]) == which:
+                if cmd == "down":
+                    m.update(state="stopped", ext_ip=None, problems=["остановлен вручную — поднять: proxyveth up %d" % m["n"]])
+                elif m["state"] == "stopped" or cmd == "restart":
+                    m.update(state="ok", problems=[], ext_ip=m.get("ext_ip") or "94.25.1.%d" % (m["n"] % 250))
+        return {"n": None if which == "all" else int(which), "action": cmd}
     raise Fail("proxyveth %s: в фейке нет" % " ".join(a))
 
 

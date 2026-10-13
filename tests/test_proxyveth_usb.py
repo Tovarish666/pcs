@@ -320,7 +320,7 @@ def test_proxy_conf():
     check("Huawei 12d1:14dc", (u["vendor"], u["product_id"]) == ("0x12d1", "0x14dc"))
     check("MAC со стороны сервера — как у всех E3372h", u["host_mac"] == "0c:5b:8f:27:9a:64")
     check("строки HUAWEI_MOBILE", u["manufacturer"] == u["product"] == "HUAWEI_MOBILE")
-    check("стратегия по умолчанию — окно 5", vm.DEFAULTS["strategy"] == "window:5")
+    check("стратегия по умолчанию — по одному с паузой 3 с", vm.DEFAULTS["strategy"] == "serial:3")
 
 
 def test_layout():
@@ -552,8 +552,39 @@ def test_teardown():
           ("systemctl", "disable", "--now", "proxyveth-proxy", "proxyveth-usbipd") in ran, ran)
 
 
+def test_create_serial():
+    print("создание модемов по одному (serial):")
+    made, have, logs = [], set(), []
+    peak = [0]
+
+    def fake_create(p, cfg, st):
+        peak[0] = max(peak[0], len([n for n in made if n not in have]))   # сколько «в пути» до этого
+        made.append(p["n"])
+
+    def fake_sh(*c, **k):                 # сервер берёт адрес модема к первому опросу после втыкания
+        have.update(made)
+        return types.SimpleNamespace(stdout="".join("4: eth%d    inet 192.168.%d.100/24 brd x\n" % (n, n) for n in have),
+                                     returncode=0)
+
+    q = [201, 202, 203]
+    undo = patch(vm, create=fake_create, sh=fake_sh, log=logs.append, host_mode=lambda cfg: "mpspace")
+    try:
+        ready, failed, _ = vm.create_all(q, {n: {"n": n} for n in q}, dict(vm.DEFAULTS), {}, "serial:0")
+        serial_peak = peak[0]
+        made.clear(); have.clear(); peak[0] = 0
+        vm.create_all(q, {n: {"n": n} for n in q}, dict(vm.DEFAULTS), {}, "window:5")
+        window_peak = peak[0]
+    finally:
+        undo()
+    check("все три готовы, по порядку", sorted(ready) == q and not failed, (ready, failed))
+    check("serial: следующий — только когда сервер взял прошлый (в пути не больше одного)", serial_peak == 0, serial_peak)
+    check("window:5 так не умеет — втыкает пачкой", window_peak >= 1, window_peak)
+    check("в журнале — каждый модем и счёт", any("модем 203" in m and "(3/3)" in m for m in logs), logs)
+
+
 if __name__ == "__main__":
     test_lint()
+    test_create_serial()
     test_diag()
     test_notify()
     test_proxy_conf()
