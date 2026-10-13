@@ -27,6 +27,7 @@ ETC = "/etc/proxyveth"
 CONFIG = ETC + "/config.json"
 TABLE = ETC + "/table.csv"
 OLD_GW = ETC + "/env"                  # proxyveth-virt 3.4: режим gw, переезд делает gw.setup
+STOPPED = "/var/lib/proxyveth/stopped.json"   # остановленные вручную (down): sync их не поднимает
 RUN = "/run/proxyveth"
 LOCK = RUN + "/lock"
 ARGV = []                     # аргументы этого запуска: с ними команда уходит в фон
@@ -36,7 +37,7 @@ CMD = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 MODES = ("usb", "gw")
 IFACE = ("setup", "apply", "up", "down", "status", "diag", "teardown", "doctor")
 COMMON = {"source": "", "max_remove_share": 0.5}
-ICON = {"ok": "✓", "warn": "⚠", "broken": "✗", "absent": "·", "disabled": "–", "rebooting": "↻"}
+ICON = {"ok": "✓", "warn": "⚠", "broken": "✗", "absent": "·", "disabled": "–", "stopped": "■", "rebooting": "↻"}
 
 HELP = """proxyveth — из прокси сетевой интерфейс (режим сервера: usb или gw)
 
@@ -45,8 +46,9 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
   proxyveth table [show|pull|edit|put]  показать / из Google / копия в $EDITOR / копия со stdin
   proxyveth lint                        проверить таблицу, ничего не трогая
   proxyveth sync [--force]              привести модемы к таблице (таймер делает это сам)
-  proxyveth up|down|restart N|all       down и restart всех — с --yes
-  proxyveth status [--wan]              состояние (с --wan — внешний IP через каждый модем)
+  proxyveth up|down|restart N|all       поднять / остановить (sync не поднимет до up) / пересоздать;
+                                        down и restart всех — с --yes
+  proxyveth status [--wan]              быстрый тест; с --wan — долгий: внешний IP через каждый модем
   proxyveth problems                    только проблемные
   proxyveth diag N                      прокси → логин → модем → SIM → интернет
   proxyveth rotate N | reboot N         смена IP / перезагрузка настоящего модема
@@ -183,7 +185,35 @@ def running_of(mod):
     f = getattr(mod, "running", None)
     if callable(f):
         return list(f())
-    return [r["n"] for r in mod.status() if r["state"] not in ("absent", "disabled")]
+    return [r["n"] for r in mod.status() if r["state"] not in ("absent", "disabled", "stopped")]
+
+
+def stopped():
+    """{n: когда остановлен} — модемы, снятые `down`: sync их не поднимает, пока не `up`."""
+    d = jload(STOPPED, {})
+    return {int(k): v for k, v in (d.items() if isinstance(d, dict) else ()) if str(k).isdigit()}
+
+
+def set_stopped(ns, on):
+    d = {str(k): v for k, v in stopped().items()}
+    for n in ns:
+        if on:
+            d[str(n)] = int(time.time())
+        else:
+            d.pop(str(n), None)
+    os.makedirs(os.path.dirname(STOPPED), exist_ok=True)
+    jsave(STOPPED, d)
+
+
+def rows_of(mod, wan=False):
+    """Row режима; остановленные вручную — state "stopped", а не «модема нет»."""
+    rows = mod.status(wan=True) if wan else mod.status()
+    st = stopped()
+    for r in rows:
+        if r["n"] in st and r["state"] in ("absent", "broken"):
+            r.update(state="stopped", ext_ip=None, problems=["остановлен вручную %s — поднять: proxyveth up %d" % (
+                time.strftime("%d.%m %H:%M", time.localtime(st[r["n"]])), r["n"])])
+    return rows
 
 
 def do_sync(cfg, mode, mod, force=False):
@@ -191,6 +221,10 @@ def do_sync(cfg, mode, mod, force=False):
     for pr in t["problems"]:
         log(pr if pr.startswith("⚠") else "✗ " + pr)
     desired, invalid = t["desired"], t["invalid"]
+    held_ = sorted(n for n in stopped() if n in desired)
+    if held_:
+        log("остановлены вручную, не поднимаю: %s (proxyveth up N)" % ", ".join(map(str, held_)))
+        desired = {n: p for n, p in desired.items() if n not in held_}
     pin(desired, mod)
     now = running_of(mod)
     keep = [n for n in now if n in invalid]
@@ -216,11 +250,15 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=%s %s sync --quiet
+# Подъём модемов — фоновая работа: не мешать трафику и mp.space
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 """ % (PY, CMD),
         "proxyveth-sync.timer": """[Unit]
 Description=proxyveth: модемы — при загрузке и каждые 2 минуты
 [Timer]
-OnBootSec=15
+OnBootSec=40
 OnUnitInactiveSec=120
 [Install]
 WantedBy=timers.target
@@ -487,7 +525,7 @@ def cmd_sync(a):
                 res["created"] or "—", res["recreated"] or "—", res["removed"] or "—",
                 ",".join(map(str, res["failed"])) or "—", " | не снесено (таблица подозрительная) %s" % res["held"]
                 if res["held"] else ""))
-            print_rows(mod.status())
+            print_rows(rows_of(mod))
         return (1 if res["failed"] else 0), res
 
 
@@ -509,15 +547,21 @@ def cmd_updown(a):
     if n is None:                         # все модемы — долго; один — быстро, без фона
         to_bg(a, a.cmd)
     with held():
+        t = read_table(cfg, mode, fetch=False)
+        if a.cmd == "down":
+            # Остановлен — пока не up: таймер sync его не поднимет (раньше поднимал через 2 минуты).
+            set_stopped([n] if n is not None else sorted(set(t["desired"]) | set(running_of(mod))), True)
+        else:
+            set_stopped([n] if n is not None else list(stopped()), False)
         if a.cmd in ("up", "restart"):
-            pin(read_table(cfg, mode, fetch=False)["desired"], mod)
+            pin(t["desired"], mod)
         if a.cmd in ("down", "restart"):
             mod.down(n)
         if a.cmd in ("up", "restart"):
             mod.up(n)
         if a.cmd == "down":
-            say("  таймер поднимет %s снова, если есть в таблице; убрать насовсем — enabled=0 в таблице"
-                % ("модем" if n else "модемы"))
+            say("  %s остановлен%s — таймер не поднимет, пока не: proxyveth up %s" % (
+                "модем %d" % n if n else "все модемы", "" if n else "ы", n or "all"))
         return 0, {"n": n, "action": a.cmd}
 
 
@@ -529,15 +573,16 @@ def print_rows(rows):
             r["ext_ip"] or "—", ("в порядке" + ("  · " + r["note"] if r.get("note") else "")) if r["state"] == "ok"
             else "; ".join(r["problems"]) or r["state"]))
     c = {s: sum(1 for r in rows if r["state"] == s) for s in ICON}
-    say("\n  модемов %d: в порядке %d, с предупреждением %d, сломано %d, нет %d, выключено %d%s" % (
+    say("\n  модемов %d: в порядке %d, с предупреждением %d, сломано %d, нет %d, выключено %d%s%s" % (
         len(rows), c["ok"], c["warn"], c["broken"], c["absent"], c["disabled"],
+        ", остановлено вручную %d" % c["stopped"] if c["stopped"] else "",
         ", перезагружается %d" % c["rebooting"] if c["rebooting"] else ""))
 
 
 def cmd_status(a):
     cfg = load_cfg()
     _, mod = need_mode(cfg)
-    rows = mod.status(wan=a.wan)
+    rows = rows_of(mod, wan=a.wan)
     print_rows(rows)
     return 0, rows
 
@@ -545,7 +590,7 @@ def cmd_status(a):
 def cmd_problems(a):
     cfg = load_cfg()
     _, mod = need_mode(cfg)
-    rows = [r for r in mod.status() if r["state"] not in ("ok", "disabled")]
+    rows = [r for r in rows_of(mod) if r["state"] not in ("ok", "disabled", "stopped")]
     if rows:
         print_rows(rows)
     else:

@@ -69,7 +69,9 @@ BANDS = "<NetworkBand>3FFFFFFF</NetworkBand><LTEBand>7FFFFFFFFFFFFFFF</LTEBand>"
 DEFAULTS = {
     "transport": "dummy",          # dummy | vudc
     "slots": 48,                   # экземпляров dummy_hcd (не больше свободных USB-шин)
-    "strategy": "window:5",        # сколько модемов «в пути» одновременно: у mp.space 5 слотов
+    # По одному: следующий модем — когда сервер взял прошлый, и ещё пауза 3 с. Медленнее (40 модемов —
+    # минут 7), зато ровно: пачками по 5 сервер с mp.space захлёбывался, а 12.10 ВМ падала при подъёме.
+    "strategy": "serial:3",
     "host_timeout": 90,
     "diag_interval": 300,          # как часто перепроверять исправные модемы на прокси
     # Беда за прокси (настоящий модем, SIM, интернет) — «апстрим», только если держится столько
@@ -1332,12 +1334,14 @@ def setup(cfg):
 
 def create_all(queue, desired, cfg, st, strategy):
     """Втыкаем модемы по стратегии и ждём, пока сервер возьмёт адрес.
-    window:W — не больше W модемов «в пути» (у mp.space ровно 5 слотов настройки);
+    serial:G — по одному: следующий, когда сервер взял прошлый, плюс пауза G с (по умолчанию);
+    window:W — не больше W модемов «в пути» (у mp.space 5 слотов настройки);
     fixed:B:G:P — пачки по B, между модемами G с, между пачками P с; all — все сразу."""
     kind, *nums = strategy.split(":")
     nums = [float(x) for x in nums]
     t0, plugged, ready, failed = time.time(), {}, {}, {}
     need_ip = host_mode(cfg) != "none"
+    total = len(queue)
 
     def poll():
         have = set(re.findall(r"inet (192\.168\.\d+\.100)/", sh("ip", "-4", "-o", "addr", check=False).stdout))
@@ -1346,8 +1350,10 @@ def create_all(queue, desired, cfg, st, strategy):
                 continue
             if ("192.168.%d.100" % n in have) if need_ip else host_side(n)[0]:
                 ready[n] = time.time() - tp
+                log("  ✓ модем %d: сервер взял за %.0f с (%d/%d)" % (n, ready[n], len(ready) + len(failed), total))
             elif time.time() - tp > cfg["host_timeout"]:
                 failed[n] = "сервер не взял адрес за %dс" % cfg["host_timeout"]
+                log("  ✗ модем %d: %s (%d/%d)" % (n, failed[n], len(ready) + len(failed), total))
 
     def wait(sec):
         end = time.time() + sec
@@ -1363,7 +1369,16 @@ def create_all(queue, desired, cfg, st, strategy):
             failed[n] = str(e)
             log("✗ модем %d: %s" % (n, e))
 
-    if kind == "fixed":
+    if kind == "serial":
+        gap = nums[0] if nums else 3
+        for i, n in enumerate(queue):
+            start(n)
+            while n in plugged and n not in ready and n not in failed:
+                poll()
+                time.sleep(0.5)
+            if i + 1 < len(queue):
+                wait(gap)
+    elif kind == "fixed":
         b, gap, pause = int(nums[0]), nums[1], nums[2]
         for i in range(0, len(queue), b):
             for n in queue[i:i + b]:
@@ -1686,7 +1701,7 @@ OLD_FILES = ("/etc/udev/rules.d/80-vmodem-host.rules", "/etc/systemd/network/10-
              "/etc/modprobe.d/vmodem.conf", "/etc/modules-load.d/vmodem.conf",
              "/usr/local/sbin/vmodem", "/usr/local/sbin/vmodem-api")
 OLD_DIRS = ("/etc/vmodem", "/usr/local/lib/vmodem", "/run/vmodem", "/var/lib/vmodem")
-OLD_KEYS = ("source", "transport", "slots", "strategy", "host_timeout", "diag_interval", "max_fail",
+OLD_KEYS = ("source", "transport", "slots", "host_timeout", "diag_interval", "max_fail",
             "max_remove_share", "hostside", "usb", "proxy", "notify")
 
 

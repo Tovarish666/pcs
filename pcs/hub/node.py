@@ -51,11 +51,12 @@ def say(msg):
 
 # ── info ───────────────────────────────────────────────────────────────────
 def summarize(rows):
-    """Row proxyveth (§6) → {"ok","warn","broken","total"}; выключенные в таблице не считаются."""
+    """Row proxyveth (§6) → {"ok","warn","broken","total"}; выключенные в таблице и
+    остановленные вручную не считаются — их так и задумали."""
     c = {"ok": 0, "warn": 0, "broken": 0, "total": 0}
     for r in rows or []:
         st = (r or {}).get("state") if isinstance(r, dict) else None
-        if st == "disabled":
+        if st in ("disabled", "stopped"):
             continue
         c["total"] += 1
         if st == "ok":
