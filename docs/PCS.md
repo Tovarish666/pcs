@@ -188,8 +188,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install
    - ссылки `/usr/local/bin/{pcs,hivelink,modlink}`;
    - hivelink на хост (`hivelink install`). Первая установка тяжёлая: ставятся
      `proxmox-headers-*`, `build-essential`, `dkms`, собирается модуль — несколько минут;
-   - modlink на хост (`modlink setup`: sing-box 1.14.2, юниты `modlink` и `modlink-sb`).
-     Строк нет — sing-box стоит, демон работает. Если на хосте старый modlink-linux —
+   - modlink на хост (`modlink setup`: 3proxy 1.0.0, юниты `modlink` и `modlink-3proxy`; прежний
+     `modlink-sb` с sing-box снимается). Строк нет — 3proxy стоит, демон работает. Если на хосте старый modlink-linux —
      его не трогает и подсказывает перенос (§9.6);
    - перезапуск панели, если она включена.
 
@@ -644,74 +644,104 @@ proxyveth version
 ## 9. modlink — из интерфейса прокси
 
 Работает поверх **любых** интерфейсов — настоящих модемов или proxyveth.
+**С 13.10.2026 — на 3proxy** (раньше sing-box) и по образцу modlink для Windows (ветка `app-v2`
+репозитория Tovarish666/modlink): режимы портов, ссылки ребута и реконнекта, «Копировать» на
+4 варианта, TCP и UDP, проверки внешнего IP. Почему 3proxy: сервис `auto` — HTTP и SOCKS5 (с UDP)
+на одном порту, процесс ~7 МБ на 20 прокси против ~55 МБ у sing-box (замер на стенде).
 
 ### 9.1 Таблица — `/etc/modlink/proxies.json` (600)
 
 | поле | что | куда уходит |
 |---|---|---|
-| `id` | постоянный номер строки: N для адреса 192.168.N.x, если свободен, иначе с 1001; удалённые номера не переиспользуются | — |
+| `id` | постоянный номер строки: N для адреса 192.168.N.x, если свободен, иначе с 1001; удалённые номера не переиспользуются | в панели — «№» |
 | `enabled` | строка активна | выключенные не попадают в конфиг |
 | `name` | метка | интерфейс |
-| `login`, `password` | доступ к прокси (печатный ASCII; в логине нельзя `:`) | `users` mixed-inbound |
-| `port` | порт прокси, **постоянный**; `auto` — первый свободный с 10000 | `listen_port` |
-| `lan_ip` | адрес интерфейса на сервере | `inet4_bind_address` direct-outbound: именно это привязывает трафик к модему |
+| `login`, `password` | доступ к прокси (печатный ASCII; в логине нельзя `:`). **Логины не повторяются**: у 3proxy один список пользователей | `users` 3proxy |
+| `port` | порт прокси, **постоянный**; может быть общим у нескольких строк — модем выбирается по логину | `auto -pPORT` |
+| `lan_ip` | адрес интерфейса на сервере | свой порт — `-e lan_ip`; общий — `parent 1000 extip lan_ip 0` у логина: именно это привязывает трафик к модему |
 | `modem_ip` | веб-интерфейс Huawei | HiLink API: реконнект, ребут, проверка |
-| `reconnect_port` | порт триггера; `auto` — следующий за `port` | `GET http://<ip>:<порт>/reconnect` |
+| `reboot_port` | порт ссылки ребута; 0 — нет | `GET http://<ip>:<порт>/reboot[/<пароль>]` |
+| `reconnect_port` | порт ссылки реконнекта; 0 — нет; может совпадать с `reboot_port` (один слушатель, два пути) | `GET http://<ip>:<порт>/reconnect[/<пароль>]` |
 | `interval_min` | автореконнект, минут (0 — выкл) | таймер в демоне |
-| `protect` | защита строки (по умолчанию **вкл**; у старых строк без поля — тоже вкл), §9.5 | правила sing-box |
+| `protect` | защита строки (по умолчанию **вкл**), §9.5 | запреты 3proxy |
 
-- Порты прокси и триггеров не пересекаются ни между строками, ни с занятыми на машине.
-  Пример: на ВМ с mp.space порт 10000 занят им, и первая строка получила 10001.
+- **Режим портов** (§9.7, как в modlink для Windows) — только по явной команде, порты сами не съезжают:
+  - `triples` — у строки свои три порта подряд: прокси P, ребут P+1, реконнект P+2;
+  - `shared` — у всех один порт прокси (модем — по логину) и один порт управления; ссылки —
+    `/reconnect/<пароль строки>` и `/reboot/<пароль строки>` (пароль в пути: браузер не считает
+    это прокси-авторизацией, в отличие от `http://login:pass@`). Подходит и HTTP Basic.
+  - Новая строка (`auto`) — свободная тройка от базового порта или общие порты.
+- Порт прокси не бывает портом управления; на общем порту управления пароли строк разные.
 - Правки вступают в силу **только после `modlink apply`**: демон берёт строки из
   `/var/lib/modlink/applied.json`. `list` и `status` показывают `pending`, если есть
   неприменённые правки.
+- Перенос с прежнего modlink (sing-box) — сам, при обновлении: порты и пароли как были,
+  реконнект на прежнем порту, ребута не было — `reboot_port = 0`.
 
 ### 9.2 Устройство
 
-- **`modlink-sb.service`** — sing-box. На каждую включённую строку:
-  - mixed-inbound `0.0.0.0:port` (HTTP CONNECT + SOCKS5) с логином;
-  - direct-outbound с `inet4_bind_address = lan_ip`;
-  - правило inbound → свой outbound.
-
-  Перед правилами строк (порядок важен):
-  1. `sniff` — только для строк с защитой: домен узнаётся по SNI/Host, даже если клиент
-     пришёл с голым IP;
-  2. имена резолвятся только в IPv4;
-  3. IPv6 — `reject` у всех (ушёл бы мимо модема);
-  4. строкам **без** защиты — `route` на свой `modem_ip/32` (веб и DNS своего модема);
-  5. частные адреса (`ip_is_private`) и CGNAT `100.64.0.0/10` — `reject` у всех: иначе
-     через прокси были бы видны службы самого сервера (127.0.0.1, порты proxyveth,
-     mp.space, Proxmox на хосте) и его LAN;
-  6. строкам с защитой — `reject` для сайтов операторов и опасных портов (§9.5).
-
-  Последнее правило — `reject`.
+- **`modlink-3proxy.service`** — 3proxy 1.0.0 (`/usr/local/lib/pcs/3proxy`, из официального .deb,
+  сверка SHA-256; бинарник 330 КБ, нужны libssl3, pcre2, zlib, zstd) с `/etc/modlink/3proxy.cfg`:
+  - `auth strong`, `users` — только включённые строки; `maxconn 5000` (у 3proxy по умолчанию 100 на сервис);
+  - на каждый порт прокси — `flush`, правила строк, `auto -pPORT` (HTTP CONNECT + SOCKS5 на одном порту);
+  - правила строки по порядку (первое совпавшее решает): без защиты — `allow` своего `modem_ip`;
+    `deny` частных сетей, 127/8, CGNAT, multicast (у всех); только TCP — `deny … UDPASSOC`;
+    с защитой — `deny` сайтов операторов (по имени, только `CONNECT,HTTP,HTTPS`: на UDP 3proxy
+    сверяет имя с IP и рубил весь UDP), своих сетей и опасных портов; `allow логин`
+    (на общем порту — с `parent 1000 extip lan_ip 0`);
+  - трафик TCP и UDP и задан WAN IP — `-Ni<WAN IP>`: его 3proxy сообщает клиенту для UDP ASSOCIATE;
+  - журнал каждого соединения — только с `access_log` (`/var/log/modlink/3proxy.log`, 3 дня).
+- **`modlink apply`**: конфиг → `systemctl reload` (SIGUSR1: 3proxy перечитывает, соединения не
+  рвутся, PID тот же) → проверка, что все порты слушают; не вышло — перезапуск; порт так и не
+  поднялся — прежний конфиг обратно и ошибка с журналом.
+- **Свои порты — в `net.ipv4.ip_local_reserved_ports`** (`/etc/sysctl.d/91-modlink-ports.conf`):
+  на ВМ с mp.space `ip_local_port_range = 1024–65535`, и исходящие соединения брали бы порты прокси
+  и ссылок (на стенде так и было: «порт занят» на ровном месте). Чужие резервы не трогаются.
+  Занятость порта проверяется по LISTEN (`/proc/net/tcp`), а не пробным bind.
 - **`modlink.service`** (`modlink daemon`):
-  - триггеры `GET /reconnect` на портах строк. Ответ `{ok, ip?}` или `{ok:false, error}`,
-    коды 200 / 409 (уже идёт) / 502 (модем отказал) / 404 / 405;
-  - автореконнект по `interval_min`;
-  - SIGHUP — перечитать;
-  - состояние — `/run/modlink/state.json`.
+  - ссылки `GET /reconnect` и `GET /reboot` на портах управления. Строку выбирает: пароль или логин
+    в пути → HTTP Basic → единственная строка порта. Браузеру — страница «было → стало» (старый IP
+    зачёркнут, новый зелёным) или «перезагрузка отправлена»; скрипту (или `?json`) — `{ok, ip?}` /
+    `{ok:false, error}`. Коды 200 / 401 (общий порт без пароля) / 403 (не тот пароль) / 404 / 405 /
+    409 (уже идёт) / 502 (модем отказал);
+  - автореконнект по `interval_min` (молчит, если порт реконнекта держит кто-то ещё — старая панель);
+  - раз в час — внешний IP через каждый прокси (`wan_check`), раз в день в 12:00 — скорость
+    (`speedtest`, по умолчанию выкл: трафик модема) → `/var/lib/modlink/checks.json`;
+  - SIGHUP — перечитать; состояние — `/run/modlink/state.json`.
 - **Реконнект через HiLink:** свежая пара SesTokInfo перед каждым POST → передача данных
   выкл → режим сети `02` и обратно к исходному → данные вкл (3 попытки) → ждём
   `ConnectionStatus 901`.
 - Новый внешний IP узнаётся запросом с привязкой к `lan_ip`, то есть тем же путём, что идёт прокси.
-- **Ребут** — `device/control Control=1`.
-- Журнал строки — `/var/log/modlink/<id>.log`, при 1 МБ переносится в `.1`.
+- **Ребут** — `device/control Control=1`. **Скорость** — yaspeed 1.0.1 (`--source-ip lan_ip`),
+  ставится по первому запросу в `/usr/local/lib/pcs/yaspeed`.
+- Журнал строки — `/var/log/modlink/<id>.log` (реконнекты, ребуты, скорость), при 1 МБ — в `.1`.
+- **Проверено на стенде (13.10.2026, ВМ 2000, 20 модемов):** каждый порт выходит через свой
+  модем (HTTP и SOCKS5); общий порт — три логина, три разных IP; запреты (чужой 192.168.x, mts.ru по
+  имени и через socks5h, порт 25, 127.0.0.1) — 403/отказ; UDP (DNS к 8.8.8.8 через SOCKS5 UDP) — есть,
+  в частную сеть — нет; смена пароля и apply — reload, тот же PID; реконнект по ссылке — страница
+  «188.162.65.134 → 94.25.228.98»; 3proxy на 20 прокси — 7 МБ.
+- Ограничение: запрет по имени срабатывает, когда имя прислал клиент (HTTP, `socks5h`). Если клиент
+  сам перевёл имя в IP (`socks5`), сайт оператора по имени не узнать (sing-box узнавал по SNI);
+  частные сети и порты закрыты всегда.
 
 ### 9.3 Команды
 
 ```
 modlink list [--show-pass]
 modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
-            [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled] [--no-protect]
+            [--modem-ip IP] [--reboot-port N|auto|0] [--reconnect-port N|auto|0]
+            [--interval MIN] [--disabled] [--no-protect]
 modlink set ID поле=значение …       (password=- — со stdin; protect=on|off)
 modlink del ID --yes | enable ID | disable ID
 modlink protect                      что закрывает защита и у каких строк снята
 modlink protect ID|all on|off        включить / снять защиту
-modlink settings [base_port=N] [lan_ip=IP|auto] [wan_ip=IP|auto]   общие настройки (§9.7)
-modlink apply                        конфиг → sing-box check → запись → перезапуск
-modlink status | test ID | reconnect ID | reboot ID | log ID [-n N]
-modlink export [--ip IP|auto] [--save]   IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
+modlink settings [ключ=значение …]   общие настройки (§9.7): base_port, mode, traffic, lan_ip,
+                                     wan_ip, access_log, wan_check, speedtest
+modlink apply                        конфиг 3proxy → reload → проверка портов
+modlink status | test ID | reconnect ID | reboot ID | speedtest ID | log ID [-n N]
+modlink logs [3proxy|modlink] [-n N] журнал службы 3proxy (и соединений) или демона
+modlink export [--what proxy|reboot|reconnect|all] [--ip IP|auto] [--save]
+                                     строки для клиента; all — прокси, ребут, реконнект через табуляцию
 modlink export --table [--ip IP]     строки таблицы proxyveth: виртуальные модемы из этих настоящих (§9.6)
 modlink from-ifaces [--add]          строки по интерфейсам 192.168.N.100 (основной канал пропускается)
 modlink migrate [--from DIR] [--dry-run] [--force] [--stop-panel]   из modlink-linux
@@ -719,8 +749,8 @@ modlink setup | uninstall --yes [--purge] | daemon | version
 ```
 
 **Перенос из modlink-linux (`migrate`):**
-- строки с id N, логином `modemN`, портами `base+2i` и `base+2i+1`, паролями: из
-  `modems.conf`, из `singbox.json` или тот sha256, что придумывал `modlink-server`;
+- строки с id N, логином `modemN`, портами прокси `base+2i` и реконнекта `base+2i+1` (как были),
+  без ребута; пароли: из `modems.conf`, из `singbox.json` или тот sha256, что придумывал `modlink-server`;
 - старый `modlink.service` (их sing-box, имя совпадает с нашим демоном) останавливается,
   копия — в `/etc/modlink/legacy/`;
 - старая панель (порт 5000) без `--stop-panel` не останавливается;
@@ -731,11 +761,13 @@ modlink setup | uninstall --yes [--purge] | daemon | version
 | команда | `data` |
 |---|---|
 | `list` | `{proxies: [строки §9.1, password=null], pending}` |
-| `status` | `{sb, daemon, unit, pending, rows: [{id, name, enabled, applied, state: ok\|warn\|broken\|disabled\|pending, port, port_up, lan_ip, iface, reconnect_port, trigger_up, trigger_error, interval_min, next, last: {t, how, ok, dt, text}}]}` |
+| `status` | `{proxy, daemon, unit, engine, mode, traffic, pending, rows: [{id, name, enabled, applied, state: ok\|warn\|broken\|disabled\|pending, port, port_up, lan_ip, iface, reboot_port, reconnect_port, trigger_up, trigger_error, interval_min, next, last: {t, how, ok, dt, text}, wan_ip, wan_t, wan_error, speed}]}` |
 | `test ID` | `{id, proxy: {ok, ip\|error}, hilink: {ok, status, net, signal\|error}, iface}` |
 | `reconnect ID` | `{id, ok, ip, same, dt}` |
+| `speedtest ID` | `{id, down, up, ping, ip, server}` (Мбит/с, мс) |
 | `log ID` | `{id, lines}` |
-| `export` | `{ip, lines}` |
+| `logs [3proxy\|modlink]` | `{which, lines}` |
+| `export [--what …]` | `{ip, what, columns, rows, lines}` |
 | `export --table` | `{ip, lines (CSV с шапкой n,real,proxy,enabled), warnings}` |
 | `protect` | `{domains, ports, port_ranges, cidrs, always, off: [id]}` |
 | `protect ID\|all on\|off` | `{protect, changed: [id]}` |
@@ -750,7 +782,7 @@ modlink setup | uninstall --yes [--purge] | daemon | version
 
 | | защита **активна** (по умолчанию) | защита **не активна** (ген1, для себя) |
 |---|---|---|
-| сайты и ЛК операторов: mts.ru, megafon.ru, beeline.ru, tele2.ru, t2.ru, yota.ru, sbermobile.ru, vtbmobile.ru, gpbmobile.ru, motivtelecom.ru, danycom.ru, letai.ru, volnamobile.ru, win-mobile.ru (с поддоменами) | закрыты, и по имени, и по SNI/Host при голом IP | открыты |
+| сайты и ЛК операторов: mts.ru, megafon.ru, beeline.ru, tele2.ru, t2.ru, yota.ru, sbermobile.ru, vtbmobile.ru, gpbmobile.ru, motivtelecom.ru, danycom.ru, letai.ru, volnamobile.ru, win-mobile.ru (с поддоменами) | закрыты по имени, которое прислал клиент (HTTP, `socks5h`); с 13.10.2026 голый IP не распознаётся (§9.2) | открыты |
 | порты 23, 25, 135, 137–139, 445, 465, 587, 1900, 2525, 6881–6889 (telnet, почта, SMB, SSDP, торренты) | закрыты | открыты |
 | веб своего модема (`modem_ip`) | закрыт | **открыт** — только `modem_ip/32` |
 | остальные частные адреса, 127/8, CGNAT 100.64/10, IPv6 | закрыты | закрыты |
@@ -760,9 +792,8 @@ modlink setup | uninstall --yes [--purge] | daemon | version
   Испорченный файл — `modlink apply` откажет с понятной ошибкой.
 - Правки вступают в силу после `modlink apply`. После обновления кода конфиг сам
   пересобирается (`resync`): у старых строк защита включается.
-- `sniff` у защищённых строк задерживает протоколы, где первым говорит сервер (SSH, SMTP),
-  примерно на 0,3 с: sing-box ждёт первые байты от клиента. SSH работает.
-- **Проверено на стенде (10.10.2026)**, трафик из ВМ 2000 через modlink хоста:
+- Задержки на первом пакете больше нет: у sing-box `sniff` ждал байты клиента до 0,3 с, 3proxy так не делает.
+- **Проверено на стенде (10.10.2026, ещё на sing-box)**, трафик из ВМ 2000 через modlink хоста:
   с защитой — ЛК МТС/Мегафона закрыт по имени, по CONNECT и по голому IP, веб модема,
   соседние ВМ, сам хост и 127.0.0.1 закрыты; без защиты — ЛК и веб модема открыты,
   соседи, хост и 127.0.0.1 по-прежнему закрыты.
@@ -810,18 +841,37 @@ megavolgadata). Его `modlink.service` — это его sing-box: держи�
 
 ### 9.7 Общие настройки (`modlink settings`, сверху вкладки modlink)
 
-Как в modlink-linux — одна строка над таблицей: базовый порт, LAN IP, WAN IP. Хранятся
-в `/etc/modlink/config.json` (`base_port`, `lan_ip`, `wan_ip`; прежнее `ext_ip` читается как `wan_ip`).
+Как в modlink для Windows — карточка «Основная сеть» над таблицей. Хранятся в
+`/etc/modlink/config.json` (прежнее `ext_ip` читается как `wan_ip`).
 
 | настройка | что делает |
 |---|---|
-| **базовый порт** (`base_port`, по умолчанию 10000) | смена пересчитывает порты **всех** строк подряд в порядке id: прокси `база+2i`, реконнект `база+2i+1`. Если какой-то из этих портов занят чужим — отказ, ничего не меняется. Новые строки (`auto`) берут первую свободную пару от базового. Дальше — `modlink apply` |
-| **LAN IP** (`lan_ip`, пусто — авто: основной адрес машины) | адрес машины в локальной сети: в строках «Для proxyveth» (`export --table`) — их берут ВМ этого хоста |
-| **WAN IP** (`wan_ip`, пусто — авто: узнаётся при экспорте) | внешний адрес для клиентов: в «Экспорт для клиента» (`export`) |
+| **IP этого хоста** (`lan_ip`, пусто — авто: основной адрес машины) | адрес в локальной сети: в строках «Для proxyveth» (`export --table`) — их берут ВМ этого хоста |
+| **Внешний IP** (`wan_ip`, пусто — авто: узнаётся при копировании) | адрес для строк и ссылок клиентам; его же 3proxy сообщает для UDP (`-Ni`) |
+| **Базовый порт** (`base_port`, по умолчанию 10000) | от него порты новых строк и смены режима. Смена — порты **всех** строк заново в текущем режиме |
+| **Режим портов** (`mode`: `triples` / `shared`) | «Разные порты (тройки)» / «Один порт (по логину)» — порты **всех** строк заново, §9.1. Порт занят чужим — отказ, ничего не меняется |
+| **Трафик** (`traffic`: `tcp+udp` / `tcp`) | «TCP и UDP» или «Только TCP» (UDP ASSOCIATE запрещён) |
+| **Внешний IP раз в час** (`wan_check`, вкл) | демон проверяет выход каждого прокси; в панели — колонка «Внешний IP» |
+| **Скорость в 12:00** (`speedtest`, выкл) | раз в день yaspeed по каждому модему — это трафик модема |
+| **Журнал соединений** (`access_log`, выкл) | каждое соединение 3proxy — в файл (много места при большом трафике) |
 
-- `modlink settings` без аргументов — показать (`--json`: `{base_port, lan_ip, wan_ip, lan_ip_now, renumbered}`).
+- `modlink settings` без аргументов — показать (`--json`: все поля + `lan_ip_now`, `renumbered`).
+- После `base_port`, `mode`, `traffic`, `wan_ip`, `access_log` — `modlink apply`.
 - `export --save` сохраняет WAN IP; `migrate` переносит `base_port` и `ext_ip` старой панели.
 - Меню «Прокси — modlink» → «Настройки»; панель — `POST /api/targets/{id|host}/modlink/settings`.
+
+### 9.8 Вкладка modlink в панели (как в modlink для Windows)
+
+- Сверху: состояние 3proxy и демона, «Применить» (правки таблицы → apply).
+- «Основная сеть»: IP хоста, внешний IP, базовый порт; режим портов и трафик — переключатели;
+  галочки проверок и журнала.
+- «Модемы»: **№ · IP · Порт · Логин · Пароль · Внешний IP** и действия в строке: Test (внешний IP
+  через прокси + HiLink), ⟳ реконнект, ⧉ копировать строку, ▾ ещё (имя, IP модема, порты ребута и
+  реконнекта, автореконнект, вкл, защита; «Ребут модема», «Спидтест», «Журнал»), ✕ удалить.
+- «Копировать ▾»: только прокси / только ссылки ребута / только ссылки реконнекта / прокси + ребут +
+  реконнект — таблицей по колонкам, «Копировать для таблицы» кладёт через табуляцию (в Google-таблицу
+  встаёт по ячейкам).
+- «+ Модем», «Из интерфейсов», «Для proxyveth», «Логи ▾» (3proxy / демон).
 
 ---
 

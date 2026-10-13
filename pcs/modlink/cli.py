@@ -24,6 +24,7 @@
   modlink status
   modlink test ID                         внешний IP через этот прокси + HiLink
   modlink reconnect ID | reboot ID | speedtest ID | log ID [-n N]
+  modlink logs [3proxy|modlink] [-n N]    журнал 3proxy (и соединений, если access_log) или демона
   modlink export [--what proxy|reboot|reconnect|all] [--ip IP|auto] [--save]
                                           строки для клиента: прокси IP:PORT:LOGIN:PASS, ссылки
                                           ребута и реконнекта; all — всё по колонкам (табуляция)
@@ -103,6 +104,9 @@ def parser():
     c = sub.add_parser("log")
     c.add_argument("id")
     c.add_argument("-n", type=int, default=50)
+    c = sub.add_parser("logs")
+    c.add_argument("which", nargs="?", choices=("3proxy", "modlink"), default="3proxy")
+    c.add_argument("-n", type=int, default=200)
     for name in ("apply", "status", "setup", "daemon", "version"):
         sub.add_parser(name)
     c = sub.add_parser("export")
@@ -391,6 +395,23 @@ def cmd_log(a):
     return 0, {"id": rid, "lines": lines}
 
 
+def cmd_logs(a):
+    """Журнал 3proxy (journald юнита + журнал соединений, если включён) или демона modlink."""
+    n = max(1, min(a.n, 2000))
+    unit = system.PROXY if a.which == "3proxy" else system.SVC
+    lines = util.sh("journalctl", "-u", unit, "-n", str(n), "--no-pager", "-o", "short-iso",
+                    check=False).stdout.splitlines()
+    if a.which == "3proxy" and store.settings()["access_log"]:
+        try:
+            with open(P.log + "/3proxy.log", encoding="utf-8", errors="replace") as f:
+                lines += ["— соединения —"] + f.read().splitlines()[-n:]
+        except OSError:
+            pass
+    for ln in lines:
+        say("  " + ln)
+    return 0, {"which": a.which, "lines": lines[-n * 2:]}
+
+
 def primary_ip():
     m = re.search(r"src (\d+\.\d+\.\d+\.\d+)", util.sh("ip", "-4", "route", "get", "1.1.1.1", check=False).stdout)
     if not m:
@@ -500,7 +521,7 @@ def cmd_daemon(a):
 CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enable": cmd_enable, "protect": cmd_protect,
         "settings": cmd_settings,
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
-        "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log, "speedtest": cmd_speedtest,
+        "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log, "speedtest": cmd_speedtest, "logs": cmd_logs,
         "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,
         "setup": cmd_setup, "uninstall": cmd_uninstall, "daemon": cmd_daemon}
 

@@ -237,3 +237,32 @@ table.t .acts-cell button { padding: 2px 7px; }
 .login-card { width: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; display: grid; gap: 12px; }
 .login-card label { display: grid; gap: 4px; font-size: 13px; }
 .login-card .err { color: var(--bad); min-height: 1.2em; margin: 0; font-size: 13px; }
+
+/* modlink — по образцу modlink для Windows: основная сеть, режим портов, модемы с «ещё» */
+.card.ml-net { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 12px 14px; margin: 8px 0 12px; }
+.eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 760px) { .grid3 { grid-template-columns: 1fr; } }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field input { width: 100%; }
+.field .hint { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+.ml-opts { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 10px; }
+.seg { display: inline-flex; gap: 4px; }
+.menu-wrap { position: relative; display: inline-block; }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 220px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 10px 28px -12px rgba(0, 0, 0, .45); }
+.menu button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 7px 10px; border-radius: 6px; }
+.menu button:hover { background: var(--panel2); }
+.ml-head { margin-top: 6px; }
+table.ml td.ml-n { white-space: nowrap; font-weight: 600; }
+table.ml td.ml-n .dot { margin-right: 6px; }
+table.ml tr.off td { opacity: .5; }
+table.ml td.ml-ext .ok { color: var(--ok); }
+table.ml td.ml-ext .bad { color: var(--bad); }
+table.ml tr.ml-more td { background: var(--panel2); border-top: 1px dashed var(--line); }
+.ml-more-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 4px 0 8px; }
+.ml-more-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+@media (max-width: 900px) { .ml-more-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.ml-pw { display: inline-flex; gap: 4px; align-items: center; }
+.speedline { font: 12px var(--mono); color: var(--muted); margin: 4px 0; }
+.speedline.ok { color: var(--ok); } .speedline.bad { color: var(--warn); } .speedline.busy { color: var(--fg); }
