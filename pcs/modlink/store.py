@@ -354,8 +354,30 @@ def modem_n(ip):
     return int(m.group(1)) if m and 1 <= int(m.group(1)) <= 254 else None
 
 
+def listen_ports(root=""):
+    """TCP-порты в LISTEN (из /proc/net/tcp*); None — узнать нечем."""
+    ports, seen = set(), False
+    for name in ("tcp", "tcp6"):
+        try:
+            with open("%s/proc/net/%s" % (root, name)) as f:
+                lines = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        seen = True
+        for ln in lines:
+            f = ln.split()
+            if len(f) > 3 and f[3] == "0A":
+                ports.add(int(f[1].rsplit(":", 1)[1], 16))
+    return ports if seen else None
+
+
 def port_free(p):
-    """Никто на машине не слушает TCP-порт p (свой sing-box и триггеры — тоже «кто-то»)."""
+    """Никто на машине не слушает TCP-порт p (свой 3proxy и ссылки — тоже «кто-то»).
+    Именно LISTEN, а не пробный bind: на ВМ с mp.space исходящие соединения берут любые
+    порты от 1024 (ip_local_port_range), и bind ложно говорил «занят»."""
+    lst = listen_ports()
+    if lst is not None:
+        return p not in lst
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

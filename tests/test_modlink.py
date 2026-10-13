@@ -753,6 +753,22 @@ finally:
     (system.sh, system.net.ensure_base, system.threeproxy.install, system.threeproxy.installed,
      system.time.sleep, system.listening) = real
 
+print("порты modlink — не исходящим соединениям (ip_local_reserved_ports):")
+check("диапазоны: туда и обратно", system.ranges({10000, 10001, 10002, 10005}) == "10000-10002,10005"
+      and system.parse_ranges("10000-10002,10005\n") == {10000, 10001, 10002, 10005})
+fresh_root()
+rp = store.P.root + system.RESERVED
+os.makedirs(os.path.dirname(rp))
+open(rp, "w").write("8080\n")
+check("резерв: чужой порт остаётся, свои добавлены, файл sysctl для загрузки",
+      system.reserve_ports({10000, 10001, 10002}) and open(rp).read().strip() == "8080,10000-10002"
+      and "ip_local_reserved_ports = 8080,10000-10002" in open(store.P.root + system.RESERVED_CONF).read())
+system.reserve_ports({20000})
+check("порты сменились — прежние свои сняты", open(rp).read().strip() == "8080,20000")
+system.reserve_ports(set())
+check("строк нет — свои сняты, чужой на месте", open(rp).read().strip() == "8080")
+check("нет /proc (не Linux) — молча ничего", (os.unlink(rp) or True) and system.reserve_ports({1}) is False)
+
 print("юниты:")
 u = system.unit_proxy()
 check("modlink-3proxy: свой 3proxy из /usr/local/lib/pcs со своим конфигом, reload — SIGUSR1",

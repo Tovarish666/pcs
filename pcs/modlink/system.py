@@ -113,19 +113,70 @@ def local_addrs():
 
 def listening():
     """TCP-порты в LISTEN (из /proc, без ss); None — узнать нечем."""
-    ports, seen = set(), False
-    for p in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(p) as f:
-                lines = f.read().splitlines()[1:]
-        except OSError:
+    return store.listen_ports()
+
+
+# ── свои порты — не исходящим соединениям ─────────────────────────────────
+RESERVED = "/proc/sys/net/ipv4/ip_local_reserved_ports"
+RESERVED_CONF = "/etc/sysctl.d/91-modlink-ports.conf"
+
+
+def parse_ranges(text):
+    out = set()
+    for part in str(text or "").replace("\n", ",").split(","):
+        part = part.strip()
+        if not part:
             continue
-        seen = True
-        for ln in lines:
-            f = ln.split()
-            if len(f) > 3 and f[3] == "0A":
-                ports.add(int(f[1].rsplit(":", 1)[1], 16))
-    return ports if seen else None
+        a, _, b = part.partition("-")
+        try:
+            a, b = int(a), int(b or a)
+        except ValueError:
+            continue
+        out.update(range(a, b + 1))
+    return out
+
+
+def ranges(ports):
+    """{10000, 10001, 10002, 10005} → "10000-10002,10005"."""
+    out, ps = [], sorted(ports)
+    i = 0
+    while i < len(ps):
+        j = i
+        while j + 1 < len(ps) and ps[j + 1] == ps[j] + 1:
+            j += 1
+        out.append(str(ps[i]) if i == j else "%d-%d" % (ps[i], ps[j]))
+        i = j + 1
+    return ",".join(out)
+
+
+def reserve_ports(ports, log=None):
+    """Порты modlink — в net.ipv4.ip_local_reserved_ports: ядро не отдаёт их исходящим соединениям.
+    На ВМ с mp.space ip_local_port_range = 1024–65535 — исходящие брали бы порты прокси и ссылок,
+    и 3proxy не мог их занять. Чужие резервы не трогаем; наши прошлые — снимаем. → изменилось ли."""
+    path, conf, mine = P.root + RESERVED, P.root + RESERVED_CONF, P.lib + "/reserved.json"
+    if not os.path.exists(path):
+        return False
+    prev = set(jload(mine, []) or [])
+    cur = parse_ranges(rd(path))
+    want = (cur - prev) | set(ports)
+    text = ranges(want)
+    changed = want != cur
+    if changed:
+        try:
+            with open(path, "w") as f:
+                f.write(text + "\n")
+        except OSError as e:
+            if log:
+                log("⚠ порты modlink не зарезервированы от исходящих (%s) — при занятом порте 3proxy его не поднимет" % e)
+            return False
+    if want:
+        os.makedirs(os.path.dirname(conf), exist_ok=True)
+        wr(conf, "# modlink (PCS): свои порты — не исходящим соединениям\nnet.ipv4.ip_local_reserved_ports = %s\n" % text, 0o644)
+    elif os.path.exists(conf):
+        os.unlink(conf)
+    os.makedirs(P.lib, mode=0o700, exist_ok=True)
+    jsave(mine, sorted(ports), 0o600)
+    return changed
 
 
 def applied_rows():
@@ -240,6 +291,7 @@ def apply(log, binary=None):
                    % (", ".join(map(str, busy[:5])), who["id"]))
     dirs()
     warn = []
+    reserve_ports({p for r in en for p in ports_of(r)}, log)
     if en:
         how = start_proxy(text, {r["port"] for r in en})
         log("3proxy: %d прокси на %d портах (%s)" % (len(en), len({r["port"] for r in en}),
@@ -289,6 +341,7 @@ def resync(log, binary=None):
         return False
     text = store.config3(rows, store.settings(), store.guard_extra())
     en = [r for r in rows if r["enabled"]]
+    reserve_ports({p for r in en for p in ports_of(r)}, log)
     if rd(P.cfg3) == text.strip():
         if en and active(PROXY) != "active":
             systemctl("enable", "--now", PROXY)
@@ -359,6 +412,7 @@ def uninstall(log, purge=False):
             os.unlink(unit_path(name))
             log("снят %s" % name)
     systemctl("daemon-reload")
+    reserve_ports(set())
     restored = []
     keep = os.path.join(P.legacy, SVC)
     if os.path.exists(keep) and not os.path.exists(unit_path(SVC)):
