@@ -1,4 +1,4 @@
-"""Действия над модемом строки: реконнект, ребут, проверка — и журнал реконнектов строки.
+"""Действия над модемом строки: реконнект, ребут, проверка, скорость — и журнал строки.
 
 Их зовут и команда, и демон. Один модем — одно действие за раз: блокировка по адресу
 HiLink (у двух строк на одном модеме она общая), между процессами — flock.
@@ -129,6 +129,20 @@ def reboot(r, how="cli"):
             raise
     log_line(r["id"], "reboot/" + how, True, time.time() - t0, "перезагрузка отправлена")
     return {"id": r["id"], "ok": True}
+
+
+def speedtest(r, how="cli"):
+    """Скорость модема строки (yaspeed с его адреса — тот же путь, что у прокси). Это трафик модема."""
+    from ..core import yaspeed
+    t0 = time.time()
+    try:
+        res = yaspeed.run(r["lan_ip"])
+    except Fail as e:
+        log_line(r["id"], "speed/" + how, False, time.time() - t0, e)
+        raise
+    log_line(r["id"], "speed/" + how, True, time.time() - t0,
+             "↓ %.1f ↑ %.1f Мбит/с, %.0f мс" % (res["down"], res["up"], res["ping"]))
+    return dict(res, id=r["id"])
 
 
 def hilink_info(r):

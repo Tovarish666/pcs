@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Проверки modlink без root и без сети: таблица, конфиг sing-box (настоящий check),
-экспорт, перенос из modlink-linux, HiLink и триггер на фальшивом модеме.
+"""Проверки modlink без root и без сети: таблица и режимы портов, конфиг 3proxy, строки
+для клиента, перенос из modlink-linux, HiLink и ссылки реконнекта/ребута на фальшивом модеме.
 
     python3 tests/test_modlink.py
 """
@@ -17,6 +17,7 @@ import threading
 import time
 import types
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,10 +26,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.join(HERE, os.pardir)
 sys.path.insert(0, REPO)
 sys.path.insert(0, HERE)
-from pcs.core import singbox, util  # noqa: E402
+from pcs.core import threeproxy, util  # noqa: E402
 from pcs.core.util import Busy, Fail  # noqa: E402
 from pcs.modlink import cli, daemon, hilink, ops, store, system  # noqa: E402
-from singbox_check import binary as sb_binary, sb_check  # noqa: E402
 
 passed = failed = 0
 
@@ -85,26 +85,35 @@ check("нет файла — пустая таблица", doc["proxies"] == [])
 r1 = store.add(doc, "192.168.201.100")
 check("id = номер модема, логин modemN, имя «modem N»",
       (r1["id"], r1["login"], r1["name"]) == (201, "modem201", "modem 201"), r1)
-check("порты auto — первая свободная пара от 10000", (r1["port"], r1["reconnect_port"]) == (10000, 10001), r1)
+check("порты auto — первая свободная тройка от 10000: прокси, ребут, реконнект",
+      (r1["port"], r1["reboot_port"], r1["reconnect_port"]) == (10000, 10001, 10002), r1)
 check("HiLink по умолчанию — .1 той же сети", r1["modem_ip"] == "192.168.201.1")
 check("пароль сгенерирован: 12 знаков без похожих", len(r1["password"]) == 12
       and set(r1["password"]) <= set(store.PW_ABC))
 r2 = store.add(doc, "192.168.202.100", interval_min=10)
-check("вторая строка — следующая пара", (r2["port"], r2["reconnect_port"]) == (10002, 10003))
+check("вторая строка — следующая тройка", (r2["port"], r2["reboot_port"], r2["reconnect_port"]) == (10003, 10004, 10005))
 r3 = store.add(doc, "192.168.201.100", login="second")
 check("второй прокси на тот же модем — id от 1001", r3["id"] == 1001, r3)
 r4 = store.add(doc, "10.20.30.40", modem_ip="")
 check("чужая сеть: id 1002, логин proxyID, без HiLink",
       (r4["id"], r4["login"], r4["modem_ip"]) == (1002, "proxy1002", ""), r4)
-check("явный порт, занятый строкой, — отказ",
-      "занят дважды" in (fails(store.add, doc, "192.168.203.100", port=10000) or ""))
-check("триггер на порту чужого прокси — отказ",
-      "занят дважды" in (fails(store.add, doc, "192.168.203.100", reconnect_port=10002) or ""))
-check("порт и триггер строки совпадают — отказ",
+check("явный порт прокси чужой строки — можно (общий порт, модем по логину)",
+      store.add(dict(doc, proxies=list(doc["proxies"])), "192.168.203.100", port=10000)["port"] == 10000)
+check("порт управления на порту чужого прокси — отказ",
+      "и прокси" in (fails(store.add, doc, "192.168.203.100", reconnect_port=10003) or ""))
+check("порт прокси строки = её же порт управления — отказ",
       fails(store.add, doc, "192.168.203.100", port=11000, reconnect_port=11000) is not None)
-store.PROBE[0] = lambda p: p not in (10006, 10008)
+check("логин повторяется — отказ (у 3proxy один список пользователей)",
+      "логин" in (fails(store.add, doc, "192.168.203.100", login="modem201") or ""))
+check("ребут и реконнект на одном порту строки — можно (один слушатель, два пути)",
+      store.add(dict(doc, proxies=list(doc["proxies"])), "192.168.209.100", port=12000, reboot_port=12001,
+                reconnect_port=12001)["reconnect_port"] == 12001)
+check("порт управления 0 — нет ссылки (можно)",
+      store.add(dict(doc, proxies=list(doc["proxies"])), "192.168.208.100", reboot_port="0")["reboot_port"] == 0)
+store.PROBE[0] = lambda p: p not in (10012, 10014)
 r5 = store.add(doc, "192.168.205.100")
-check("auto обходит порты, занятые на машине", (r5["port"], r5["reconnect_port"]) == (10009, 10010), r5)
+check("auto обходит порты, занятые на машине (тройка целиком свободна)",
+      (r5["port"], r5["reboot_port"], r5["reconnect_port"]) == (10015, 10016, 10017), r5)
 store.PROBE[0] = lambda p: True
 for bad, what in ((dict(lan_ip="192.168.1"), "IPv4"), (dict(lan_ip="0.0.0.0"), "0.0.0.0"),
                   (dict(lan_ip="192.168.9.100", port="0"), "порт 0"), (dict(lan_ip="192.168.9.100", port="70000"), "порт 70000"),
@@ -124,7 +133,7 @@ check("двоеточие в пароле можно (Basic это позвол�
 store.PROBE[0] = lambda p: p != 10000
 r = store.set_fields(doc, 201, [("port", "auto"), ("name", "мой"), ("interval", "5"), ("password", "gen")])
 check("set: port=auto уходит с занятого, псевдоним interval, password=gen",
-      r["port"] == 10008 and r["interval_min"] == 5 and r["password"] != r1["password"] and r["name"] == "мой", r)
+      r["port"] == 10012 and r["interval_min"] == 5 and r["password"] != r1["password"] and r["name"] == "мой", r)
 r = store.set_fields(doc, 201, [("port", "auto")], mine={10000})
 check("set: port=auto — свой применённый порт для строки свободен", r["port"] == 10000, r)
 store.PROBE[0] = lambda p: True
@@ -133,6 +142,25 @@ check("set: неизвестное поле", "нет поля" in (fails(store.
 check("set: enabled=0", store.set_fields(doc, 202, [("enabled", "0")])["enabled"] is False)
 store.delete(doc, 1002)
 check("удалённый id не переиспользуется", store.add(doc, "10.20.30.41")["id"] == 1003)
+
+print("режим портов (как в modlink для Windows):")
+d2 = {"next_id": 1001, "proxies": [store.norm(dict(x, port=0 + x["port"])) for x in doc["proxies"][:3]]}
+store.assign_ports(d2, 15000, "triples")
+pp = [(x["id"], x["port"], x["reboot_port"], x["reconnect_port"]) for x in sorted(d2["proxies"], key=lambda x: x["id"])]
+check("triples: подряд по id — прокси N+3i, ребут +1, реконнект +2",
+      [x[1:] for x in pp] == [(15000, 15001, 15002), (15003, 15004, 15005), (15006, 15007, 15008)], pp)
+store.assign_ports(d2, 16000, "shared")
+check("shared: прокси у всех 16000, ребут и реконнект у всех 16001",
+      {(x["port"], x["reboot_port"], x["reconnect_port"]) for x in d2["proxies"]} == {(16000, 16001, 16001)}, d2["proxies"])
+d3 = {"next_id": 1001, "proxies": [dict(x) for x in d2["proxies"]]}
+d3["proxies"][1]["password"] = d3["proxies"][0]["password"]
+check("общий порт управления и одинаковые пароли — отказ (ссылку не различить)",
+      "пароли одинаковые" in (fails(store.check_all, d3["proxies"]) or ""))
+store.PROBE[0] = lambda p: p != 16001
+check("режим портов: занятый на машине порт — отказ", "16001" in (fails(store.assign_ports, d2, 16000, "shared") or ""))
+check("…а свой применённый — не помеха", store.assign_ports(d2, 16000, "shared", mine={16001}) is not None)
+store.PROBE[0] = lambda p: True
+check("режим портов — только triples или shared", fails(store.assign_ports, d2, 16000, "pairs") is not None)
 store.save(doc)
 check("proxies.json — 600, каталог — 700",
       stat.S_IMODE(os.stat(store.P.proxies).st_mode) == 0o600 and stat.S_IMODE(os.stat(store.P.etc).st_mode) == 0o700)
@@ -143,58 +171,59 @@ check("пароль скрыт без явного запроса", store.masked
 open(store.P.proxies, "w").write("{испорчен")
 check("испорченный файл — понятная ошибка, а не пустая таблица", "не читается" in (fails(store.load) or ""))
 
-# ── конфиг sing-box ────────────────────────────────────────────────────────
-print("конфиг sing-box:")
+# ── конфиг 3proxy ──────────────────────────────────────────────────────────
+print("конфиг 3proxy:")
 rows = [store.norm(x) for x in (
     dict(id=201, enabled=True, name="m201", login="modem201", password="pw:1", port=10000, lan_ip="192.168.201.100",
-         modem_ip="192.168.201.1", reconnect_port=10001, interval_min=0),
-    dict(id=202, enabled=True, name="m202", login="modem202", password="pw2", port=10002, lan_ip="192.168.202.100",
-         modem_ip="192.168.202.1", reconnect_port=10003, interval_min=5),
-    dict(id=203, enabled=False, name="m203", login="modem203", password="pw3", port=10004, lan_ip="192.168.203.100",
-         modem_ip="192.168.203.1", reconnect_port=10005, interval_min=0))]
-cfg = store.config(rows)
-ins = {i["tag"]: i for i in cfg["inbounds"]}
-outs = {o["tag"]: o for o in cfg["outbounds"]}
-check("inbound на каждую включённую строку, выключенной нет", sorted(ins) == ["in-201", "in-202"], sorted(ins))
-check("mixed 0.0.0.0:port с users", ins["in-201"]["type"] == "mixed" and ins["in-201"]["listen"] == "0.0.0.0"
-      and ins["in-201"]["listen_port"] == 10000
-      and ins["in-201"]["users"] == [{"username": "modem201", "password": "pw:1"}])
-check("direct с inet4_bind_address = lan_ip", outs["out-202"] == {"type": "direct", "tag": "out-202",
-                                                                   "inet4_bind_address": "192.168.202.100"})
-rules = cfg["route"]["rules"]
-check("правило inbound → свой outbound", {"inbound": ["in-201"], "action": "route", "outbound": "out-201"} in rules)
-check("остальное — reject последним правилом", rules[-1] == {"action": "reject"})
-check("без служебных outbound block/dns", all(o["type"] == "direct" for o in cfg["outbounds"]))
-check("частные адреса и IPv6 закрыты до правил строк",
-      rules.index({"ip_is_private": True, "action": "reject"}) < rules.index({"inbound": ["in-201"], "action": "route", "outbound": "out-201"})
-      and {"ip_cidr": ["::/0"], "action": "reject"} in rules)
-txt = json.dumps(cfg)
-check("ни domain_strategy, ни address-DNS", not re.search(r"domain_strategy|\"address\"", txt))
+         modem_ip="192.168.201.1", reboot_port=10001, reconnect_port=10002, interval_min=0),
+    dict(id=202, enabled=True, name="m202", login="modem202", password="pw2", port=10003, lan_ip="192.168.202.100",
+         modem_ip="192.168.202.1", reboot_port=10004, reconnect_port=10005, interval_min=5),
+    dict(id=203, enabled=False, name="m203", login="modem203", password="pw3", port=10006, lan_ip="192.168.203.100",
+         modem_ip="192.168.203.1", reboot_port=10007, reconnect_port=10008, interval_min=0))]
+S0 = dict(store.SETTINGS)
+cfg = store.config3(rows, S0)
+lines3 = cfg.splitlines()
+
+
+def block(text, port):
+    """Правила сервиса порта: от flush до строки auto -pPORT."""
+    ls = text.splitlines()
+    i = next(k for k, ln in enumerate(ls) if ln.startswith("auto -p%d" % port))
+    j = max(k for k in range(i) if ls[k] == "flush")
+    return ls[j:i + 1]
+
+
+check("сервис auto на каждый порт включённых, выключенной нет",
+      [ln.split()[1] for ln in lines3 if ln.startswith("auto ")] == ["-p10000", "-p10003"], lines3)
+check("свой порт — выход -e lan_ip", "auto -p10000 -e192.168.201.100" in lines3)
+check("auth strong и пользователи только включённых, в кавычках",
+      "auth strong" in lines3 and 'users "modem201:CL:pw:1" "modem202:CL:pw2"' in lines3, [x for x in lines3 if x.startswith("users")])
+check("flush перед каждым сервисом: правила не перетекают", lines3.count("flush") == 2)
+b = block(cfg, 10000)
+check("у строки закрыты частные сети, CGNAT и сам сервер — до allow",
+      any(x.startswith("deny modem201 * ") and "192.168.0.0/16" in x and "100.64.0.0/10" in x and "127.0.0.0/8" in x for x in b)
+      and b[-2] == "allow modem201", b)
+check("maxconn поднят (по умолчанию у 3proxy 100 на сервис)", "maxconn 5000" in lines3)
+check("журнала соединений по умолчанию нет", not any(x.startswith("log ") for x in lines3))
+check("access_log — журнал с ротацией", any(x.startswith("log ") for x in store.config3(rows, dict(S0, access_log=True)).splitlines()))
+check("пустая таблица — конфиг без сервисов (годен)", "auto" not in store.config3([], S0) and "users" not in store.config3([], S0))
+check("кавычки и $ в пароле — внутри кавычек, экранированы", '"x:CL:p\\"w$1"' in store.config3(
+    [store.norm(dict(rows[0], login="x", password='p"w$1'))], S0))
 
 print("защита строки (protect):")
 check("по умолчанию защита включена (и у старых строк без поля)", all(r["protect"] for r in rows))
-check("sniff только для защищённых и до resolve",
-      rules[0] == {"inbound": ["in-201", "in-202"], "action": "sniff"} and rules[1]["action"] == "resolve")
-dom = next((x for x in rules if x.get("domain_suffix")), {})
-check("ЛК операторов закрыты у защищённых", dom.get("inbound") == ["in-201", "in-202"] and dom.get("action") == "reject"
-      and {"mts.ru", "megafon.ru", "beeline.ru", "t2.ru", "yota.ru"} <= set(dom.get("domain_suffix", [])), dom)
-prt = next((x for x in rules if x.get("port")), {})
-check("опасные порты закрыты (25, 445, торренты)", 25 in prt.get("port", []) and 445 in prt.get("port", [])
-      and prt.get("port_range") == ["6881:6889"] and prt.get("action") == "reject", prt)
-check("CGNAT 100.64/10 закрыт у всех", {"ip_cidr": ["100.64.0.0/10"], "action": "reject"} in rules)
-open_rows = [dict(rows[0], protect=False), rows[1]]
-cfg2 = store.config(open_rows)
-r2 = cfg2["route"]["rules"]
-check("без защиты: ни sniff, ни ЛК, ни портов для этой строки",
-      all("in-201" not in x.get("inbound", []) for x in r2 if x.get("action") in ("sniff",) or x.get("domain_suffix") or x.get("port")))
-mw = {"inbound": ["in-201"], "ip_cidr": ["192.168.201.1/32"], "action": "route", "outbound": "out-201"}
-check("без защиты: веб своего модема открыт — раньше запрета частных", mw in r2
-      and r2.index(mw) < r2.index({"ip_is_private": True, "action": "reject"}), r2[:5])
-check("без защиты: частные, IPv6 и CGNAT всё равно закрыты",
-      {"ip_is_private": True, "action": "reject"} in r2 and {"ip_cidr": ["::/0"], "action": "reject"} in r2
-      and {"ip_cidr": ["100.64.0.0/10"], "action": "reject"} in r2)
-check("все строки без защиты — sniff не нужен", not any(x.get("action") == "sniff" for x in
-                                                        store.config([dict(r, protect=False) for r in rows])["route"]["rules"]))
+dom = next((x for x in b if "mts.ru" in x), "")
+check("ЛК операторов закрыты — по имени и поддоменам, только TCP (UDP 3proxy по имени рубит весь)",
+      dom.startswith("deny modem201 * ") and "*.mts.ru" in dom and ",mts.ru," in dom and "megafon.ru" in dom
+      and dom.endswith(" * CONNECT,HTTP,HTTPS"), dom)
+prt = next((x for x in b if x.startswith("deny modem201 * * ")), "")
+check("опасные порты закрыты (25, 445, торренты)", ",25," in prt and "445" in prt and "6881-6889" in prt, prt)
+open3 = store.config3([dict(rows[0], protect=False), rows[1]], S0)
+bo = block(open3, 10000)
+check("без защиты: ни ЛК, ни портов для этой строки", not any("mts.ru" in x or x.startswith("deny modem201 * * ") for x in bo), bo)
+check("без защиты: веб своего модема открыт — раньше запрета частных",
+      bo.index("allow modem201 * 192.168.201.1") < next(k for k, x in enumerate(bo) if x.startswith("deny modem201 * 0.0.0.0")), bo)
+check("без защиты: частные и CGNAT всё равно закрыты", any("100.64.0.0/10" in x for x in bo))
 check("protect принимает on/off/да/нет", store.norm(dict(rows[0], protect="off"))["protect"] is False
       and store.norm(dict(rows[0], protect="да"))["protect"] is True)
 check("protect: мусор — понятная ошибка", "protect" in (fails(store.norm, dict(rows[0], protect="может")) or ""))
@@ -205,32 +234,43 @@ json.dump({"domains": [".LK.Example.RU"], "cidrs": ["10.200.0.0/16"], "ports": [
 ext = store.guard_extra(gx)
 check("protect.json: домены, сети и порты читаются", ext == {"domains": ["lk.example.ru"], "cidrs": ["10.200.0.0/16"],
                                                                "ports": [8291]}, ext)
-cfg3 = store.config(rows, ext)
-d3 = next(x for x in cfg3["route"]["rules"] if x.get("domain_suffix"))
-check("дополнения попадают в правила", "lk.example.ru" in d3["domain_suffix"] and d3["ip_cidr"] == ["10.200.0.0/16"]
-      and 8291 in next(x for x in cfg3["route"]["rules"] if x.get("port"))["port"])
+bx = block(store.config3(rows, S0, ext), 10000)
+check("дополнения попадают в правила", any("*.lk.example.ru" in x for x in bx) and "deny modem201 * 10.200.0.0/16" in bx
+      and any(x.startswith("deny modem201 * * ") and "8291" in x for x in bx), bx)
 json.dump({"domains": ["не домен"]}, open(gx, "w"))
 check("protect.json с мусором — Fail", "не годится" in (fails(store.guard_extra, gx) or ""))
 os.unlink(gx)
-ok, msg = sb_check(cfg2)
-if ok is not None:
-    check("sing-box check: строка без защиты", ok, msg)
-    ok, msg = sb_check(cfg3)
-    check("sing-box check: с дополнениями protect.json", ok, msg)
-ok, msg = sb_check(cfg)
-if ok is not None:
-    check("sing-box %s check: конфиг принят" % singbox.VERSION, ok, msg)
-    ok, msg = sb_check(store.config([]))
-    check("sing-box check: пустая таблица тоже годна", ok, msg)
-    ok, msg = sb_check(store.config(rows[2:]))
-    check("sing-box check: только выключенные строки", ok, msg)
+
+print("трафик и общий порт:")
+check("tcp+udp и задан WAN IP — 3proxy сообщает его клиенту для UDP (-Ni)",
+      "auto -p10000 -e192.168.201.100 -Ni203.0.113.5" in store.config3(rows, dict(S0, wan_ip="203.0.113.5")).splitlines())
+tcp = store.config3(rows, dict(S0, traffic="tcp", wan_ip="203.0.113.5"))
+check("только TCP — UDP ASSOCIATE запрещён, -Ni не нужен",
+      "deny modem201 * * * UDPASSOC" in block(tcp, 10000) and "-Ni" not in tcp)
+sh_rows = [store.norm(dict(r, port=16000, reboot_port=16001, reconnect_port=16001)) for r in rows[:2]]
+sb = block(store.config3(sh_rows, S0), 16000)
+check("общий порт: один сервис без -e, у каждого логина свой выход (parent extip)",
+      sb[-1] == "auto -p16000" and sb.index("allow modem201") + 1 == sb.index("parent 1000 extip 192.168.201.100 0")
+      and "parent 1000 extip 192.168.202.100 0" in sb, sb)
+check("общий порт: запреты — у каждого логина свои и до его allow",
+      sb.index("allow modem202") > max(k for k, x in enumerate(sb) if x.startswith("deny modem202")), sb)
 
 # ── экспорт ────────────────────────────────────────────────────────────────
 print("экспорт:")
 lines = store.export_lines(rows, "203.0.113.5")
-check("формат IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect",
-      lines[0] == "203.0.113.5:10000:modem201:pw:1\thttp://203.0.113.5:10001/reconnect", lines)
+check("всё по колонкам: прокси, ребут, реконнект (табуляция — в таблицу по ячейкам)",
+      lines[0] == "203.0.113.5:10000:modem201:pw:1\thttp://203.0.113.5:10001/reboot\thttp://203.0.113.5:10002/reconnect", lines)
 check("выключенные не экспортируются", len(lines) == 2)
+ex = {w: store.export(rows, "203.0.113.5", w) for w in ("proxy", "reboot", "reconnect", "all")}
+check("копировать: только прокси / только ребут / только реконнект — по одной колонке",
+      ex["proxy"]["rows"][1] == ["203.0.113.5:10003:modem202:pw2"] and ex["reboot"]["rows"][0] == ["http://203.0.113.5:10001/reboot"]
+      and ex["reconnect"]["rows"][0] == ["http://203.0.113.5:10002/reconnect"] and ex["all"]["columns"] == ["Ip:port:log:pass", "Reboot", "ReConnect"])
+shx = store.export(sh_rows + [store.norm(dict(rows[1], id=209, login="m209", password="a/b?c", port=16000,
+                                                    reboot_port=16001, reconnect_port=16001))], "203.0.113.5")["rows"]
+check("общий порт управления — пароль строки в пути ссылки (с кодированием)",
+      shx[0][2] == "http://203.0.113.5:16001/reconnect/pw%3A1" and shx[2][1] == "http://203.0.113.5:16001/reboot/a%2Fb%3Fc", shx)
+check("порта ребута нет — ячейка пустая", store.export([dict(rows[0], reboot_port=0)], "1.2.3.4")["rows"][0][1] == "")
+check("что копировать — только известное", fails(store.export, rows, "1.2.3.4", "csv") is not None)
 from pcs.core import table as ptable  # noqa: E402
 feed = [dict(rows[0], protect=False, password="p,w:1"), rows[1], rows[2],
         store.norm(dict(rows[0], id=1001, lan_ip="10.0.0.5", port=10010, reconnect_port=10011, protect=False))]
@@ -395,18 +435,22 @@ check("modlink test: IP через прокси и HiLink «подключён, 
       res["proxy"] == {"ok": True, "ip": "198.51.100.9"} and res["hilink"]["status"] == "подключён"
       and res["hilink"]["net"] == "4G", res)
 
-# ── триггер реконнекта в демоне ────────────────────────────────────────────
-print("демон и триггер:")
+# ── ссылки реконнекта и ребута в демоне ───────────────────────────────────
+print("демон: ссылки реконнекта и ребута:")
 fresh_root()
-rport, busy_port = free_tcp(), free_tcp()
+rport, busy_port, sport, bport = free_tcp(), free_tcp(), free_tcp(), free_tcp()
 arow = dict(id=201, enabled=True, name="modem 201", login="modem201", password="pw", port=free_tcp(),
-            lan_ip="127.0.0.1", modem_ip="127.0.0.1", reconnect_port=rport, interval_min=5)
-brow = dict(arow, id=202, name="modem 202", login="modem202", port=free_tcp(), reconnect_port=busy_port)
-util.jsave(store.P.applied, {"proxies": [arow, brow]})
+            lan_ip="127.0.0.1", modem_ip="127.0.0.1", reconnect_port=rport, reboot_port=bport, interval_min=5)
+brow = dict(arow, id=202, name="modem 202", login="modem202", port=free_tcp(), reconnect_port=busy_port, reboot_port=0)
+crow = dict(arow, id=203, name="modem 203", login="modem203", password="c/3", port=free_tcp(), reconnect_port=sport,
+            reboot_port=sport, interval_min=0)
+drow = dict(crow, id=204, name="modem 204", login="modem204", password="d4")
+util.jsave(store.P.applied, {"proxies": [arow, brow, crow, drow]})
 blocker = socket.socket()
 blocker.bind(("127.0.0.1", busy_port))
 blocker.listen(1)
 d = daemon.Daemon(host="127.0.0.1", log=lambda msg: None)
+d.next_wan = time.time() + 10 ** 6             # проверки внешнего IP здесь не нужны
 th = threading.Thread(target=d.run, kwargs={"signals": False}, daemon=True)
 th.start()
 for _ in range(50):
@@ -415,12 +459,15 @@ for _ in range(50):
     time.sleep(0.05)
 
 
-def get(path, port=rport, timeout=10):
+def get(path, port=rport, timeout=10, headers=None, raw=False):
+    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), headers=headers or {})
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=timeout) as r:
-            return r.status, json.loads(r.read())
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+            return r.status, (body.decode() if raw else json.loads(body))
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        body = e.read() or b"{}"
+        return e.code, (body.decode() if raw else json.loads(body))
 
 
 m.calls.clear()
@@ -428,7 +475,7 @@ code, body = get("/reconnect")
 check("GET /reconnect → 200 {ok, ip}", (code, body) == (200, {"ok": True, "ip": "203.0.113.7"}), (code, body))
 check("модему ушёл реконнект", ("data", 0) in m.calls and m.calls[-1] == ("data", 1), m.calls)
 last = ops.last(201)
-check("журнал строки: trigger, ok, IP", last and last["how"] == "trigger" and last["ok"] and last["text"] == "203.0.113.7", last)
+check("журнал строки: link, ok, IP", last and last["how"] == "link" and last["ok"] and last["text"] == "203.0.113.7", last)
 code, body = get("/reconnect")
 check("тот же IP второй раз — отмечено в журнале", "тот же" in ops.last(201)["text"])
 code, body = get("/status")
@@ -439,7 +486,18 @@ try:
     code = 200
 except urllib.error.HTTPError as e:
     code = e.code
-check("POST — 405, реконнекта нет", code == 405 and ops.last(201)["how"] == "trigger")
+check("POST — 405, реконнекта нет", code == 405 and ops.last(201)["how"] == "link")
+code, page_ = get("/reconnect", headers={"Accept": "text/html,application/xhtml+xml"}, raw=True)
+check("браузеру — страница «было → стало» (а не JSON)", code == 200 and page_.startswith("<!doctype html>")
+      and "203.0.113.7" in page_ and "Реконнект · modem 201" in page_, page_[:200])
+code, body = get("/reconnect?json=1", headers={"Accept": "text/html"})
+check("?json — JSON и браузеру", code == 200 and body["ok"] is True, body)
+m.calls.clear()
+code, body = get("/reboot", port=bport)
+check("GET /reboot на порту ребута → модему ушла перезагрузка", code == 200 and body == {"ok": True}
+      and m.calls == [("control", "1")], (code, body, m.calls))
+code, body = get("/reboot")
+check("ребута на порту реконнекта нет — 404", code == 404, (code, body))
 m.gate = threading.Event()
 slow = threading.Thread(target=get, args=("/reconnect",))
 slow.start()
@@ -459,9 +517,26 @@ code, body = get("/reconnect")
 check("модем отказал — 502 и текст ошибки", code == 502 and body["ok"] is False and "113018" in body["error"], (code, body))
 check("неудача — в журнале строки", ops.last(201)["ok"] is False)
 m.error = None
+
+print("общий порт управления:")
+code, body = get("/reconnect", port=sport)
+check("без пароля — 401 и как надо", code == 401 and "/reconnect/<пароль>" in body["error"], (code, body))
+code, body = get("/reconnect/" + urllib.parse.quote("c/3", safe=""), port=sport)
+check("/reconnect/<пароль строки> — реконнект именно её", code == 200 and ops.last(203)["ok"] and ops.last(204) is None, (code, body))
+code, body = get("/reconnect/modem204", port=sport)
+check("логин в пути тоже узнаётся", code == 200 and ops.last(204)["ok"], (code, body))
+code, body = get("/reconnect/" + urllib.parse.quote("чужой"), port=sport)
+check("не тот пароль — 403", code == 403, (code, body))
+auth = {"Authorization": "Basic " + base64.b64encode(b"modem203:c/3").decode()}
+code, body = get("/reboot", port=sport, headers=auth)
+check("HTTP Basic (логин:пароль) — тоже можно", code == 200, (code, body))
+code, body = get("/reboot", port=sport, headers={"Authorization": "Basic " + base64.b64encode(b"modem203:x").decode()})
+check("Basic с неверным паролем — 403", code == 403, (code, body))
+
 st = json.load(open(store.P.state))
-check("состояние: триггер 201 поднят, 202 — порт занят",
-      st["triggers"]["201"]["ok"] and not st["triggers"]["202"]["ok"] and st["triggers"]["202"]["error"], st)
+check("состояние: порт реконнекта 201 поднят, у 202 — занят",
+      st["triggers"][str(rport)]["ok"] and not st["triggers"][str(busy_port)]["ok"] and st["triggers"][str(busy_port)]["error"], st)
+check("общий порт управления — один слушатель на две строки", sport in d.ctl and len(d.ctl) == 4, list(d.ctl))
 check("таймер 201 взведён на interval_min", abs(st["next"]["201"] - (time.time() + 300)) < 30, st["next"])
 m.calls.clear()
 with d.lock:
@@ -473,25 +548,37 @@ for _ in range(100):
         break
     time.sleep(0.05)
 check("таймер: реконнект строки 201", ops.last(201)["how"] == "timer" and ("data", 1) in m.calls)
-check("таймер строки с чужим портом триггера молчит", ops.last(202) is None)
+check("таймер строки, чей порт реконнекта занят чужим, молчит", ops.last(202) is None)
 blocker.close()
 with d.lock:
-    d.trig[202].tried = 0
+    d.ctl[busy_port].tried = 0
 d.retry()
-check("порт освободился — триггер поднят повтором", d.trig[202].srv is not None)
-util.jsave(store.P.applied, {"proxies": [dict(arow, reconnect_port=busy_port, interval_min=0)]})
+check("порт освободился — слушатель поднят повтором", d.ctl[busy_port].srv is not None)
+util.jsave(store.P.applied, {"proxies": [dict(arow, reconnect_port=busy_port, reboot_port=0, interval_min=0)]})
 d.reload_ev.set()
-for _ in range(60):
-    if 202 not in d.trig and d.trig.get(201) and d.trig[201].port == busy_port:
+for _ in range(100):
+    if list(d.ctl) == [busy_port] and not d.next:
         break
     time.sleep(0.05)
-check("SIGHUP: перечитал — строка ушла, триггер переехал, таймер снят",
-      list(d.trig) == [201] and d.trig[201].port == busy_port and not d.next, (list(d.trig), d.next))
+time.sleep(0.6)                                  # старые слушатели закрываются вне блокировки
+check("SIGHUP: перечитал — строки ушли, порты закрыты, таймер снят",
+      list(d.ctl) == [busy_port] and not d.next, (list(d.ctl), d.next))
 try:
     socket.create_connection(("127.0.0.1", rport), timeout=1).close()
-    check("старый порт триггера закрыт", False)
+    check("старый порт реконнекта закрыт", False)
 except OSError:
-    check("старый порт триггера закрыт", True)
+    check("старый порт реконнекта закрыт", True)
+
+print("проверки (внешний IP раз в час):")
+ipx = {"n": 0}
+real_ext = hilink.ext_ip
+hilink.ext_ip = lambda **k: "198.51.100.%d" % (ipx.update(n=ipx["n"] + 1) or ipx["n"]) if k.get("proxy") else real_ext(**k)
+try:
+    d._checks(True, False)
+finally:
+    hilink.ext_ip = real_ext
+chk = json.load(open(store.P.checks))
+check("внешний IP через прокси строки — в checks.json", chk["201"]["wan_ip"] == "198.51.100.1" and chk["201"]["wan_t"], chk)
 d.stop_ev.set()
 th.join(5)
 check("демон останавливается и убирает состояние", not th.is_alive() and not os.path.exists(store.P.state))
@@ -536,12 +623,16 @@ def fake_sh(*c, **k):
     return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
 
 
-real = (system.sh, system.net.ensure_base, system.singbox.install, system.time.sleep)
+real = (system.sh, system.net.ensure_base, system.threeproxy.install, system.threeproxy.installed,
+        system.time.sleep, system.listening)
+UP = {"ports": set(range(1, 65536))}               # что «слушает» на машине
 system.sh = fake_sh
 system.net.ensure_base = lambda log=None: None
-system.singbox.install = lambda path=None, a=None: False
+system.threeproxy.install = lambda path=None, a=None: False
+system.threeproxy.installed = lambda path=None: True
 system.time.sleep = lambda s: None
-sbb = sb_binary() or "/nonexistent/sing-box"
+system.listening = lambda: UP["ports"]
+sbb = None
 try:
     res = system.migrate(lambda m: None, dry_run=True, binary=sbb)
     check("--dry-run: строки показаны, ничего не записано и не запущено",
@@ -554,10 +645,10 @@ try:
     msg = fails(system.apply, lambda m: None, binary=sbb)
     check("apply при старом modlink-linux — отказ с подсказкой про migrate, ничего не запущено",
           msg and "modlink migrate --dry-run" in msg and "--force --stop-panel" in msg
-          and json.load(open(store.P.singbox)) == old_cfg and not any("restart" in c for c in ran), (msg, ran))
+          and json.load(open(store.P.singbox)) == old_cfg and not any("restart" in c or "reload" in c for c in ran), (msg, ran))
     os.unlink(store.P.proxies)
     ran.clear()
-    if sb_binary():
+    if True:
         res = system.migrate(lambda m: None, binary=sbb)
         doc = store.load()
         check("migrate: таблица перенесена, порты и пароли те же",
@@ -568,9 +659,12 @@ try:
               and system.owner("modlink.service") == "ours")
         check("migrate: старый singbox.json сохранён в legacy/",
               json.load(open(os.path.join(store.P.legacy, "singbox.json"))) == old_cfg)
-        newcfg = json.load(open(store.P.singbox))
-        check("migrate: новый конфиг — наш формат и порты 20000…",
-              [i["listen_port"] for i in newcfg["inbounds"]] == [20000, 20002, 20004, 20006])
+        newcfg = open(store.P.cfg3).read().splitlines()
+        check("migrate: конфиг 3proxy — порты как были (20000, 20002, …), выход с адреса модема",
+              [x.split()[1] for x in newcfg if x.startswith("auto ")] == ["-p20000", "-p20002", "-p20004", "-p20006"]
+              and "auto -p20000 -e192.168.81.100 -Ni198.51.100.20" in newcfg, newcfg)
+        check("migrate: ссылки реконнекта как были (порт+1), ребута не было — нет",
+              [(r["reconnect_port"], r["reboot_port"]) for r in store.load()["proxies"]][:2] == [(20001, 0), (20003, 0)])
         check("migrate: старая панель без флага не остановлена (и об этом сказано)",
               not any("modlink-panel.service" in c and "disable" in c for c in ran)
               and any("modlink-panel" in w for w in res["warnings"]), res["warnings"])
@@ -611,14 +705,15 @@ try:
     store.save(doc)
     store.PROBE[0] = lambda p: p != 10002
     check("apply: порт занят кем-то другим — отказ до записи конфига",
-          "10002" in (fails(system.apply, lambda m: None, binary=sbb) or "") and not os.path.exists(store.P.singbox))
+          "10002" in (fails(system.apply, lambda m: None, binary=sbb) or "") and not os.path.exists(store.P.cfg3))
     store.PROBE[0] = lambda p: True
-    if sb_binary():
+    if True:
         ran.clear()
         res = system.apply(lambda m: None, binary=sbb)
-        check("apply: конфиг записан (600), применённое сохранено, sing-box перезапущен",
-              stat.S_IMODE(os.stat(store.P.singbox).st_mode) == 0o600
-              and len(system.applied_rows()) == 2 and ("systemctl", "restart", "modlink-sb.service") in ran)
+        check("apply: конфиг записан (600), применённое сохранено, 3proxy перечитал конфиг (reload — соединения живут)",
+              stat.S_IMODE(os.stat(store.P.cfg3).st_mode) == 0o600
+              and len(system.applied_rows()) == 2 and ("systemctl", "reload", "modlink-3proxy.service") in ran
+              and ("systemctl", "restart", "modlink-3proxy.service") not in ran, ran)
         check("apply: нет своего демона — честное предупреждение", any("modlink setup" in w for w in res["warnings"]))
         check("после apply правок нет", not system.pending(store.load()["proxies"]))
         doc = store.load()
@@ -628,14 +723,57 @@ try:
         check("правка без apply — видна как неприменённая", system.pending(store.load()["proxies"]))
         ran.clear()
         system.apply(lambda m: None, binary=sbb)
-        check("все строки выключены — sing-box остановлен", ("systemctl", "disable", "--now", "modlink-sb.service") in ran)
+        check("все строки выключены — 3proxy остановлен", ("systemctl", "disable", "--now", "modlink-3proxy.service") in ran)
+
+        print("откат и переход с sing-box:")
+        doc = store.load()
+        store.set_fields(doc, 201, [("enabled", "1")])
+        store.save(doc)
+        system.apply(lambda m: None, binary=sbb)
+        good = open(store.P.cfg3).read()
+        doc = store.load()
+        store.set_fields(doc, 202, [("enabled", "1")])
+        store.save(doc)
+        UP["ports"] = {10000}                       # новый порт 10003 так и не поднялся
+        ran.clear()
+        msg = fails(system.apply, lambda m: None, binary=sbb)
+        check("3proxy не поднял порт — отказ, прежний конфиг вернулся и перезапущен",
+              msg and "10003" in msg and "прежний конфиг" in msg and open(store.P.cfg3).read() == good
+              and ("systemctl", "restart", "modlink-3proxy.service") in ran, (msg, ran))
+        UP["ports"] = set(range(1, 65536))
+        os.makedirs(store.P.units, exist_ok=True)
+        open(os.path.join(store.P.units, "modlink-sb.service"), "w").write(system.MARK + "\n[Service]\nExecStart=x\n")
+        ran.clear()
+        system.setup(lambda m: None, binary=sbb)
+        check("setup: прежний sing-box modlink (modlink-sb) остановлен и снят, 3proxy-юнит на месте",
+              ("systemctl", "disable", "--now", "modlink-sb.service") in ran
+              and not os.path.exists(os.path.join(store.P.units, "modlink-sb.service"))
+              and system.owner("modlink-3proxy.service") == "ours", ran)
 finally:
-    system.sh, system.net.ensure_base, system.singbox.install, system.time.sleep = real
+    (system.sh, system.net.ensure_base, system.threeproxy.install, system.threeproxy.installed,
+     system.time.sleep, system.listening) = real
+
+print("порты modlink — не исходящим соединениям (ip_local_reserved_ports):")
+check("диапазоны: туда и обратно", system.ranges({10000, 10001, 10002, 10005}) == "10000-10002,10005"
+      and system.parse_ranges("10000-10002,10005\n") == {10000, 10001, 10002, 10005})
+fresh_root()
+rp = store.P.root + system.RESERVED
+os.makedirs(os.path.dirname(rp))
+open(rp, "w").write("8080\n")
+check("резерв: чужой порт остаётся, свои добавлены, файл sysctl для загрузки",
+      system.reserve_ports({10000, 10001, 10002}) and open(rp).read().strip() == "8080,10000-10002"
+      and "ip_local_reserved_ports = 8080,10000-10002" in open(store.P.root + system.RESERVED_CONF).read())
+system.reserve_ports({20000})
+check("порты сменились — прежние свои сняты", open(rp).read().strip() == "8080,20000")
+system.reserve_ports(set())
+check("строк нет — свои сняты, чужой на месте", open(rp).read().strip() == "8080")
+check("нет /proc (не Linux) — молча ничего", (os.unlink(rp) or True) and system.reserve_ports({1}) is False)
 
 print("юниты:")
-u = system.unit_sb()
-check("modlink-sb: свой sing-box из /usr/local/lib/pcs, не /usr/local/bin",
-      "ExecStart=%s run -c " % singbox.BIN in u and "/usr/local/bin/sing-box" not in u and system.MARK in u)
+u = system.unit_proxy()
+check("modlink-3proxy: свой 3proxy из /usr/local/lib/pcs со своим конфигом, reload — SIGUSR1",
+      "ExecStart=%s %s" % (threeproxy.BIN, store.P.cfg3) in u and "kill -USR1" in u and system.MARK in u
+      and "LimitNOFILE=1048576" in u, u)
 check("modlink.service: демон этой же копии кода", " daemon\n" in system.unit_daemon()
       and os.path.join(system.ROOT, "bin", "modlink") in system.unit_daemon())
 
@@ -655,7 +793,8 @@ check("неизвестная команда — одна строка ✗ в st
 rc, out, err = run_cli("set", "201", "port")
 check("set без «=» — понятная ошибка", rc == 1 and "поле=значение" in err, err)
 rc, out, err = run_cli("export", "--ip", "203.0.113.1")
-check("export печатает строки для клиента", rc == 0 and out.startswith("203.0.113.1:10000:modem201:"), out)
+check("export печатает строки для клиента (прокси, ребут, реконнект)", rc == 0 and out.startswith("203.0.113.1:10000:modem201:")
+      and "\thttp://203.0.113.1:10001/reboot\thttp://203.0.113.1:10002/reconnect" in out, out)
 rc, out, err = run_cli("status", "--json")
 check("status --json: строки и состояния служб", rc == 0 and json.loads(out)["data"]["rows"][0]["state"] == "pending", out)
 rc, out, err = run_cli("log", "201", "--json")
@@ -683,21 +822,40 @@ check("settings: по умолчанию базовый 10000, адреса — 
       and d.get("wan_ip") == "", out)
 rc, out, err = run_cli("settings", "base_port=20000", "lan_ip=192.168.88.254", "wan_ip=203.0.113.9")
 rows_now = sorted(store.load()["proxies"], key=lambda r: r["id"])
-check("settings base_port=20000 — порты ВСЕХ строк заново: прокси 20000+2i, реконнект +1",
-      rc == 0 and [(r["port"], r["reconnect_port"]) for r in rows_now] == [(20000, 20001), (20002, 20003)]
+check("settings base_port=20000 — порты ВСЕХ строк заново тройками: прокси, ребут, реконнект",
+      rc == 0 and [(r["port"], r["reboot_port"], r["reconnect_port"]) for r in rows_now] == [(20000, 20001, 20002), (20003, 20004, 20005)]
       and "modlink apply" in out, (out, err, [(r["id"], r["port"]) for r in rows_now]))
 rc, out, err = run_cli("export")
 check("WAN IP настроек — в экспорте для клиентов", rc == 0 and out.startswith("203.0.113.9:20000:"), out)
 rc, out, err = run_cli("export", "--table", "--json")
 check("LAN IP настроек — в строках для proxyveth", rc == 0 and "192.168.88.254:20000:" in json.loads(out)["data"]["lines"][1], out)
 rc, out, err = run_cli("add", "--lan-ip", "192.168.203.100", "--json")
-check("новая строка — от базового порта настроек", rc == 0 and json.loads(out)["data"]["row"]["port"] == 20004, out)
+check("новая строка — следующая тройка от базового порта", rc == 0 and json.loads(out)["data"]["row"]["port"] == 20006, out)
 store.PROBE[0] = lambda p: p != 30003
 rc, out, err = run_cli("settings", "base_port=30000")
 check("base_port, где порт занят чужим — отказ, ничего не поменялось",
       rc == 1 and "30003" in err and store.settings()["base_port"] == 20000
-      and sorted(r["port"] for r in store.load()["proxies"]) == [20000, 20002, 20004], err)
+      and sorted(r["port"] for r in store.load()["proxies"]) == [20000, 20003, 20006], err)
 store.PROBE[0] = lambda p: True
+rc, out, err = run_cli("settings", "mode=shared", "--json")
+rows_now = store.load()["proxies"]
+check("mode=shared — у всех один порт прокси и один порт управления",
+      rc == 0 and {(r["port"], r["reboot_port"], r["reconnect_port"]) for r in rows_now} == {(20000, 20001, 20001)}
+      and json.loads(out)["data"]["mode"] == "shared", out)
+rc, out, err = run_cli("export", "--what", "reconnect")
+check("export --what reconnect: на общем порту — ссылки с паролем строки",
+      rc == 0 and all(re.match(r"http://203\.0\.113\.9:20001/reconnect/\S+$", x) for x in out.split()), out)
+rc, out, err = run_cli("add", "--lan-ip", "192.168.204.100", "--json")
+check("в режиме shared новая строка — на общих портах",
+      rc == 0 and (json.loads(out)["data"]["row"]["port"], json.loads(out)["data"]["row"]["reconnect_port"]) == (20000, 20001), out)
+rc, out, err = run_cli("settings", "mode=triples", "traffic=tcp", "access_log=on", "wan_check=off", "speedtest=on", "--json")
+dd = json.loads(out)["data"] if rc == 0 else {}
+check("обратно тройки; трафик, журнал, проверки — сохранены",
+      rc == 0 and dd["mode"] == "triples" and dd["traffic"] == "tcp" and dd["access_log"] is True
+      and dd["wan_check"] is False and dd["speedtest"] is True
+      and sorted(r["port"] for r in store.load()["proxies"]) == [20000, 20003, 20006, 20009], out)
+rc, out, err = run_cli("settings", "traffic=quic")
+check("неизвестный трафик — отказ", rc == 1 and "traffic" in err, err)
 rc, out, err = run_cli("settings", "lan_ip=auto", "wan_ip=не-адрес")
 check("кривой адрес — отказ", rc == 1 and "wan_ip" in err, err)
 rc, out, err = run_cli("settings", "lan_ip=auto")

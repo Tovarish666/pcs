@@ -56,7 +56,7 @@ class World:
         if cmd[:2] == ("proxyveth", "status"):
             out = self.status
         elif cmd[:2] == ("systemctl", "is-active"):
-            out = "\n".join("active" if u != "modlink-sb" else "failed" for u in cmd[2:])
+            out = "\n".join("active" if u != "modlink-3proxy" else "failed" for u in cmd[2:])
         elif cmd[:2] == ("systemctl", "is-enabled"):
             out = "enabled\n"
         elif cmd[:2] == ("ip", "-4"):
@@ -94,7 +94,7 @@ check("след vmodem виден (нужна миграция)", d["proxyveth"]
 check("mp.space: стоит, службы, порт, без ключа auth", d["mpspace"]["installed"] and d["mpspace"]["ok"]
       and d["mpspace"]["port"] == 1800 and d["mpspace"]["units"] == {"mproxy": "active", "nodejs-server": "active"}
       and "AAA" not in json.dumps(d), d["mpspace"])
-check("modlink: юниты", d["modlink"]["installed"] and d["modlink"]["state"]["modlink-sb"] == "failed")
+check("modlink: юниты", d["modlink"]["installed"] and d["modlink"]["state"]["modlink-3proxy"] == "failed")
 check("адрес, внешний IP, память, uptime, DNS", d["ip"] == "192.168.88.7" and d["wan"] == "94.25.229.40"
       and d["ram"] == {"total": 4096000000, "used": 1024000000} and d["uptime"] == 12345
       and d["dns"] == ["9.9.9.9", "1.1.1.1"], d)

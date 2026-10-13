@@ -180,14 +180,15 @@ doctor() -> list[{"name", "ok", "text"}]
 ```
 modlink list
 modlink add --lan-ip IP [--name …] [--login …] [--password …|gen] [--port N|auto]
-            [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN]
+            [--modem-ip IP] [--reboot-port N|auto|0] [--reconnect-port N|auto|0] [--interval MIN]
 modlink set ID поле=значение …        поля — как в таблице ниже
 modlink del ID | enable ID | disable ID
-modlink apply                         конфиг sing-box → sing-box check → перезапуск
+modlink settings [mode=triples|shared] [traffic=tcp+udp|tcp] [base_port=N] …   (PCS.md §9.7)
+modlink apply                         конфиг 3proxy → reload → проверка портов
 modlink status
 modlink test ID                       внешний IP через этот прокси + доступность HiLink
-modlink reconnect ID | reboot ID | log ID
-modlink export                        строки для клиента: IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
+modlink reconnect ID | reboot ID | speedtest ID | log ID | logs [3proxy|modlink]
+modlink export [--what proxy|reboot|reconnect|all]   строки для клиента: прокси, ссылки ребута и реконнекта
 modlink from-ifaces                   предложить строки по интерфейсам 192.168.N.100 сервера
 ```
 
@@ -260,21 +261,24 @@ hivelink reconnect N | reset N | recfg N | dataon N|--all
 | `id` | постоянный номер строки | — |
 | `enabled` | строка активна | выключенные не попадают в конфиг |
 | `name` | метка | только интерфейс |
-| `login`, `password` | доступ к прокси | `users` mixed-inbound |
-| `port` | порт прокси, **постоянный** (не от позиции в списке) | `listen_port` |
-| `lan_ip` | адрес интерфейса модема на сервере | `inet4_bind_address` outbound: именно это привязывает трафик к модему |
+| `login`, `password` | доступ к прокси; логины не повторяются | `users` 3proxy |
+| `port` | порт прокси, **постоянный** (не от позиции в списке); может быть общим — модем по логину | `auto -pPORT` |
+| `lan_ip` | адрес интерфейса модема на сервере | `-e lan_ip` (свой порт) или `parent 1000 extip lan_ip 0` (общий): именно это привязывает трафик к модему |
 | `modem_ip` | веб-интерфейс Huawei | HiLink API: реконнект, ребут, проверка |
-| `reconnect_port` | порт триггера | `GET http://<ip>:<порт>/reconnect` |
+| `reboot_port` | порт ссылки ребута, 0 — нет | `GET http://<ip>:<порт>/reboot[/<пароль>]` |
+| `reconnect_port` | порт ссылки реконнекта, 0 — нет | `GET http://<ip>:<порт>/reconnect[/<пароль>]` |
 | `interval_min` | автореконнект, минут (0 — выкл) | таймер в демоне modlink |
-| `protect` | защита строки, по умолчанию вкл: закрыты ЛК и сайты операторов, опасные порты, веб модема | правила sing-box (`sniff`, `domain_suffix`, `port`) |
+| `protect` | защита строки, по умолчанию вкл: закрыты ЛК и сайты операторов, опасные порты, веб модема | запреты 3proxy (`deny`) |
 
-Устройство modlink:
-- sing-box (`modlink-sb.service`): на каждую строку mixed-inbound `0.0.0.0:port` с
-  `users` и direct-outbound с `inet4_bind_address = lan_ip`. Правило «inbound → свой
-  outbound», остальное — `reject`. У всех строк закрыты частные адреса, CGNAT и IPv6;
-  строке без защиты открыт только её `modem_ip` (нужен proxyveth: DNS и HiLink через прокси).
+Устройство modlink (с 13.10.2026 — 3proxy, по образцу modlink для Windows):
+- 3proxy (`modlink-3proxy.service`): на каждый порт прокси — сервис `auto` (HTTP + SOCKS5 с UDP),
+  `flush` и правила строк: у всех закрыты частные адреса, CGNAT и сам сервер; строке без защиты
+  открыт только её `modem_ip` (нужен proxyveth: DNS и HiLink через прокси). `apply` — reload без
+  обрыва соединений; свои порты — в `ip_local_reserved_ports`.
+- Режим портов: свои тройки (прокси, ребут, реконнект) или один общий порт (модем по логину).
 - modlink стоит и на хосте Proxmox (рядом с hivelink): `pcs modlink … --host`.
-- Демон `modlink.service`: триггеры реконнекта, таймеры, клиент HiLink, журнал реконнектов.
+- Демон `modlink.service`: ссылки реконнекта и ребута (страница для браузера, JSON для скриптов),
+  таймеры, проверки внешнего IP, клиент HiLink, журнал строки.
 
 Пароли в `export` и в панели видны только по явному запросу.
 

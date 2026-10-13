@@ -1,22 +1,33 @@
-"""modlink — из сетевого интерфейса прокси (PCS).
+"""modlink — из сетевого интерфейса прокси (PCS). Движок — 3proxy: HTTP и SOCKS5 (с UDP) на одном порту.
 
   modlink list [--show-pass]              таблица прокси
   modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
-              [--modem-ip IP] [--reconnect-port N|auto] [--interval MIN] [--disabled] [--no-protect]
+              [--modem-ip IP] [--reboot-port N|auto|0] [--reconnect-port N|auto|0]
+              [--interval MIN] [--disabled] [--no-protect]
   modlink set ID поле=значение …          поля: enabled name login password port lan_ip
-                                          modem_ip reconnect_port interval_min protect
+                                          modem_ip reboot_port reconnect_port interval_min protect
   modlink del ID --yes | enable ID | disable ID
-  modlink settings [base_port=N] [lan_ip=IP|auto] [wan_ip=IP|auto]
-                                          общие: базовый порт (base_port — порты ВСЕХ строк
-                                          заново: прокси N+2i, реконнект N+2i+1), LAN IP —
-                                          для proxyveth ВМ этого хоста, WAN IP — для клиентов
+  modlink settings [ключ=значение …]      общие настройки:
+      base_port=N        от него порты (новые строки и смена режима портов)
+      mode=triples|shared  режим портов — порты ВСЕХ строк заново: triples — у строки свои
+                         прокси N+3i, ребут N+3i+1, реконнект N+3i+2; shared — у всех один порт
+                         прокси N (модем — по логину) и один порт управления N+1
+      traffic=tcp+udp|tcp  пропускать UDP (SOCKS5 UDP ASSOCIATE) или только TCP
+      lan_ip=IP|auto     адрес машины в LAN — строки для proxyveth ВМ этого хоста
+      wan_ip=IP|auto     внешний адрес для клиентов: строки, ссылки, UDP
+      access_log=on|off  журнал каждого соединения 3proxy (/var/log/modlink/3proxy.log)
+      wan_check=on|off   раз в час внешний IP через каждый прокси (по умолчанию вкл)
+      speedtest=on|off   раз в день в 12:00 скорость каждого модема (трафик! по умолчанию выкл)
   modlink protect [ID|all on|off]         защита строки: ЛК операторов, опасные порты, веб модема
                                           (без аргументов — что закрыто и у каких строк)
-  modlink apply                           конфиг sing-box → sing-box check → перезапуск
+  modlink apply                           конфиг 3proxy → перечитать (соединения живут) → проверка портов
   modlink status
   modlink test ID                         внешний IP через этот прокси + HiLink
-  modlink reconnect ID | reboot ID | log ID [-n N]
-  modlink export [--ip IP|auto] [--save]  IP:PORT:LOGIN:PASS<TAB>http://IP:RPORT/reconnect
+  modlink reconnect ID | reboot ID | speedtest ID | log ID [-n N]
+  modlink logs [3proxy|modlink] [-n N]    журнал 3proxy (и соединений, если access_log) или демона
+  modlink export [--what proxy|reboot|reconnect|all] [--ip IP|auto] [--save]
+                                          строки для клиента: прокси IP:PORT:LOGIN:PASS, ссылки
+                                          ребута и реконнекта; all — всё по колонкам (табуляция)
   modlink export --table [--ip IP]        таблица proxyveth: виртуальные модемы из этих настоящих
                                           (IP по умолчанию — свой основной адрес: ВМ этого хоста)
   modlink from-ifaces [--add]             строки по интерфейсам 192.168.N.100 сервера
@@ -73,6 +84,7 @@ def parser():
     c.add_argument("--port", default="auto")
     c.add_argument("--modem-ip")
     c.add_argument("--reconnect-port", default="auto")
+    c.add_argument("--reboot-port", default="auto")
     c.add_argument("--interval", default="0")
     c.add_argument("--disabled", action="store_true")
     c.add_argument("--no-protect", action="store_true")
@@ -87,15 +99,19 @@ def parser():
     c = sub.add_parser("protect")
     c.add_argument("id", nargs="?")
     c.add_argument("state", nargs="?", choices=("on", "off"))
-    for name in ("enable", "disable", "test", "reconnect", "reboot"):
+    for name in ("enable", "disable", "test", "reconnect", "reboot", "speedtest"):
         sub.add_parser(name).add_argument("id")
     c = sub.add_parser("log")
     c.add_argument("id")
     c.add_argument("-n", type=int, default=50)
+    c = sub.add_parser("logs")
+    c.add_argument("which", nargs="?", choices=("3proxy", "modlink"), default="3proxy")
+    c.add_argument("-n", type=int, default=200)
     for name in ("apply", "status", "setup", "daemon", "version"):
         sub.add_parser(name)
     c = sub.add_parser("export")
     c.add_argument("--ip")
+    c.add_argument("--what", choices=tuple(store.COPY), default="all")
     c.add_argument("--save", action="store_true")
     c.add_argument("--table", action="store_true")
     c = sub.add_parser("from-ifaces")
@@ -130,14 +146,14 @@ def hint_apply():
 
 def row_line(r, show=False):
     iv = "%dм" % r["interval_min"] if r["interval_min"] else "—"
-    return "  %-5d %-4s %-14s %-6d %-7d %-16s %-15s %-12s %-14s %-5s %s" % (
-        r["id"], "да" if r["enabled"] else "нет", r["name"][:14], r["port"], r["reconnect_port"],
-        r["lan_ip"], r["modem_ip"] or "—", r["login"][:12], r["password"] if show else "••••", iv,
-        "да" if r.get("protect", True) else "НЕТ")
+    return "  %-5d %-4s %-14s %-6d %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
+        r["id"], "да" if r["enabled"] else "нет", r["name"][:14], r["port"], r.get("reboot_port") or "—",
+        r["reconnect_port"] or "—", r["lan_ip"], r["modem_ip"] or "—", r["login"][:12],
+        r["password"] if show else "••••", iv, "да" if r.get("protect", True) else "НЕТ")
 
 
-HEAD = "  %-5s %-4s %-14s %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
-    "ID", "вкл", "имя", "порт", "триггер", "lan_ip", "modem_ip", "логин", "пароль", "авто", "защита")
+HEAD = "  %-5s %-4s %-14s %-6s %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
+    "ID", "вкл", "имя", "порт", "ребут", "реконн", "lan_ip", "modem_ip", "логин", "пароль", "авто", "защита")
 
 
 # ── команды ────────────────────────────────────────────────────────────────
@@ -158,12 +174,13 @@ def cmd_add(a):
     with edit():
         doc = store.load()
         r = store.add(doc, a.lan_ip, name=a.name, login=a.login, password=secret(a.password),
-                      port=a.port, modem_ip=a.modem_ip, reconnect_port=a.reconnect_port,
+                      port=a.port, modem_ip=a.modem_ip, reconnect_port=a.reconnect_port, reboot_port=a.reboot_port,
                       interval_min=store.as_interval(a.interval), enabled=not a.disabled,
                       protect=not a.no_protect)
         dup = [x["id"] for x in doc["proxies"] if x["lan_ip"] == r["lan_ip"] and x["id"] != r["id"]]
         store.save(doc)
-    say("  + строка %d: %s, порт %d, триггер %d, логин %s" % (r["id"], r["name"], r["port"], r["reconnect_port"], r["login"]))
+    say("  + строка %d: %s, порт %d, ребут %s, реконнект %s, логин %s" % (
+        r["id"], r["name"], r["port"], r["reboot_port"] or "—", r["reconnect_port"] or "—", r["login"]))
     if dup:
         say("  ⚠ тот же lan_ip у строк %s — реконнект меняет IP всем им" % ", ".join(map(str, dup)))
     hint_apply()
@@ -180,7 +197,7 @@ def cmd_set(a):
     with edit():
         doc = store.load()
         rid = store.find(doc, a.id)["id"]
-        mine = {p for x in system.applied_rows() if x["id"] == rid for p in (x["port"], x["reconnect_port"])}
+        mine = {p for x in system.applied_rows() if x["id"] == rid for p in system.ports_of(x)}
         r = store.set_fields(doc, rid, pairs, mine=mine)
         store.save(doc)
     say("  строка %d: %s" % (r["id"], ", ".join(k for k, _ in pairs)))
@@ -219,17 +236,19 @@ def cmd_settings(a):
     kv = {}
     for p in a.pairs:
         if "=" not in p:
-            raise Fail("«%s»: нужно поле=значение (base_port, lan_ip, wan_ip)" % p)
+            raise Fail("«%s»: нужно ключ=значение (%s)" % (p, ", ".join(store.SETTINGS)))
         k, v = p.split("=", 1)
         kv[k.strip().replace("-", "_")] = v.strip()
     renumbered = False
     if kv:
         with edit():
-            if "base_port" in kv:
-                base = store.as_port(kv["base_port"], "base_port")
+            old = store.settings()
+            if "base_port" in kv or ("mode" in kv and kv["mode"] != old["mode"]):
+                base = store.as_port(kv.get("base_port", old["base_port"]), "base_port")
+                mode = kv.get("mode", old["mode"])
                 doc = store.load()
-                mine = {p for r in system.applied_rows() for p in (r["port"], r["reconnect_port"])}
-                store.renumber(doc, base, mine=mine)
+                mine = {p for r in system.applied_rows() for p in system.ports_of(r)}
+                store.assign_ports(doc, base, mode, mine=mine)
                 store.save_settings(**kv)        # сначала проверка портов, потом запись
                 store.save(doc)
                 renumbered = bool(doc["proxies"])
@@ -237,11 +256,20 @@ def cmd_settings(a):
                 store.save_settings(**kv)
     s = store.settings()
     lan_now = s["lan_ip"] or (primary_ip_or_none() or "")
-    say("  базовый порт: %d    LAN IP: %s    WAN IP: %s" % (
-        s["base_port"], s["lan_ip"] or "авто (%s)" % (lan_now or "?"), s["wan_ip"] or "авто (при экспорте)"))
+    onoff = (lambda v: "вкл" if v else "выкл")
+    say("  базовый порт: %d    режим портов: %s    трафик: %s" % (
+        s["base_port"], "свои тройки" if s["mode"] == "triples" else "один общий (по логину)",
+        "TCP и UDP" if s["traffic"] == "tcp+udp" else "только TCP"))
+    say("  LAN IP: %s    WAN IP: %s" % (s["lan_ip"] or "авто (%s)" % (lan_now or "?"), s["wan_ip"] or "авто (при экспорте)"))
+    say("  журнал соединений: %s    внешний IP раз в час: %s    скорость в 12:00: %s" % (
+        onoff(s["access_log"]), onoff(s["wan_check"]), onoff(s["speedtest"])))
     if renumbered:
-        say("  порты всех строк — заново от %d: прокси %d, %d, …; реконнект — следующий" % (
-            s["base_port"], s["base_port"], s["base_port"] + 2))
+        b = s["base_port"]
+        say("  порты всех строк — заново от %d: %s" % (b, "прокси %d, ребут %d, реконнект %d, следующая строка %d, …"
+                                                         % (b, b + 1, b + 2, b + 3) if s["mode"] == "triples"
+                                                         else "прокси у всех %d, ребут и реконнект — %d" % (b, b + 1)))
+        hint_apply()
+    elif kv and set(kv) & {"traffic", "access_log", "wan_ip"}:
         hint_apply()
     return 0, dict(s, lan_ip_now=lan_now, renumbered=renumbered)
 
@@ -294,17 +322,17 @@ def cmd_apply(a):
 
 def cmd_status(a):
     s = system.status()
-    say("  sing-box (modlink-sb): %s    демон (modlink): %s%s" % (
-        s["sb"], s["daemon"], "" if s["unit"] != "legacy" else "  — юнит от старого modlink-linux: modlink migrate"))
+    say("  %s (modlink-3proxy): %s    демон (modlink): %s%s" % (
+        s["engine"], s["proxy"], s["daemon"], "" if s["unit"] != "legacy" else "  — юнит от старого modlink-linux: modlink migrate"))
     if "panel" in s:
         say("  старая панель modlink-panel: %s" % s["panel"])
     mark = {True: "✓", False: "✗", None: "·"}
     for e in s["rows"]:
         last = e["last"]
         lt = ("%s %s %s" % (last["t"][5:16], "ok" if last["ok"] else "✗", last["text"][:40])) if last else "—"
-        say("  %-5d %-9s %-14s :%-5d %s  %-15s %-8s :%-5d %s  %s" % (
+        say("  %-5d %-9s %-14s :%-5d %s  %-15s %-8s упр %s  внешний %-15s %s" % (
             e["id"], e["state"], e["name"][:14], e["port"], mark[e["port_up"]], e["lan_ip"],
-            e["iface"] or "нет", e["reconnect_port"], mark[e["trigger_up"]], lt))
+            e["iface"] or "нет", mark[e["trigger_up"]], e.get("wan_ip") or "—", lt))
     if not s["rows"]:
         say("  строк нет")
     if s["pending"]:
@@ -348,6 +376,15 @@ def cmd_reboot(a):
     return 0, res
 
 
+def cmd_speedtest(a):
+    r = store.find(store.load(), a.id)
+    say("  строка %d: тест скорости с %s (yaspeed, ~30 с)…" % (r["id"], r["lan_ip"]))
+    res = ops.speedtest(r, "cli")
+    say("  ✓ ↓ %.1f Мбит/с · ↑ %.1f Мбит/с · %.0f мс%s" % (res["down"], res["up"], res["ping"],
+                                                          "  (IP %s)" % res["ip"] if res.get("ip") else ""))
+    return 0, res
+
+
 def cmd_log(a):
     rid = store.find(store.load(), a.id)["id"]
     lines = ops.tail(rid, a.n)
@@ -356,6 +393,23 @@ def cmd_log(a):
     if not lines:
         say("  журнал строки %d пуст" % rid)
     return 0, {"id": rid, "lines": lines}
+
+
+def cmd_logs(a):
+    """Журнал 3proxy (journald юнита + журнал соединений, если включён) или демона modlink."""
+    n = max(1, min(a.n, 2000))
+    unit = system.PROXY if a.which == "3proxy" else system.SVC
+    lines = util.sh("journalctl", "-u", unit, "-n", str(n), "--no-pager", "-o", "short-iso",
+                    check=False).stdout.splitlines()
+    if a.which == "3proxy" and store.settings()["access_log"]:
+        try:
+            with open(P.log + "/3proxy.log", encoding="utf-8", errors="replace") as f:
+                lines += ["— соединения —"] + f.read().splitlines()[-n:]
+        except OSError:
+            pass
+    for ln in lines:
+        say("  " + ln)
+    return 0, {"which": a.which, "lines": lines[-n * 2:]}
 
 
 def primary_ip():
@@ -390,13 +444,14 @@ def cmd_export(a):
     if a.save:
         with edit():
             system.save_ext_ip(ip)
-    lines = store.export_lines(rows, ip)
+    exp = store.export(rows, ip, a.what)
+    lines = ["\t".join(r) for r in exp["rows"]]
     if not util.QUIET[0]:
         for ln in lines:
             print(ln)
         if not lines:
             print("  включённых строк нет", file=sys.stderr)
-    return 0, {"ip": ip, "lines": lines}
+    return 0, {"ip": ip, "what": a.what, "lines": lines, "columns": exp["columns"], "rows": exp["rows"]}
 
 
 def cmd_from_ifaces(a):
@@ -439,15 +494,15 @@ def cmd_migrate(a):
         say("  это проверка; перенести: modlink migrate%s%s --stop-panel" % (
             " --from " + a.src if a.src else "", " --force" if res.get("replaces") else ""))
     else:
-        say("  перенос готов: строк %d, sing-box %s, демон %s; клиентам — modlink export"
-            % (len(res["rows"]), res["sb"], res["daemon"]))
+        say("  перенос готов: строк %d, 3proxy %s, демон %s; клиентам — modlink export"
+            % (len(res["rows"]), res["proxy"], res["daemon"]))
     return 0, res
 
 
 def cmd_setup(a):
     with edit():
         res = system.setup(log)
-    say("  sing-box: %s, демон: %s" % (res["sb"], res["daemon"]))
+    say("  3proxy: %s, демон: %s" % (res["proxy"], res["daemon"]))
     return 0, res
 
 
@@ -466,7 +521,7 @@ def cmd_daemon(a):
 CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enable": cmd_enable, "protect": cmd_protect,
         "settings": cmd_settings,
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
-        "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log,
+        "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log, "speedtest": cmd_speedtest, "logs": cmd_logs,
         "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,
         "setup": cmd_setup, "uninstall": cmd_uninstall, "daemon": cmd_daemon}
 

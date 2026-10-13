@@ -371,16 +371,22 @@ check("modlink: состояние строк из status", d["data"]["status"][
 r, d = P("/api/targets/2000/modlink/reveal", {"id": 201})
 check("пароль — только по явному запросу", d["ok"] and d["data"]["password"] == fake_api.S[2000]["modlink"][0]["password"])
 r, d = P("/api/targets/2000/modlink/export")
-check("экспорт для клиента — по колонкам (прокси | реконнект) для вставки в таблицу",
-      d["ok"] and d["data"]["columns"] == ["Ip:port:log:pass SOCKS5", "ReConnect"]
-      and d["data"]["rows"][0][0].startswith("192.168.88.7:") and d["data"]["rows"][0][1].endswith("/reconnect"), d)
+check("экспорт для клиента — по колонкам (прокси | ребут | реконнект) для вставки в таблицу",
+      d["ok"] and d["data"]["columns"] == ["Ip:port:log:pass", "Reboot", "ReConnect"]
+      and d["data"]["rows"][0][0].startswith("192.168.88.7:") and d["data"]["rows"][0][1].endswith("/reboot")
+      and d["data"]["rows"][0][2].endswith("/reconnect"), d)
+r3, d3 = P("/api/targets/2000/modlink/export", {"what": "reconnect"})
+check("копировать только ссылки реконнекта — одна колонка", d3["ok"] and d3["data"]["columns"] == ["ReConnect"]
+      and all(len(x) == 1 and "/reconnect" in x[0] for x in d3["data"]["rows"]), d3)
+r3, d3 = P("/api/targets/2000/modlink/export", {"what": "csv"})
+check("что копировать — только известное (400)", r3.status == 400, d3)
 r2, d2 = P("/api/targets/2000/modlink/export", {"table": True})
 check("для proxyveth — колонки n | real | proxy, без шапки в строках",
       d2["ok"] and d2["data"]["columns"] == ["n", "real", "proxy"] and d2["data"]["rows"][0][0] == "201"
       and d2["data"]["rows"][0][2].startswith("192.168.88.7:"), d2)
 r, d = P("/api/targets/2000/modlink/export")
-check("экспорт для клиента: IP:PORT:LOGIN:PASS<TAB>ссылка", d["ok"] and d["data"]["text"].startswith("192.168.88.7:20201:u201:")
-      and "\thttp://192.168.88.7:21201/reconnect" in d["data"]["text"], d)
+check("экспорт для клиента: IP:PORT:LOGIN:PASS<TAB>ребут<TAB>реконнект", d["ok"] and d["data"]["text"].startswith("192.168.88.7:10000:modem201:")
+      and "\thttp://192.168.88.7:10001/reboot\thttp://192.168.88.7:10002/reconnect" in d["data"]["text"], d)
 r, d = P("/api/targets/2000/modlink/save", {"set": [{"id": 202, "fields": {"name": "новое имя", "password": "gen"}}],
                                             "add": [{"lan_ip": "192.168.206.100", "modem_ip": "192.168.206.1",
                                                      "password": "Typed-pw1"}],
@@ -404,7 +410,7 @@ check("modlink: общие настройки приходят вместе с �
 r, d = P("/api/targets/2000/modlink/settings", {"base_port": 30000, "lan_ip": "", "wan_ip": "203.0.113.7"})
 ports = sorted((x["id"], x["port"], x["reconnect_port"]) for x in fake_api.S[2000]["modlink"])
 check("настройки: базовый порт — порты всех строк заново, WAN IP сохранён", d["ok"] and d["data"]["renumbered"]
-      and ports[0][1:] == (30000, 30001) and ports[1][1:] == (30002, 30003)
+      and ports[0][1:] == (30000, 30002) and ports[1][1:] == (30003, 30005)
       and fake_api.S[2000]["ml_settings"]["wan_ip"] == "203.0.113.7", (d, ports))
 r, d = P("/api/targets/2000/modlink/settings", {"wan_ip": "не адрес"})
 check("настройки: кривой адрес — 400", r.status == 400, d)

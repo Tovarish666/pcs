@@ -16,8 +16,8 @@ from pcs.core.util import Fail
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 DANGER = ("--yes", "--force")            # только с подтверждением номером сервера
-ML_FIELDS = ("enabled", "name", "login", "password", "port", "lan_ip", "modem_ip", "reconnect_port", "interval_min",
-             "protect")
+ML_FIELDS = ("enabled", "name", "login", "password", "port", "lan_ip", "modem_ip", "reconnect_port", "reboot_port",
+             "interval_min", "protect")
 _CTL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -312,24 +312,40 @@ class Panel:
         return err("modlink не отдал пароль строки %s" % rid)
 
     def ml_settings(self, sid, query, body):
-        """Общие настройки modlink: base_port (порты ВСЕХ строк заново), lan_ip, wan_ip ("" — авто)."""
+        """Общие настройки modlink: base_port и mode (порты ВСЕХ строк заново), lan_ip, wan_ip ("" — авто),
+        traffic (tcp+udp | tcp), access_log, wan_check, speedtest (вкл/выкл)."""
         kv = []
         if body.get("base_port") not in (None, ""):
-            kv.append("base_port=%d" % _int(body["base_port"], "базовый порт", 1, 65534))
+            kv.append("base_port=%d" % _int(body["base_port"], "базовый порт", 1, 65533))
         for k in ("lan_ip", "wan_ip"):
             if k in body:
                 v = _s(body[k], k, 40).strip()
                 if v and v != "auto" and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", v):
                     raise Bad("%s: адрес IPv4 или пусто (авто)" % k)
                 kv.append("%s=%s" % (k, v or "auto"))
+        if "mode" in body:
+            if body["mode"] not in ("triples", "shared"):
+                raise Bad("режим портов: triples или shared")
+            kv.append("mode=" + body["mode"])
+        if "traffic" in body:
+            if body["traffic"] not in ("tcp+udp", "tcp"):
+                raise Bad("трафик: tcp+udp или tcp")
+            kv.append("traffic=" + body["traffic"])
+        for k in ("access_log", "wan_check", "speedtest"):
+            if k in body:
+                kv.append("%s=%s" % (k, "on" if body[k] is True else "off" if body[k] is False else _bad(k)))
         if not kv:
-            raise Bad("настройки: base_port, lan_ip, wan_ip")
+            raise Bad("настройки: base_port, mode, traffic, lan_ip, wan_ip, access_log, wan_check, speedtest")
         return self._run(target(sid), "modlink", ["settings"] + kv)
 
     def ml_export(self, sid, query, body):
-        """Экспорт для клиента; table — строки таблицы proxyveth (виртуальные из этих настоящих)."""
+        """Строки для клиента (what: proxy | reboot | reconnect | all — как «Копировать» в modlink для Windows);
+        table — строки таблицы proxyveth (виртуальные из этих настоящих)."""
         table = bool(body.get("table"))
-        e = self._run(target(sid), "modlink", ["export", "--table"] if table else ["export"])
+        what = body.get("what") or "all"
+        if what not in ("proxy", "reboot", "reconnect", "all"):
+            raise Bad("что копировать: proxy, reboot, reconnect или all")
+        e = self._run(target(sid), "modlink", ["export", "--table"] if table else ["export", "--what", what])
         if not e["ok"]:
             return e
         d = e["data"] if isinstance(e["data"], dict) else {}
@@ -338,10 +354,13 @@ class Panel:
         if table:
             body_ = list(csv.reader(io.StringIO("\n".join(lines))))[1:]
             cols, rows = ["n", "real", "proxy"], [r[:3] for r in body_ if len(r) >= 3]
-        else:
+        elif isinstance(d.get("rows"), list) and isinstance(d.get("columns"), list):
+            cols, rows = d["columns"], d["rows"]
+        else:                                     # старый modlink: прокси и реконнект
             cols = ["Ip:port:log:pass SOCKS5", "ReConnect"]
             rows = [(ln.split("\t") + [""])[:2] for ln in lines]
-        return ok({"text": "\n".join(lines), "warnings": d.get("warnings") or [], "columns": cols, "rows": rows})
+        return ok({"text": "\n".join(lines), "warnings": d.get("warnings") or [], "columns": cols, "rows": rows,
+                   "what": what})
 
     def ml_save(self, sid, query, body):
         """Правки таблицы modlink разом: удалить, поменять, добавить, затем apply."""
@@ -583,6 +602,10 @@ class Panel:
 
 # ── мелочи ──────────────────────────────────────────────────────────────────
 
+def _bad(k):
+    raise Bad("%s: true или false" % k)
+
+
 def _int(v, what, lo, hi):
     try:
         n = int(v)
@@ -608,8 +631,10 @@ def _ml_field(k):
 
 def _ml_val(k, v):
     v = _s(v, k, 200).strip()
-    if k in ("port", "reconnect_port") and v != "auto" and not (v.isdigit() and 0 < int(v) < 65536):
+    if k == "port" and v != "auto" and not (v.isdigit() and 0 < int(v) < 65536):
         raise Bad("%s: порт 1–65535 или auto" % k)
+    if k in ("reconnect_port", "reboot_port") and v != "auto" and not (v.isdigit() and 0 <= int(v) < 65536):
+        raise Bad("%s: порт 1–65535, 0 (нет) или auto" % k)
     if k == "protect" and v not in ("0", "1"):
         raise Bad("защита: 1 или 0")
     if k == "interval_min" and not (v.isdigit() and int(v) < 100000):
@@ -628,7 +653,8 @@ def _ml_add(row):
     a, secret = ["add", "--lan-ip", _ml_val("lan_ip", row["lan_ip"])], None
     for k, flag, dflt in (("name", "--name", None), ("login", "--login", None), ("password", "--password", "gen"),
                           ("port", "--port", "auto"), ("modem_ip", "--modem-ip", None),
-                          ("reconnect_port", "--reconnect-port", "auto"), ("interval_min", "--interval", None)):
+                          ("reconnect_port", "--reconnect-port", "auto"), ("reboot_port", "--reboot-port", "auto"),
+                          ("interval_min", "--interval", None)):
         v = row.get(k)
         v = "" if v is None else str(v).strip()
         if v == "" and dflt:

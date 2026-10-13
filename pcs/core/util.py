@@ -131,6 +131,13 @@ def run_cli(fn, args, as_json=False):
     QUIET[0] = as_json
     try:
         rc, data = fn(args)
+    except BrokenPipeError:
+        # вывод закрыли (`| head`): дочитывать некому — тихо, без трассы
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 0
     except KeyboardInterrupt:
         rc, data = 130, None
         if as_json:

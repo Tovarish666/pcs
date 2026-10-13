@@ -802,7 +802,7 @@ def c_doctor(a):
     ml = node.modlink_info()
     chk(ml["installed"], "modlink на хосте", "pcs update --host (или modlink setup)")
     if ml["installed"]:
-        ui.info("modlink: демон %(modlink)s, sing-box %(modlink-sb)s" % ml["state"])
+        ui.info("modlink: демон %(modlink)s, 3proxy %(modlink-3proxy)s" % ml["state"])
     t = store.target(a.server, a.host, default_host=True)
     if t != store.HOST:
         ui.hdr("Сервер %s (%s)" % (t["id"], t.get("ip")))

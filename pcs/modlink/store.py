@@ -1,11 +1,17 @@
 """Таблица modlink (/etc/modlink/proxies.json) и всё, что из неё выводится без системы:
-проверка строк, свободные порты, конфиг sing-box, строки экспорта, перенос из modlink-linux.
+проверка строк, свободные порты, конфиг 3proxy, строки для клиентов, перенос из modlink-linux.
 
-Строка — ровно поля из docs/ARCHITECTURE.md §8. Порт и триггер у строки постоянные:
-не зависят от её места в списке (в modlink-linux зависели — и съезжали при правке).
+Строка — ровно поля из docs/ARCHITECTURE.md §8. Порты у строки постоянные: не зависят от
+её места в списке (в modlink-linux зависели — и съезжали при правке). Пересчитываются только
+по явной команде — «режим портов» (как в modlink для Windows):
+  triples — у каждой строки свои три порта подряд: прокси P, ребут P+1, реконнект P+2;
+  shared  — у всех один порт прокси (модем выбирается по логину) и один порт управления
+            (ссылки /reconnect/<пароль> и /reboot/<пароль>).
+Смешанное тоже законно: строки с одним портом прокси различаются логином.
 """
 import csv
 import hashlib
+import urllib.parse
 import io
 import ipaddress
 import os
@@ -18,7 +24,9 @@ import unicodedata
 from ..core.util import Fail, jload, jsave
 
 FIELDS = ("id", "enabled", "name", "login", "password", "port", "lan_ip", "modem_ip",
-          "reconnect_port", "interval_min", "protect")
+          "reconnect_port", "reboot_port", "interval_min", "protect")
+MODES = ("triples", "shared")          # режим портов: свои тройки | один общий (по логину)
+TRAFFIC = ("tcp+udp", "tcp")           # что пропускать: TCP и UDP (SOCKS5 UDP ASSOCIATE) | только TCP
 BASE_PORT = 10000
 FIRST_FREE_ID = 1001          # id не по номеру модема (второй прокси на модем, чужая сеть)
 MAX_INTERVAL = 7 * 24 * 60
@@ -38,11 +46,13 @@ class Paths:
         self.run = r + "/run/modlink"
         self.units = r + "/etc/systemd/system"
         self.proxies = self.etc + "/proxies.json"
-        self.singbox = self.etc + "/singbox.json"
+        self.singbox = self.etc + "/singbox.json"          # прежний движок; остаётся до uninstall --purge
+        self.cfg3 = self.etc + "/3proxy.cfg"
         self.config = self.etc + "/config.json"
         self.guard = self.etc + "/protect.json"
         self.legacy = self.etc + "/legacy"
         self.applied = self.lib + "/applied.json"
+        self.checks = self.lib + "/checks.json"            # внешний IP раз в час, скорость — демон
         self.state = self.run + "/state.json"
         self.lock = self.run + "/lock"
 
@@ -96,6 +106,13 @@ def as_secret(v, what, colon_ok):
     return s
 
 
+def as_cport(v, what):
+    """Порт управления (реконнект, ребут): 1–65535 или 0/пусто — нет."""
+    if v in (None, "", 0, "0"):
+        return 0
+    return as_port(v, what)
+
+
 def as_name(v):
     s = str(v if v is not None else "").strip()
     if any(unicodedata.category(c) == "Cc" for c in s):
@@ -146,7 +163,8 @@ def norm(r):
             "port": as_port(r.get("port"), "port"),
             "lan_ip": as_ipv4(r.get("lan_ip"), "lan_ip"),
             "modem_ip": as_ipv4(r.get("modem_ip", ""), "modem_ip", empty_ok=True),
-            "reconnect_port": as_port(r.get("reconnect_port"), "reconnect_port"),
+            "reconnect_port": as_cport(r.get("reconnect_port"), "reconnect_port"),
+            "reboot_port": as_cport(r.get("reboot_port", 0), "reboot_port"),
             "interval_min": as_interval(r.get("interval_min", 0)),
             "protect": as_bool(r.get("protect", True), "protect"),
         }
@@ -155,16 +173,31 @@ def norm(r):
 
 
 def check_all(rows):
-    """Межстрочные проверки: id и порты (прокси и триггеры вместе) не повторяются."""
-    ids, seen = set(), {}
+    """Межстрочные проверки. id и логины не повторяются (у 3proxy один список пользователей:
+    вход пускает по логину и паролю на любой порт, где этот логин разрешён). Порт прокси
+    может быть общим у нескольких строк — модем выбирается по логину. Порт управления —
+    тоже, тогда строку выбирает пароль в ссылке: у строк такого порта пароли разные.
+    Порт прокси не бывает портом управления."""
+    ids, logins, proxy, ctl = set(), {}, {}, {}
     for r in rows:
         if r["id"] in ids:
             raise Fail("id %d повторяется" % r["id"])
         ids.add(r["id"])
-        for kind, p in (("прокси", r["port"]), ("триггер", r["reconnect_port"])):
-            if p in seen:
-                raise Fail("порт %d занят дважды: %s и строка %d (%s)" % (p, seen[p], r["id"], kind))
-            seen[p] = "строка %d (%s)" % (r["id"], kind)
+        if r["login"] in logins:
+            raise Fail("логин «%s» у строк %d и %d — логины не повторяются" % (r["login"], logins[r["login"]], r["id"]))
+        logins[r["login"]] = r["id"]
+        proxy.setdefault(r["port"], []).append(r)
+        for p in {r["reconnect_port"], r["reboot_port"]} - {0}:
+            ctl.setdefault(p, []).append(r)
+    for p, rs in ctl.items():
+        if p in proxy:
+            raise Fail("порт %d — и прокси (строка %d), и управление (строка %d)" % (p, proxy[p][0]["id"], rs[0]["id"]))
+        pw = {}
+        for r in rs:
+            if len(rs) > 1 and r["password"] in pw:
+                raise Fail("порт управления %d общий у строк %d и %d, а пароли одинаковые — ссылку не различить"
+                           % (p, pw[r["password"]], r["id"]))
+            pw[r["password"]] = r["id"]
     return rows
 
 
@@ -215,55 +248,99 @@ def masked(r, show=False):
 
 
 # ── общие настройки (/etc/modlink/config.json) ────────────────────────────
+SETTINGS = {"base_port": BASE_PORT, "lan_ip": "", "wan_ip": "", "mode": "triples", "traffic": "tcp+udp",
+            "access_log": False, "wan_check": True, "speedtest": False}
+
+
 def settings(path=None):
-    """{"base_port", "lan_ip", "wan_ip"}; пустой адрес — определить самим.
-    base_port — откуда считаются порты (новые строки и «все строки заново»);
+    """Общие настройки; пустой адрес — определить самим.
+    base_port — откуда считаются порты (новые строки и «режим портов»);
     lan_ip — адрес машины в локальной сети: строки для proxyveth ВМ этого хоста;
-    wan_ip — внешний адрес для клиентов: экспорт. ext_ip — прежнее имя wan_ip."""
+    wan_ip — внешний адрес для клиентов: строки прокси и ссылки; его же 3proxy сообщает
+             клиенту для UDP (SOCKS5 UDP ASSOCIATE). ext_ip — прежнее имя wan_ip;
+    mode — режим портов (MODES); traffic — TCP и UDP или только TCP;
+    access_log — журнал каждого соединения 3proxy (/var/log/modlink/3proxy.log, 3 дня);
+    wan_check — раз в час внешний IP через каждый прокси; speedtest — раз в день в 12:00
+                скорость каждого модема (yaspeed, это трафик модема)."""
     c = jload(path or P.config, {})
     c = c if isinstance(c, dict) else {}
+    out = dict(SETTINGS)
     try:
-        base = as_port(c.get("base_port") or BASE_PORT, "base_port")
+        out["base_port"] = as_port(c.get("base_port") or BASE_PORT, "base_port")
     except Fail:
-        base = BASE_PORT
-    return {"base_port": base, "lan_ip": str(c.get("lan_ip") or ""), "wan_ip": str(c.get("wan_ip") or c.get("ext_ip") or "")}
+        pass
+    out["lan_ip"] = str(c.get("lan_ip") or "")
+    out["wan_ip"] = str(c.get("wan_ip") or c.get("ext_ip") or "")
+    if c.get("mode") in MODES:
+        out["mode"] = c["mode"]
+    if c.get("traffic") in TRAFFIC:
+        out["traffic"] = c["traffic"]
+    for k in ("access_log", "wan_check", "speedtest"):
+        if isinstance(c.get(k), bool):
+            out[k] = c[k]
+    return out
 
 
 def save_settings(path=None, **kw):
-    """kw: base_port, lan_ip, wan_ip ("" или "auto" — определять самим). → новые настройки."""
+    """kw: base_port, lan_ip, wan_ip ("" или "auto" — определять самим), mode, traffic,
+    access_log, wan_check, speedtest. → новые настройки."""
     path = path or P.config
     c = jload(path, {})
     c = c if isinstance(c, dict) else {}
     for k, v in kw.items():
         if k == "base_port":
             c[k] = as_port(v, "base_port")
-            if c[k] > 65534:
-                raise Fail("base_port: %d — нужна пара портов, не выше 65534" % c[k])
+            if c[k] > 65533:
+                raise Fail("base_port: %d — нужна тройка портов, не выше 65533" % c[k])
         elif k in ("lan_ip", "wan_ip"):
             v = str(v or "").strip()
             c[k] = "" if v.lower() in ("", "auto", "авто") else as_ipv4(v, k)
+        elif k == "mode":
+            if v not in MODES:
+                raise Fail("mode: triples (у строки свои порты) или shared (один порт на всех)")
+            c[k] = v
+        elif k == "traffic":
+            v = {"udp": "tcp+udp", "tcp,udp": "tcp+udp", "tcp+udp": "tcp+udp", "tcp": "tcp"}.get(str(v).lower())
+            if not v:
+                raise Fail("traffic: tcp+udp или tcp")
+            c[k] = v
+        elif k in ("access_log", "wan_check", "speedtest"):
+            c[k] = as_bool(v, k)
         else:
-            raise Fail("нет настройки «%s»; есть: base_port, lan_ip, wan_ip" % k)
+            raise Fail("нет настройки «%s»; есть: %s" % (k, ", ".join(SETTINGS)))
     c.pop("ext_ip", None)                 # прежнее имя wan_ip
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     jsave(path, c, 0o600)
     return settings(path)
 
 
-def renumber(doc, base, mine=()):
-    """Порты всех строк заново, подряд от base в порядке id: прокси base+2i, триггер base+2i+1
-    (как в modlink-linux). mine — порты, которые держит своё применённое: для нас они свободны."""
+def assign_ports(doc, base, mode, mine=()):
+    """Порты всех строк заново от base (в порядке id), как в modlink для Windows:
+    triples — прокси base+3i, ребут base+3i+1, реконнект base+3i+2;
+    shared  — прокси у всех base, ребут и реконнект у всех base+1.
+    mine — порты, которые держит своё применённое: для нас они свободны."""
     rows = sorted(doc["proxies"], key=lambda r: r["id"])
-    if base + 2 * len(rows) - 1 > 65535:
+    if mode not in MODES:
+        raise Fail("режим портов: triples или shared")
+    want = range(base, base + (3 * len(rows) if mode == "triples" else 2)) if rows else ()
+    if want and want[-1] > 65535:
         raise Fail("от %d не хватит портов на %d строк" % (base, len(rows)))
-    busy = [p for p in range(base, base + 2 * len(rows)) if p not in mine and not PROBE[0](p)]
+    busy = [p for p in want if p not in mine and not PROBE[0](p)]
     if busy:
         raise Fail("порт %s уже слушает кто-то другой (ss -ltnp) — возьми другой базовый порт"
                    % ", ".join(map(str, busy[:5])))
     for i, r in enumerate(rows):
-        r["port"], r["reconnect_port"] = base + 2 * i, base + 2 * i + 1
+        if mode == "triples":
+            r["port"], r["reboot_port"], r["reconnect_port"] = base + 3 * i, base + 3 * i + 1, base + 3 * i + 2
+        else:
+            r["port"], r["reboot_port"], r["reconnect_port"] = base, base + 1, base + 1
     doc["proxies"] = check_all(rows)
     return rows
+
+
+def renumber(doc, base, mine=()):
+    """Прежнее имя: порты всех строк заново — в текущем режиме портов."""
+    return assign_ports(doc, base, settings()["mode"], mine)
 
 
 # ── новые строки ───────────────────────────────────────────────────────────
@@ -277,8 +354,30 @@ def modem_n(ip):
     return int(m.group(1)) if m and 1 <= int(m.group(1)) <= 254 else None
 
 
+def listen_ports(root=""):
+    """TCP-порты в LISTEN (из /proc/net/tcp*); None — узнать нечем."""
+    ports, seen = set(), False
+    for name in ("tcp", "tcp6"):
+        try:
+            with open("%s/proc/net/%s" % (root, name)) as f:
+                lines = f.read().splitlines()[1:]
+        except OSError:
+            continue
+        seen = True
+        for ln in lines:
+            f = ln.split()
+            if len(f) > 3 and f[3] == "0A":
+                ports.add(int(f[1].rsplit(":", 1)[1], 16))
+    return ports if seen else None
+
+
 def port_free(p):
-    """Никто на машине не слушает TCP-порт p (свой sing-box и триггеры — тоже «кто-то»)."""
+    """Никто на машине не слушает TCP-порт p (свой 3proxy и ссылки — тоже «кто-то»).
+    Именно LISTEN, а не пробный bind: на ВМ с mp.space исходящие соединения берут любые
+    порты от 1024 (ip_local_port_range), и bind ложно говорил «занят»."""
+    lst = listen_ports()
+    if lst is not None:
+        return p not in lst
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -297,17 +396,18 @@ def taken_ports(doc, skip_id=None):
     out = set()
     for r in doc["proxies"]:
         if r["id"] != skip_id:
-            out.update((r["port"], r["reconnect_port"]))
+            out.update(p for p in (r["port"], r["reconnect_port"], r["reboot_port"]) if p)
     return out
 
 
-def free_port(taken, start=BASE_PORT, pair=False, mine=()):
-    """Первый свободный порт от start; pair — чтобы и следующий был свободен (прокси + триггер).
+def free_port(taken, start=BASE_PORT, pair=False, mine=(), n=None):
+    """Первый свободный порт от start, за ним ещё свободных подряд: n (pair — это n=2).
     mine — порты, которые держит своё же (применённая строка): для неё они свободны."""
+    n = n or (2 if pair else 1)
     ok = (lambda p: p <= 65535 and p not in taken and (p in mine or PROBE[0](p)))
     p = start
     while p <= 65535:
-        if ok(p) and (not pair or ok(p + 1)):
+        if all(ok(p + k) for k in range(n)):
             return p
         p += 1
     raise Fail("не нашёл свободного порта от %d" % start)
@@ -331,28 +431,40 @@ def default_modem_ip(lan_ip):
     return "" if a[3] == "1" else ".".join(a[:3] + ["1"])
 
 
-def resolve_ports(doc, row, port, rport, skip_id=None, mine=()):
-    """Проставить порт и триггер: число — как есть, auto — первый свободный (парой, если оба auto)."""
+def resolve_ports(doc, row, port, rport, bport="auto", skip_id=None, mine=()):
+    """Проставить порты прокси, реконнекта и ребута: число — как есть, 0 — нет (управление),
+    auto — по режиму портов: shared — общие base и base+1; triples — свободная тройка подряд
+    (прокси, ребут, реконнект), а если часть задана — свободные рядом."""
+    s = settings()
+    base, auto = s["base_port"], (lambda v: str(v).lower() == "auto")
+    if s["mode"] == "shared":
+        row["port"] = base if auto(port) else as_port(port, "port")
+        row["reboot_port"] = base + 1 if auto(bport) else as_cport(bport, "reboot_port")
+        row["reconnect_port"] = base + 1 if auto(rport) else as_cport(rport, "reconnect_port")
+        return row
     taken = taken_ports(doc, skip_id)
-    pa, ra = str(port).lower() == "auto", str(rport).lower() == "auto"
-    if not pa:
+    if not auto(port):
         row["port"] = as_port(port, "port")
         taken.add(row["port"])
-    if not ra:
-        row["reconnect_port"] = as_port(rport, "reconnect_port")
-        taken.add(row["reconnect_port"])
-    if pa:
-        row["port"] = free_port(taken, start=settings()["base_port"], pair=ra, mine=mine)
+    for k, v in (("reboot_port", bport), ("reconnect_port", rport)):
+        if not auto(v):
+            row[k] = as_cport(v, k)
+            taken.add(row[k])
+    free = (lambda p: p <= 65535 and p not in taken and (p in mine or PROBE[0](p)))
+    if auto(port):
+        need = 1 + auto(bport) + auto(rport)
+        row["port"] = free_port(taken, start=base, mine=mine, n=need)
         taken.add(row["port"])
-    if ra:
-        nxt = row["port"] + 1
-        row["reconnect_port"] = nxt if nxt <= 65535 and nxt not in taken and (nxt in mine or PROBE[0](nxt)) \
-            else free_port(taken, start=settings()["base_port"], mine=mine)
+    for k, v, off in (("reboot_port", bport, 1), ("reconnect_port", rport, 2)):
+        if auto(v):
+            p = row["port"] + off
+            row[k] = p if free(p) else free_port(taken, start=base, mine=mine)
+            taken.add(row[k])
     return row
 
 
 def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip=None,
-        reconnect_port="auto", interval_min=0, enabled=True, protect=True):
+        reconnect_port="auto", interval_min=0, enabled=True, protect=True, reboot_port="auto"):
     lan_ip = as_ipv4(lan_ip, "lan_ip")
     rid = new_id(doc, lan_ip)
     n = modem_n(lan_ip)
@@ -363,7 +475,7 @@ def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip
            "lan_ip": lan_ip,
            "modem_ip": default_modem_ip(lan_ip) if modem_ip is None else modem_ip,
            "interval_min": interval_min, "protect": protect}
-    resolve_ports(doc, row, port, reconnect_port)
+    resolve_ports(doc, row, port, reconnect_port, reboot_port)
     row = norm(row)
     check_all(doc["proxies"] + [row])
     doc["proxies"].append(row)
@@ -371,7 +483,7 @@ def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip
 
 
 SET_ALIASES = {"interval": "interval_min", "rport": "reconnect_port", "lan": "lan_ip", "modem": "modem_ip",
-               "guard": "protect"}
+               "guard": "protect", "bport": "reboot_port", "reboot": "reboot_port", "reconnect": "reconnect_port"}
 
 
 def set_fields(doc, rid, pairs, mine=()):
@@ -385,7 +497,7 @@ def set_fields(doc, rid, pairs, mine=()):
             raise Fail("id постоянный — его не меняют")
         if k not in FIELDS:
             raise Fail("нет поля «%s»; поля: %s" % (k, ", ".join(FIELDS[1:])))
-        if k in ("port", "reconnect_port"):
+        if k in ("port", "reconnect_port", "reboot_port"):
             ports[k] = v
         elif k == "password" and v == "gen":
             r[k] = gen_password()
@@ -393,7 +505,7 @@ def set_fields(doc, rid, pairs, mine=()):
             r[k] = v
     if ports:
         resolve_ports(doc, r, ports.get("port", r["port"]), ports.get("reconnect_port", r["reconnect_port"]),
-                      skip_id=r["id"], mine=mine)
+                      ports.get("reboot_port", r["reboot_port"]), skip_id=r["id"], mine=mine)
     r = norm(r)
     rows = [r if x["id"] == r["id"] else x for x in doc["proxies"]]
     check_all(rows)
@@ -458,54 +570,120 @@ def guard_lists(extra=None):
             + ["IPv6"]}
 
 
-# ── конфиг sing-box (формат 1.12+, проверяется sing-box check 1.14) ─────────
-def config(rows, extra=None):
-    """mixed-inbound на каждую включённую строку, direct-outbound с inet4_bind_address = lan_ip,
-    правило «inbound → свой outbound», остальное — reject.
+# ── конфиг 3proxy ──────────────────────────────────────────────────────────
+ALWAYS_DENY = ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+               "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4")
+TCP_OPS = "CONNECT,HTTP,HTTPS"     # запрет по имени — только TCP: на UDP 3proxy сверяет имя с IP и рубит всё
 
-    Всегда, у любой строки: имена резолвятся только в IPv4 (bind — IPv4, а IPv6 ушёл бы мимо
-    модема с адресом сервера); IPv6, частные адреса и CGNAT закрыты — иначе через прокси видны
-    службы самого сервера и его сеть.
-    Защита строки (protect, по умолчанию вкл): сверх того закрыты ЛК и сайты операторов
-    (домен узнаётся и по SNI/Host, когда клиент пришёл с голым IP), опасные порты и веб модема.
-    Без защиты веб своего модема (modem_ip) открыт — для себя, ген1.
-    """
+
+def q3(s):
+    """Токен для 3proxy — в кавычках: он режет по пробелам, а `$` в начале значит «вставить файл»."""
+    return '"%s"' % str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def acl(r, g, shared, traffic):
+    """Правила одной строки (первое совпавшее решает): своё разрешённое → запреты → allow."""
+    L, out = r["login"], []
+    if not r["protect"] and r["modem_ip"]:
+        out.append("allow %s * %s" % (L, r["modem_ip"]))            # веб своего модема — для своих (ген1)
+    out.append("deny %s * %s" % (L, ",".join(ALWAYS_DENY)))         # сеть и службы самого сервера
+    if traffic == "tcp":
+        out.append("deny %s * * * UDPASSOC" % L)
+    if r["protect"]:
+        names = ",".join(n for d in g["domains"] for n in (d, "*." + d))
+        out.append("deny %s * %s * %s" % (L, names, TCP_OPS))
+        if g["cidrs"]:
+            out.append("deny %s * %s" % (L, ",".join(g["cidrs"])))
+        ports = ",".join([str(p) for p in g["ports"]] + [x.replace(":", "-") for x in g["port_ranges"]])
+        out.append("deny %s * * %s" % (L, ports))
+    out.append("allow %s" % L)
+    if shared:
+        out.append("parent 1000 extip %s 0" % r["lan_ip"])         # общий порт: выход — по логину
+    return out
+
+
+def config3(rows, s=None, extra=None):
+    """Конфиг 3proxy. На каждый порт прокси — сервис `auto` (HTTP CONNECT + SOCKS5 на одном порту).
+    Порт одной строки: выход `-e lan_ip` (адрес интерфейса модема; дальше — маршрут по источнику).
+    Общий порт нескольких строк: `parent 1000 extip lan_ip 0` у правила логина — модем по логину.
+    `flush` перед сервисом: правила не перетекают между портами.
+
+    У любой строки закрыты частные сети, CGNAT, сам сервер (IPv6 не выйдет: выход — IPv4).
+    Защита (protect, по умолчанию вкл): сверх того сайты и ЛК операторов (по имени, которое
+    прислал клиент), опасные порты и веб модема. Без защиты веб своего модема открыт.
+    traffic=tcp — UDP ASSOCIATE запрещён. wan_ip задан — его 3proxy сообщает клиенту для UDP."""
+    s = s or settings()
     g = guard_lists(extra)
-    en = sorted((x for x in rows if x["enabled"]), key=lambda x: x["port"])
-    tag = (lambda r, k: "%s-%d" % (k, r["id"]))
-    guarded = [tag(r, "in") for r in en if r["protect"]]
-    rules = []
-    if guarded:
-        rules.append({"inbound": guarded, "action": "sniff"})
-    rules += [{"action": "resolve", "strategy": "ipv4_only"},
-              {"ip_cidr": ["::/0"], "action": "reject"}]
+    en = [r for r in sorted(rows, key=lambda x: (x["port"], x["id"])) if r["enabled"]]
+    out = ["# modlink (PCS) — пишет `modlink apply`, руками не править", "",
+           "nserver 8.8.8.8", "nserver 1.1.1.1", "nscache 65536",
+           "timeouts 1 5 30 60 180 1800 15 60", "maxconn 5000"]
+    if s.get("access_log"):
+        out += ['log "%s/3proxy.log" D' % P.log, "rotate 3",
+                'logformat "L%Y-%m-%d %H:%M:%S %N.%p %E %U %C:%c %R:%r %O %I %T"']
+    out += ["", "auth strong"]
+    if en:
+        out.append("users " + " ".join(q3("%s:CL:%s" % (r["login"], r["password"])) for r in en))
+    groups = {}
     for r in en:
-        if not r["protect"] and r["modem_ip"]:
-            rules.append({"inbound": [tag(r, "in")], "ip_cidr": [r["modem_ip"] + "/32"],
-                          "action": "route", "outbound": tag(r, "out")})
-    rules += [{"ip_is_private": True, "action": "reject"},
-              {"ip_cidr": list(ALWAYS_CIDRS), "action": "reject"}]
-    if guarded:
-        rules.append(dict({"inbound": guarded, "domain_suffix": g["domains"]},
-                          **({"ip_cidr": g["cidrs"]} if g["cidrs"] else {}), action="reject"))
-        rules.append({"inbound": guarded, "port": g["ports"], "port_range": g["port_ranges"], "action": "reject"})
-    ins, outs = [], []
-    for r in en:
-        i, o = tag(r, "in"), tag(r, "out")
-        ins.append({"type": "mixed", "tag": i, "listen": "0.0.0.0", "listen_port": r["port"],
-                    "users": [{"username": r["login"], "password": r["password"]}]})
-        outs.append({"type": "direct", "tag": o, "inet4_bind_address": r["lan_ip"]})
-        rules.append({"inbound": [i], "action": "route", "outbound": o})
-    rules.append({"action": "reject"})
-    return {"log": {"level": "warn"},
-            "dns": {"servers": [{"type": "local", "tag": "local"}], "strategy": "ipv4_only"},
-            "inbounds": ins, "outbounds": outs, "route": {"rules": rules}}
+        groups.setdefault(r["port"], []).append(r)
+    for port, rs in sorted(groups.items()):
+        shared = len(rs) > 1
+        out += ["", "# порт %d: %s" % (port, ", ".join("строка %d (%s)" % (r["id"], r["name"]) for r in rs)), "flush"]
+        for r in rs:
+            out += acl(r, g, shared, s.get("traffic", "tcp+udp"))
+        svc = "auto -p%d" % port
+        if not shared:
+            svc += " -e%s" % rs[0]["lan_ip"]
+        if s.get("traffic", "tcp+udp") != "tcp" and s.get("wan_ip"):
+            svc += " -Ni%s" % s["wan_ip"]
+        out.append(svc)
+    return "\n".join(out) + "\n"
 
 
-# ── экспорт ────────────────────────────────────────────────────────────────
-def export_lines(rows, ip):
-    return ["%s:%d:%s:%s\thttp://%s:%d/reconnect" % (ip, r["port"], r["login"], r["password"], ip, r["reconnect_port"])
-            for r in sorted(rows, key=lambda x: x["port"]) if r["enabled"]]
+# ── строки для клиентов ────────────────────────────────────────────────────
+def shared_ctl(rows):
+    """Порты управления, общие у нескольких включённых строк: там строку выбирает пароль в ссылке."""
+    cnt = {}
+    for r in rows:
+        if r["enabled"]:
+            for p in {r["reconnect_port"], r["reboot_port"]} - {0}:
+                cnt[p] = cnt.get(p, 0) + 1
+    return {p for p, n in cnt.items() if n > 1}
+
+
+def link(r, ip, what, shared=()):
+    """http://IP:порт/reconnect или /reboot; на общем порту — с паролем строки в пути
+    (браузер не считает это прокси-авторизацией, в отличие от http://login:pass@)."""
+    port = r["reconnect_port"] if what == "reconnect" else r["reboot_port"]
+    if not port:
+        return ""
+    tail = "/" + urllib.parse.quote(r["password"], safe="") if port in shared else ""
+    return "http://%s:%d/%s%s" % (ip, port, what, tail)
+
+
+COPY = {"proxy": ["Ip:port:log:pass"], "reboot": ["Reboot"], "reconnect": ["ReConnect"],
+        "all": ["Ip:port:log:pass", "Reboot", "ReConnect"]}
+
+
+def export(rows, ip, what="all"):
+    """Строки для клиента — как «Копировать» в modlink для Windows: только прокси, только ссылки
+    ребута, только ссылки реконнекта или всё (по колонкам: вставляется в таблицу по ячейкам).
+    → {"columns", "rows"} — строки только включённых, по порту."""
+    if what not in COPY:
+        raise Fail("что копировать: proxy, reboot, reconnect или all")
+    shared = shared_ctl(rows)
+    out = []
+    for r in sorted((x for x in rows if x["enabled"]), key=lambda x: (x["port"], x["id"])):
+        cells = {"proxy": "%s:%d:%s:%s" % (ip, r["port"], r["login"], r["password"]),
+                 "reboot": link(r, ip, "reboot", shared), "reconnect": link(r, ip, "reconnect", shared)}
+        out.append([cells[k] for k in (["proxy", "reboot", "reconnect"] if what == "all" else [what])])
+    return {"columns": COPY[what], "rows": out}
+
+
+def export_lines(rows, ip, what="all"):
+    """Те же строки текстом: колонки через табуляцию."""
+    return ["\t".join(c for c in row) for row in export(rows, ip, what)["rows"]]
 
 
 def table_lines(rows, ip):
@@ -620,7 +798,7 @@ def legacy(src, old_sb=None):
             warn.append("модем %d: пароль в работающем конфиге другой; беру из modems.conf" % n)
         rows.append(norm({"id": n, "enabled": True, "name": "modem %d" % n, "login": "modem%d" % n,
                           "password": pw, "port": port, "lan_ip": "192.168.%d.100" % n,
-                          "modem_ip": "192.168.%d.1" % n, "reconnect_port": port + 1,
+                          "modem_ip": "192.168.%d.1" % n, "reconnect_port": port + 1, "reboot_port": 0,
                           "interval_min": min(max(iv, 0), MAX_INTERVAL)}))
     check_all(rows)
     return rows, str(server.get("ext_ip") or "").strip(), warn

@@ -975,55 +975,112 @@
   const csvJoin = (rows) => rows.map((r) => r.map((c) => csvCell(String(c))).join(",")).join("\n") + "\n";
 
   // ── вкладка modlink ───────────────────────────────────────────────────────
-  const ML_COLS = [["enabled", "вкл", "строка активна"], ["name", "имя", "метка"], ["login", "логин"], ["password", "пароль"],
-    ["port", "порт", "порт прокси (постоянный)"], ["lan_ip", "LAN IP", "адрес интерфейса модема на сервере"],
-    ["modem_ip", "IP модема", "веб-интерфейс Huawei (HiLink)"], ["reconnect_port", "реконнект", "порт триггера: GET http://IP:порт/reconnect"],
-    ["interval_min", "мин", "автореконнект, минут (0 — выкл)"],
-    ["protect", "защита", "закрыты ЛК и сайты операторов, опасные порты (почта, SMB, торренты) и веб модема; снять — только для своих (ген1)"]];
+  // modlink — по образцу modlink для Windows (ветка app-v2): сверху основная сеть, режим портов и трафик;
+  // ниже модемы — № · IP · порт · логин · пароль · внешний IP и действия, «ещё» раскрывается под строкой;
+  // «Копировать» — прокси, ссылки ребута, ссылки реконнекта или всё по колонкам.
+  const ML_MAIN = [["lan_ip", "IP", "адрес интерфейса модема на сервере — через него выходит прокси"],
+    ["port", "Порт", "порт прокси: HTTP и SOCKS5 на одном"], ["login", "Логин"], ["password", "Пароль"]];
+  const ML_MORE = [["name", "Имя", "метка"], ["modem_ip", "IP модема (HiLink)", "веб модема: реконнект, ребут, статус"],
+    ["reboot_port", "Порт ребута", "GET http://IP:порт/reboot; 0 — нет ссылки"],
+    ["reconnect_port", "Порт реконнекта", "GET http://IP:порт/reconnect; 0 — нет ссылки"],
+    ["interval_min", "Авто-реконнект, мин", "0 — выкл"]];
+  const ML_NEW = {enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "",
+    reboot_port: "", reconnect_port: "", interval_min: "0", protect: true};
 
   function mlTab(X, id) {
     const where = id === "host" ? "хост" : "ВМ " + id;
-    const statusLine = el("div", {class: "muted"});
     const legacyBox = el("div");
-    // общие настройки — как в modlink-linux: базовый порт, LAN IP, WAN IP
-    const sBase = el("input", {class: "w-s", placeholder: "10000", inputmode: "numeric"});
-    const sLan = el("input", {class: "w-ip", placeholder: "авто"});
-    const sWan = el("input", {class: "w-ip", placeholder: "авто"});
-    const sRes = el("span", {class: "res"});
-    let S0 = null;
-    const sBox = el("div", {class: "ml-settings"},
-      el("label", {title: "порты ВСЕХ строк заново: прокси база+2i, реконнект база+2i+1; новые строки — от него"}, "базовый порт ", sBase),
-      el("label", {title: "адрес этого сервера в локальной сети — в строках «Для proxyveth» (ВМ этого хоста). Пусто — определить самим"}, "LAN IP ", sLan),
-      el("label", {title: "внешний адрес для клиентов — в «Экспорт для клиента». Пусто — определить при экспорте"}, "WAN IP ", sWan),
-      btn("Сохранить настройки", async (e) => {
-        const body = {lan_ip: sLan.value.trim(), wan_ip: sWan.value.trim()};
-        const base = sBase.value.trim();
-        if (base && S0 && String(S0.base_port) !== base) {
-          if (!window.confirm("Порты всех строк пересчитаются от " + base + ": прокси " + base + ", " + (+base + 2) + ", …, реконнект — следующий." +
-              " Клиентам понадобятся новые порты. Дальше — «Применить». Продолжить?")) return;
-          body.base_port = base;
-        }
-        if ((Object.keys(edits).length || added.length || deleted.size) && body.base_port &&
-            !window.confirm("Несохранённые правки таблицы пропадут. Продолжить?")) return;
-        const r = await act(e.target, sRes, () => X.POST("/targets/" + id + "/modlink/settings", body),
-          (d) => d && d.renumbered ? "порты пересчитаны — «Применить»" : "Сохранено");
-        if (r && r.ok) await load();
-      }, "", "сохранить базовый порт, LAN IP и WAN IP"), sRes);
-    function showSettings(x) {
-      if (!x || !x.ok || !x.data) { sBox.hidden = !!(x && !x.ok); return; }
-      sBox.hidden = false;
-      S0 = x.data;
-      sBase.value = String(S0.base_port || "");
-      sLan.value = S0.lan_ip || ""; sLan.placeholder = "авто" + (S0.lan_ip_now ? " (" + S0.lan_ip_now + ")" : "");
-      sWan.value = S0.wan_ip || ""; sWan.placeholder = "авто (при экспорте)";
-    }
-    const tbl = el("div", {class: "tbl-wrap"});
     const res = el("span", {class: "res"});
     const out = el("div", {class: "muted mono"});
     const dirtyEl = el("span", {class: "problems"});
-    let orig = [], states = {}, edits = {}, added = [], deleted = new Set(), revealed = {}, err = null, seq = 0, pending = false;
+    const pill = el("span", {class: "pill"}, el("span", {class: "dot"}), el("span", {text: "3proxy: …"}));
+    const engineEl = el("span", {class: "muted"});
+    const cnt = el("span", {class: "muted"});
+    const tbl = el("div", {class: "tbl-wrap ml-rows"});
+    let orig = [], states = {}, edits = {}, added = [], deleted = new Set(), revealed = {}, opened = new Set();
+    let err = null, seq = 0, pending = false, S0 = null, tests = {};
 
+    // ── основная сеть ────────────────────────────────────────────────────
+    const sLan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sWan = el("input", {class: "w-ip", placeholder: "авто"});
+    const sBase = el("input", {class: "w-s", placeholder: "10000", inputmode: "numeric"});
+    const sRes = el("span", {class: "res"});
+    const segMode = seg([["triples", "Разные порты (тройки)", "у строки свои: прокси, ребут, реконнект подряд"],
+      ["shared", "Один порт (по логину)", "у всех один порт прокси — модем по логину; один порт управления — ссылки с паролем строки"]],
+      async (v) => {
+        if (!window.confirm("Режим портов «" + (v === "shared" ? "один порт" : "разные порты") + "»: порты ВСЕХ строк заполнятся заново от базового " +
+            ((S0 && S0.base_port) || 10000) + ". Клиентам понадобятся новые строки. Дальше — «Применить». Продолжить?")) return false;
+        return saveSet({mode: v}, "порты заполнены под режим — «Применить»");
+      });
+    const segTraffic = seg([["tcp+udp", "TCP и UDP", "SOCKS5 UDP ASSOCIATE: игры, звонки, QUIC"], ["tcp", "Только TCP", "UDP через прокси запрещён"]],
+      (v) => saveSet({traffic: v}, "трафик: " + (v === "tcp" ? "только TCP" : "TCP и UDP") + " — «Применить»"));
+    const tWan = toggle("Внешний IP раз в час", "демон проверяет внешний IP через каждый прокси", (v) => saveSet({wan_check: v}));
+    const tSpeed = toggle("Скорость в 12:00", "раз в день тест скорости каждого модема (yaspeed) — это трафик модема", (v) => saveSet({speedtest: v}));
+    const tLog = toggle("Журнал соединений", "каждое соединение 3proxy — в /var/log/modlink/3proxy.log (3 дня)", (v) => saveSet({access_log: v}, "«Применить»"));
+    const netCard = el("div", {class: "card ml-net"},
+      el("div", {class: "eyebrow", text: "Основная сеть"}),
+      el("div", {class: "grid3"},
+        field("IP этого хоста", sLan, "адрес в локальной сети — строки «Для proxyveth» (ВМ этого хоста)"),
+        field("Внешний IP", sWan, "для строк и ссылок клиентам; его же 3proxy сообщает для UDP"),
+        field("Базовый порт", sBase, "от него порты новых строк и смены режима")),
+      el("div", {class: "bar"}, btn("Сохранить", async (e) => {
+        const body = {lan_ip: sLan.value.trim(), wan_ip: sWan.value.trim()};
+        const base = sBase.value.trim();
+        if (base && S0 && String(S0.base_port) !== base) {
+          if (!window.confirm("Порты всех строк заполнятся заново от " + base + ". Клиентам понадобятся новые строки. Дальше — «Применить». Продолжить?")) return;
+          body.base_port = base;
+        }
+        if (dirtyCount() && body.base_port && !window.confirm("Несохранённые правки таблицы пропадут. Продолжить?")) return;
+        const r = await act(e.target, sRes, () => X.POST("/targets/" + id + "/modlink/settings", body),
+          (d) => d && d.renumbered ? "порты пересчитаны — «Применить»" : "Сохранено");
+        if (r && r.ok) await load();
+      }, "", "сохранить адреса и базовый порт"), sRes),
+      el("div", {class: "ml-opts"},
+        el("label", {class: "muted", text: "Режим портов"}), segMode.el,
+        el("label", {class: "muted", text: "Трафик"}), segTraffic.el),
+      el("div", {class: "ml-opts"}, tWan.el, tSpeed.el, tLog.el));
+
+    function field(label, input, hint) {
+      return el("div", {class: "field"}, el("label", {text: label}), input, el("div", {class: "hint", text: hint}));
+    }
+    function seg(items, onPick) {
+      let cur = null;
+      const bs = items.map(([v, t, title]) => btn(t, async () => {
+        if (v === cur) return;
+        const ok = await onPick(v);
+        if (ok !== false) set(v);
+      }, "", title));
+      function set(v) { cur = v; bs.forEach((b, i) => b.classList.toggle("primary", items[i][0] === v)); }
+      return {el: el("span", {class: "seg"}, ...bs), set};
+    }
+    function toggle(label, title, onChange) {
+      const box = el("input", {type: "checkbox", onchange: async () => {
+        const ok = await onChange(box.checked);
+        if (ok === false) box.checked = !box.checked;
+      }});
+      return {el: el("label", {class: "pill", title}, box, label), set: (v) => { box.checked = !!v; }};
+    }
+    async function saveSet(body, okText) {
+      const r = await act(null, sRes, () => X.POST("/targets/" + id + "/modlink/settings", body), okText || "Сохранено");
+      if (!r || !r.ok) return false;
+      showSettings({ok: true, data: r.data});
+      if (r.data && r.data.renumbered) await load();
+      return true;
+    }
+    function showSettings(x) {
+      if (!x || !x.ok || !x.data) { netCard.hidden = !!(x && !x.ok); return; }
+      netCard.hidden = false;
+      S0 = x.data;
+      sBase.value = String(S0.base_port || "");
+      sLan.value = S0.lan_ip || ""; sLan.placeholder = "авто" + (S0.lan_ip_now ? " (" + S0.lan_ip_now + ")" : "");
+      sWan.value = S0.wan_ip || ""; sWan.placeholder = "авто (при копировании)";
+      segMode.set(S0.mode || "triples"); segTraffic.set(S0.traffic || "tcp+udp");
+      tWan.set(S0.wan_check !== false); tSpeed.set(!!S0.speedtest); tLog.set(!!S0.access_log);
+    }
+
+    // ── правки строк ─────────────────────────────────────────────────────
     const val = (r, k) => (edits[r.id] && k in edits[r.id]) ? edits[r.id][k] : r[k];
+    const dirtyCount = () => Object.keys(edits).length + added.length + deleted.size;
     function setEdit(r, k, v) {
       const e = edits[r.id] || (edits[r.id] = {});
       const o = k === "password" ? revealed[r.id] : r[k];
@@ -1032,92 +1089,149 @@
       markDirty();
     }
     function markDirty() {
-      const n = Object.keys(edits).length + added.length + deleted.size;
+      const n = dirtyCount();
       dirtyEl.textContent = n ? "несохранённых правок: " + n + " — «Применить»"
-        : pending ? "есть неприменённые правки (modlink apply не было) — «Применить»" : "";
+        : pending ? "есть неприменённые правки — «Применить»" : "";
       for (const tr of tbl.querySelectorAll("tr[data-id]")) tr.classList.toggle("dirty", !!edits[tr.dataset.id]);
     }
-
     function inputFor(r, k, isNew) {
       const v = isNew ? r.fields[k] : k === "password" ? ((edits[r.id] || {}).password ?? revealed[r.id]) : val(r, k);
-      const cls = k === "interval_min" ? "w-xs" : ["port", "reconnect_port"].includes(k) ? "w-s" : (k === "lan_ip" || k === "modem_ip") ? "w-ip" : "w-m";
+      const cls = k === "interval_min" ? "w-xs" : /port/.test(k) ? "w-s" : (k === "lan_ip" || k === "modem_ip") ? "w-ip" : "w-m";
       if (k === "enabled") {
-        return el("input", {type: "checkbox", checked: !!v, onchange: (e) => isNew ? (r.fields[k] = e.target.checked) : setEdit(r, k, e.target.checked)});
+        return el("label", {class: "pill"}, el("input", {type: "checkbox", checked: !!v,
+          onchange: (e) => { isNew ? (r.fields[k] = e.target.checked) : setEdit(r, k, e.target.checked); draw(); }}), "включён");
       }
       if (k === "protect") {
         const on = v !== false;
-        const box = el("input", {type: "checkbox", checked: on, title: on ? "защита активна" : "защита НЕ активна",
-          onchange: (e) => {
-            if (!e.target.checked && !window.confirm("Снять защиту строки " + (isNew ? "(новой)" : r.id) + "? Клиенту прокси откроются " +
-                "личный кабинет оператора (вход по SIM без пароля), веб модема и опасные порты. Только для своих (ген1).")) {
-              e.target.checked = true; return;
-            }
-            if (isNew) r.fields[k] = e.target.checked; else setEdit(r, k, e.target.checked);
-            draw(); markDirty();
-          }});
-        return el("label", {class: "guard" + (on ? "" : " off")}, box, el("span", {text: on ? "активна" : "не активна"}));
+        const box = el("input", {type: "checkbox", checked: on, onchange: (e) => {
+          if (!e.target.checked && !window.confirm("Снять защиту строки " + (isNew ? "(новой)" : r.id) + "? Клиенту прокси откроются " +
+              "личный кабинет оператора (вход по SIM без пароля), веб модема и опасные порты. Только для своих (ген1).")) {
+            e.target.checked = true; return;
+          }
+          if (isNew) r.fields[k] = e.target.checked; else setEdit(r, k, e.target.checked);
+          draw();
+        }});
+        return el("label", {class: "guard" + (on ? "" : " off"), title: "закрыты ЛК и сайты операторов, опасные порты и веб модема"},
+          box, el("span", {text: on ? "защита активна" : "защита НЕ активна"}));
       }
-      return el("input", {value: v == null ? "" : String(v), class: cls, placeholder: isNew && /port/.test(k) ? "auto" : isNew && k === "password" ? "gen" : "",
+      return el("input", {value: v == null ? "" : String(v), class: cls,
+        placeholder: isNew && /port/.test(k) ? "auto" : isNew && k === "password" ? "gen" : "",
         oninput: (e) => isNew ? (r.fields[k] = e.target.value) : setEdit(r, k, e.target.value)});
     }
     function pwCell(r) {
       const e = edits[r.id] || {};
       if (e.password === "gen")
-        return el("span", {}, el("span", {class: "pw-gen", text: "новый (сгенерируется) "}),
+        return el("span", {}, el("span", {class: "pw-gen", text: "новый "}),
           btn("↶", () => { delete e.password; if (!Object.keys(e).length) delete edits[r.id]; draw(); }, "icon", "не менять"));
-      if (r.id in revealed) return el("span", {class: "pill"}, inputFor(r, "password"),
+      if (r.id in revealed) return el("span", {class: "ml-pw"}, inputFor(r, "password"),
         btn("↺", () => { setEdit(r, "password", "gen"); draw(); }, "icon", "сгенерировать новый пароль"));
-      return el("span", {class: "pill"},
+      return el("span", {class: "ml-pw"},
         el("span", {class: "pw-hidden", text: r.password_set === false ? "—" : "••••••"}),
         btn("показать", () => reveal(r), "link", "показать пароль (явный запрос)"),
         btn("↺", () => { setEdit(r, "password", "gen"); draw(); }, "icon", "сгенерировать новый пароль"));
     }
     async function reveal(r) {
       const x = await X.POST("/targets/" + id + "/modlink/reveal", {id: r.id});
-      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
+      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return null; }
       revealed[r.id] = x.data.password;
       draw();
+      return x.data.password;
     }
+    function extCell(r) {
+      const t = tests[r.id], st = states[r.id] || {};
+      if (t) return el("span", {class: "mono " + (t.ok ? "ok" : "bad"), text: t.text, title: t.title || ""});
+      if (st.wan_ip) return el("span", {class: "mono", text: st.wan_ip, title: "проверено " + (st.wan_t ? new Date(st.wan_t * 1000).toLocaleString("ru-RU") : "")});
+      if (st.wan_error) return el("span", {class: "mono bad", text: "нет выхода", title: st.wan_error});
+      return el("span", {class: "muted", text: "—"});
+    }
+
     async function rowAct(r, what, args, ask) {
-      if (ask && !window.confirm(ask)) return;
+      if (ask && !window.confirm(ask)) return null;
       out.textContent = "строка " + r.id + " · " + what + "…";
       const x = await X.run(id, "modlink", args);
-      if (!x.ok) { out.textContent = "строка " + r.id + " · " + what + " — Ошибка: " + x.error; return; }
+      if (!x.ok) { out.textContent = "строка " + r.id + " · " + what + " — Ошибка: " + x.error; return x; }
       if (args[0] === "log") {
-        const L = Array.isArray(x.data) ? x.data : x.data && Array.isArray(x.data.lines) ? x.data.lines : null;
-        const lines = L ? L.map((l) => typeof l === "string" ? l : JSON.stringify(l)).join("\n")
-          : typeof x.data === "string" ? x.data : JSON.stringify(x.data, null, 1);
+        const L = x.data && Array.isArray(x.data.lines) ? x.data.lines : rowsOf(x.data);
         out.textContent = "";
-        showText("Журнал реконнектов · строка " + r.id + " · " + where, lines || "пусто");
-        return;
+        showText("Журнал строки " + r.id + " · " + where, (L || []).join("\n") || "пусто");
+        return x;
       }
       out.textContent = "строка " + r.id + " · " + what + ": " + mlResult(args[0], x.data);
+      return x;
     }
+    async function test(r) {
+      tests[r.id] = {ok: true, text: "…"}; draw();
+      const x = await X.run(id, "modlink", ["test", String(r.id)]);
+      const d = x.ok ? x.data || {} : {};
+      tests[r.id] = x.ok && d.proxy && d.proxy.ok
+        ? {ok: true, text: d.proxy.ip + (d.hilink && d.hilink.ok ? "  ·H" : ""), title: mlResult("test", d)}
+        : {ok: false, text: x.ok ? (d.proxy && d.proxy.error) || "нет ответа" : x.error, title: x.ok ? mlResult("test", d) : x.error};
+      draw();
+    }
+    async function copyRow(r) {
+      const x = await X.POST("/targets/" + id + "/modlink/export", {what: "all"});
+      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
+      const row = (x.data.rows || []).find((c) => String(c[0]).split(":")[1] === String(r.port) && String(c[0]).split(":")[2] === r.login);
+      if (!row) { setRes(res, "err", "строки нет среди включённых — «Применить»?"); return; }
+      showTable("Строка " + r.id + " · " + where, x.data.columns, [row], "Прокси и ссылки — по колонкам. «Копировать для таблицы» — вставляется по ячейкам.");
+    }
+    async function copyAll(what) {
+      const x = await X.POST("/targets/" + id + "/modlink/export", {what});
+      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
+      const title = {proxy: "Только прокси", reboot: "Только ссылки ребута", reconnect: "Только ссылки реконнекта",
+        all: "Прокси + ребут + реконнект"}[what] + " · " + where;
+      showTable(title, x.data.columns, x.data.rows, "По одной строке на модем; колонки — через табуляцию: в Google-таблицу встают по ячейкам." +
+        (S0 && S0.mode === "shared" ? " Порт управления общий — в ссылках пароль строки." : ""));
+    }
+    async function speed(r, line) {
+      line.textContent = "тест… (до минуты)"; line.className = "speedline busy";
+      const x = await X.run(id, "modlink", ["speedtest", String(r.id)]);
+      if (x.ok) { line.textContent = fmtSpeed(x.data); line.className = "speedline ok"; }
+      else { line.textContent = x.error; line.className = "speedline bad"; }
+    }
+    const fmtSpeed = (d) => "↓ " + (+d.down || 0).toFixed(1) + " · ↑ " + (+d.up || 0).toFixed(1) + " Мбит/с · " + Math.round(+d.ping || 0) + " мс" +
+      (d.t ? " · " + new Date(d.t * 1000).toLocaleString("ru-RU") : "");
 
     function draw() {
       if (err) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + err})); return; }
-      const head = el("tr", {}, el("th"), ML_COLS.map(([, t, title]) => el("th", {text: t, title: title || null})), el("th"));
+      const head = el("tr", {}, el("th", {text: "№"}), ML_MAIN.map(([, t, title]) => el("th", {text: t, title: title || null})),
+        el("th", {text: "Внешний IP"}), el("th"));
       const body = [];
       for (const r of orig) {
         const st = states[r.id];
-        const gone = deleted.has(r.id);
-        body.push(el("tr", {"data-id": String(r.id), class: (gone ? "gone" : "") + (edits[r.id] ? " dirty" : "")},
-          el("td", {class: "ml-dot", "data-id": String(r.id), title: mlStateText(st)}, el("span", {class: "dot " + mlDot(st)})),
-          ML_COLS.map(([k]) => el("td", {}, k === "password" ? pwCell(r) : inputFor(r, k))),
+        const gone = deleted.has(r.id), open = opened.has(r.id), off = val(r, "enabled") === false;
+        const speedLine = el("div", {class: "speedline", text: st && st.speed ? (st.speed.error ? st.speed.error : fmtSpeed(st.speed)) : ""});
+        body.push(el("tr", {"data-id": String(r.id), class: (gone ? "gone" : "") + (edits[r.id] ? " dirty" : "") + (off ? " off" : "")},
+          el("td", {class: "ml-n", title: mlStateText(st)}, el("span", {class: "dot " + mlDot(st)}), String(r.id)),
+          ML_MAIN.map(([k]) => el("td", {}, k === "password" ? pwCell(r) : inputFor(r, k))),
+          el("td", {class: "ml-ext"}, extCell(r)),
           el("td", {class: "acts-cell"},
-            btn("Test", () => rowAct(r, "Test", ["test", String(r.id)]), "icon", "внешний IP через прокси + HiLink"),
+            btn("Test", () => test(r), "icon", "внешний IP через этот прокси + HiLink"),
             btn("⟳", () => rowAct(r, "реконнект", ["reconnect", String(r.id)]), "icon", "реконнект: сменить IP"),
-            btn("↻", () => rowAct(r, "ребут", ["reboot", String(r.id)], "Перезагрузить модем строки " + r.id + " (" + (r.name || "") + ")?"), "icon", "перезагрузить модем"),
-            btn("≡", () => rowAct(r, "лог", ["log", String(r.id)]), "icon", "журнал реконнектов"),
+            btn("⧉", () => copyRow(r), "icon", "копировать строку: прокси и ссылки"),
+            btn(open ? "▴" : "▾", () => { open ? opened.delete(r.id) : opened.add(r.id); draw(); }, "icon", "ещё: порты, автореконнект, защита, ребут, скорость"),
             btn("✕", () => { if (gone) deleted.delete(r.id); else deleted.add(r.id); draw(); markDirty(); }, "icon danger", gone ? "не удалять" : "удалить строку (при «Применить»)"))));
+        if (open) body.push(el("tr", {class: "ml-more"}, el("td"), el("td", {colspan: ML_MAIN.length + 2},
+          el("div", {class: "ml-more-grid"}, ML_MORE.map(([k, t, title]) => el("label", {title: title || null}, el("span", {class: "muted", text: t}), inputFor(r, k)))),
+          el("div", {class: "bar"}, inputFor(r, "enabled"), inputFor(r, "protect"),
+            btn("Ребут модема", () => rowAct(r, "ребут", ["reboot", String(r.id)], "Перезагрузить модем строки " + r.id + " (" + (r.name || "") + ")?"), "", "через HiLink; модем вернётся минуты через 1–2"),
+            btn("Спидтест", () => speed(r, speedLine), "", "скорость модема (yaspeed) — это трафик модема"),
+            btn("Журнал", () => rowAct(r, "журнал", ["log", String(r.id)]), "link", "реконнекты, ребуты, тесты строки")),
+          speedLine,
+          el("div", {class: "muted", text: mlStateText(st)}))));
       }
       for (const a of added) {
-        body.push(el("tr", {class: "new"}, el("td"),
-          ML_COLS.map(([k]) => el("td", {}, inputFor(a, k, true))),
+        body.push(el("tr", {class: "new"}, el("td", {class: "ml-n", text: "+"}),
+          ML_MAIN.map(([k]) => el("td", {}, inputFor(a, k, true))), el("td", {class: "muted", text: "новая"}),
           el("td", {class: "acts-cell"}, btn("✕", () => { added = added.filter((x) => x !== a); draw(); markDirty(); }, "icon danger", "убрать новую строку"))));
+        body.push(el("tr", {class: "ml-more"}, el("td"), el("td", {colspan: ML_MAIN.length + 2},
+          el("div", {class: "ml-more-grid"}, ML_MORE.map(([k, t, title]) => el("label", {title: title || null}, el("span", {class: "muted", text: t}), inputFor(a, k, true)))),
+          el("div", {class: "bar"}, inputFor(a, "protect", true)))));
       }
-      if (!body.length) body.push(el("tr", {}, el("td", {colspan: ML_COLS.length + 2, class: "muted", text: "прокси нет — «Добавить» или «Из интерфейсов»"})));
+      if (!body.length) body.push(el("tr", {}, el("td", {colspan: ML_MAIN.length + 3, class: "muted", text: "модемов нет — «+ Модем» или «Из интерфейсов»"})));
       tbl.replaceChildren(el("table", {class: "t ml"}, el("thead", {}, head), el("tbody", {}, body)));
+      cnt.textContent = orig.length ? "модемов " + orig.length + (S0 ? " · " + (S0.mode === "shared" ? "один порт" : "свои порты") + " · " +
+        (S0.traffic === "tcp" ? "только TCP" : "TCP+UDP") : "") : "";
     }
 
     async function load() {
@@ -1162,14 +1276,22 @@
       if (St && St.ok && St.data && typeof St.data === "object") {
         for (const x of rowsOf(St.data)) if (x && x.id != null) states[x.id] = x;
         if (!Array.isArray(St.data)) {
-          statusLine.textContent = summary(St.data, ["rows", "pending"]);
+          const up = St.data.proxy === "active";
+          pill.className = "pill"; pill.firstChild.className = "dot " + (up ? "ok" : "bad");
+          pill.lastChild.textContent = "3proxy: " + (up ? "работает" : St.data.proxy || "—") + " · демон: " + (St.data.daemon === "active" ? "работает" : St.data.daemon || "—");
+          engineEl.textContent = St.data.engine || "";
           if (St.data.pending != null) pending = !!St.data.pending;
         }
-      } else statusLine.textContent = St && !St.ok ? "modlink status — Ошибка: " + St.error : "";
-      for (const td of tbl.querySelectorAll("td.ml-dot")) {
-        const st = states[td.dataset.id];
+      } else { pill.lastChild.textContent = St && !St.ok ? "modlink status — Ошибка: " + St.error : "3proxy: —"; }
+      for (const td of tbl.querySelectorAll("td.ml-n")) {
+        const tr = td.closest("tr"), st = tr && states[tr.dataset.id];
+        if (!st) continue;
         td.title = mlStateText(st);
         td.firstChild.className = "dot " + mlDot(st);
+      }
+      for (const tr of tbl.querySelectorAll("tr[data-id]")) {
+        const r = orig.find((x) => String(x.id) === tr.dataset.id), cell = tr.querySelector("td.ml-ext");
+        if (r && cell) cell.replaceChildren(extCell(r));
       }
       markDirty();
     }
@@ -1178,10 +1300,11 @@
       if (r.ok) applyStatus(r.data.status);
     }
 
-    const bAdd = btn("Добавить", () => {
-      added.push({tmp: ++seq, fields: {enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "", reconnect_port: "", interval_min: "0", protect: true}});
+    // ── кнопки над таблицей ──────────────────────────────────────────────
+    const bAdd = btn("+ Модем", () => {
+      added.push({tmp: ++seq, fields: Object.assign({}, ML_NEW)});
       draw(); markDirty();
-    });
+    }, "", "новая строка: порт, логин и пароль подставятся сами (auto/gen)");
     const bIf = btn("Из интерфейсов", async (e) => {
       const r = await act(e.target, res, () => X.run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length);
       if (!r || !r.ok) return;
@@ -1189,7 +1312,7 @@
       if (!sug.length) { setRes(res, "ok", "новых интерфейсов 192.168.N.100 нет — всё уже в таблице"); return; }
       modal("Строки по интерфейсам · " + where, el("div", {},
         el("p", {text: "modlink добавит строки (логин, пароль и порты — сам). В силу вступят после «Применить»."}),
-        el("pre", {text: sug.map((x) => [x.lan_ip, x.modem_ip, x.iface, x.name].filter(Boolean).join("  ")).join("\n")})), [
+        el("pre", {text: sug.map((x) => [x.lan_ip, x.modem_ip, x.dev || x.iface, x.name].filter(Boolean).join("  ")).join("\n")})), [
         {text: "Отмена"},
         {text: "Добавить " + sug.length, cls: "primary", onclick: async (close) => {
           close();
@@ -1203,17 +1326,15 @@
         del: [...deleted],
         set: Object.entries(edits).filter(([k]) => !deleted.has(Number(k)) && !deleted.has(k)).map(([k, f]) => ({id: Number(k), fields: f})),
         add: added.map((a) => a.fields), apply: true};
-      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/save", payload), "Применено");
+      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/save", payload), "Применено — 3proxy перечитал конфиг");
       if (r && !r.ok && r.data && r.data.steps) {
         out.textContent = r.data.steps.map((s) => (s.ok ? "✓ " : "✗ ") + s.what + (s.error ? ": " + s.error : "")).join("   ");
       }
+      tests = {};
       await load();
-    }, "primary", "сохранить правки и modlink apply (sing-box check → перезапуск)");
-    const bExp = btn("Экспорт для клиента", async (e) => {
-      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/export", {}), "Готово");
-      if (r && r.ok) showTable("Экспорт для клиента · " + where, r.data.columns, r.data.rows,
-        "Колонки — как в таблице клиента: прокси и ссылка реконнекта. «Копировать для таблицы» — вставляется по ячейкам.");
-    }, "", "IP:PORT:LOGIN:PASS и ссылка реконнекта — с паролями");
+    }, "primary", "сохранить правки → конфиг 3proxy → перечитать (соединения не рвутся) → проверка портов");
+    const copyMenu = menuBtn("Копировать ▾", [["proxy", "Только прокси"], ["reboot", "Только ссылки ребута"],
+      ["reconnect", "Только ссылки реконнекта"], ["all", "Прокси + ребут + реконнект"]], copyAll, "строки для клиента — с паролями");
     const bTbl = btn("Для proxyveth", async (e) => {
       const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/export", {table: true}), "Готово");
       if (r && r.ok) showTable("Строки для таблицы proxyveth · " + where, r.data.columns, r.data.rows,
@@ -1221,9 +1342,26 @@
           el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
             " можно поменять. У строк-поставщиков защита снята: proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink."})));
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
+    const logsMenu = menuBtn("Логи ▾", [["3proxy", "Логи 3proxy"], ["modlink", "Логи modlink (демон)"]], async (which) => {
+      const x = await X.run(id, "modlink", ["logs", which]);
+      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
+      showText((which === "3proxy" ? "Логи 3proxy" : "Логи modlink") + " · " + where, ((x.data && x.data.lines) || []).join("\n") || "пусто");
+    }, "журналы служб");
 
-    const root = el("div", {}, legacyBox, sBox, statusLine, el("div", {class: "bar"}, dirtyEl), tbl,
-      el("div", {class: "bar"}, bAdd, bIf, bApply, bExp, bTbl, btn("Обновить", () => load(), "link", "перечитать таблицу (несохранённое пропадёт)"), res), out);
+    function menuBtn(label, items, onPick, title) {
+      const menu = el("div", {class: "menu", hidden: true});
+      const b = btn(label, (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; }, "", title);
+      for (const [v, t] of items) menu.append(el("button", {type: "button", text: t, onclick: (e) => { e.stopPropagation(); menu.hidden = true; onPick(v); }}));
+      document.addEventListener("click", () => { menu.hidden = true; });
+      return el("span", {class: "menu-wrap"}, b, menu);
+    }
+
+    const root = el("div", {}, legacyBox,
+      el("div", {class: "bar"}, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
+      netCard,
+      el("div", {class: "bar ml-head"}, el("b", {text: "Модемы"}), cnt, el("span", {class: "spacer"}),
+        copyMenu, bAdd, bIf, bTbl, logsMenu, btn("Обновить", () => load(), "link", "перечитать (несохранённое пропадёт)"), res),
+      tbl, out);
     let loaded = false;
     const pl = poller(15000, pollStatus);
     return {
@@ -1234,14 +1372,16 @@
     };
   }
 
-  const ML_STATE = {ok: ["ok", "работает"], warn: ["warn", "апстрим/модем"], broken: ["bad", "сломан"],
+  const ML_STATE = {ok: ["ok", "работает"], warn: ["warn", "модем/выход"], broken: ["bad", "сломан"],
     disabled: ["", "выключен"], pending: ["info", "ждёт «Применить»"]};
   const mlDot = (st) => st ? (ML_STATE[st.state] || ["bad"])[0] : "";
   function mlStateText(st) {
     if (!st) return "";
     const t = [(ML_STATE[st.state] || [, st.state])[1]];
     if (st.port_up === false) t.push("порт " + (st.port || "") + " не слушает");
-    if (st.trigger_up === false) t.push("триггер не слушает" + (st.trigger_error ? ": " + st.trigger_error : ""));
+    if (st.trigger_up === false) t.push("порт управления не слушает" + (st.trigger_error ? ": " + st.trigger_error : ""));
+    if (st.wan_ip) t.push("внешний IP " + st.wan_ip + (st.wan_t ? " (" + new Date(st.wan_t * 1000).toLocaleTimeString("ru-RU") + ")" : ""));
+    else if (st.wan_error) t.push("внешний IP: " + st.wan_error);
     if (st.iface) t.push("интерфейс " + st.iface);
     if (st.next) t.push("следующий реконнект " + new Date(st.next * 1000).toLocaleTimeString("ru-RU"));
     if (st.last) t.push("последний: " + (st.last.t ? new Date(st.last.t * 1000).toLocaleString("ru-RU") + " " : "") +
