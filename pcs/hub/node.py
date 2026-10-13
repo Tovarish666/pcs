@@ -173,7 +173,7 @@ def modlink_info(root="/", run=sh):
     d = {"installed": os.path.exists(at(root, "etc/systemd/system/modlink.service"))
          or os.path.exists(at(root, "etc/modlink/proxies.json"))}
     if d["installed"]:
-        d["state"] = units_state(("modlink", "modlink-sb"), run)
+        d["state"] = units_state(("modlink", "modlink-3proxy"), run)
     return d
 
 
