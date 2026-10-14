@@ -12,7 +12,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from pcs.core.util import Fail
+from pcs.core.util import Fail, jload, jsave
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 DANGER = ("--yes", "--force")            # только с подтверждением номером сервера
@@ -95,10 +95,16 @@ def to_csv(rows):
 
 
 class Panel:
-    def __init__(self, api, cache_ttl=4.0, audit=None):
+    OV_FRESH = 8.0           # с: обзор моложе — как есть; старше — сразу прежний, свежий собирается в фоне
+
+    def __init__(self, api, cache_ttl=4.0, audit=None, ov_path=None):
         self.api = api
         self.cache_ttl = cache_ttl
         self.audit = audit or (lambda *a: None)
+        self.ov_path = ov_path     # последний обзор на диске: после перезапуска панели — сразу он
+        self._ov = None            # (monotonic, данные)
+        self._ov_busy = False
+        self._ov_fresh_next = False
         self._cache = {}
         self._clock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pcs-web-api")
@@ -197,8 +203,11 @@ class Panel:
         return val
 
     def forget(self):
+        """После действия: следующий обзор — свежий и сразу (видно, что вышло), а не из запаса."""
         with self._clock:
             self._cache.clear()
+            self._ov = None
+            self._ov_fresh_next = True
 
     def _parallel(self, **jobs):
         fut = {k: self._pool.submit(*v) for k, v in jobs.items()}
@@ -207,12 +216,55 @@ class Panel:
     # ── обзор ───────────────────────────────────────────────────────────────
 
     def overview(self, query, body):
-        def get():
-            r = self._parallel(host=(self._call, self.api.host_info), servers=(self._call, self.api.servers))
-            return {"host": r["host"].get("data"), "host_error": r["host"].get("error"),
-                    "servers": r["servers"].get("data") or [], "servers_error": r["servers"].get("error"),
-                    "ts": int(time.time())}
-        return ok(self._cached("overview", get))
+        """Обзор хоста и ВМ. Опрос всех ВМ долгий (ВМ с 40 модемами — 10+ с), поэтому
+        stale-while-revalidate: свежий (моложе OV_FRESH) — как есть; иначе сразу прежний с
+        "stale": true, а новый собирается в фоне. Панель увидит stale и спросит ещё раз."""
+        with self._clock:
+            hit, fresh_next = self._ov, self._ov_fresh_next
+        if hit and time.monotonic() - hit[0] < self.OV_FRESH:
+            return ok(hit[1])
+        if hit is None and not fresh_next and self.ov_path:
+            d = jload(self.ov_path, None)
+            if isinstance(d, dict) and isinstance(d.get("servers"), list):
+                hit = (-1e9, d)
+                with self._clock:
+                    if self._ov is None:
+                        self._ov = hit
+        if hit is None:
+            return ok(self._ov_build())
+        self._ov_refresh()
+        return ok(dict(hit[1], stale=True, age=max(0, int(time.time()) - int(hit[1].get("ts") or 0))))
+
+    def _ov_build(self):
+        r = self._parallel(host=(self._call, self.api.host_info), servers=(self._call, self.api.servers))
+        d = {"host": r["host"].get("data"), "host_error": r["host"].get("error"),
+             "servers": r["servers"].get("data") or [], "servers_error": r["servers"].get("error"),
+             "ts": int(time.time())}
+        with self._clock:
+            self._ov = (time.monotonic(), d)
+            self._ov_fresh_next = False
+        if self.ov_path and not d["host_error"] and not d["servers_error"]:
+            try:
+                jsave(self.ov_path, d, 0o600)
+            except OSError:
+                pass
+        return d
+
+    def _ov_refresh(self):
+        with self._clock:
+            if self._ov_busy:
+                return
+            self._ov_busy = True
+
+        def run():
+            try:
+                self._ov_build()
+            except Exception:          # фон не должен ронять панель; следующий запрос попробует снова
+                pass
+            finally:
+                with self._clock:
+                    self._ov_busy = False
+        threading.Thread(target=run, name="pcs-web-overview", daemon=True).start()
 
     def server(self, sid, query, body):
         return ok(self.api.server(int(sid)))

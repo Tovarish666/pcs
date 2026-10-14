@@ -530,7 +530,7 @@ r, d = P("/api/servers", {"name": "pcs3000", "cores": 4, "ram_gb": 8, "disk_gb":
                           "sheet": "https://docs.google.com/spreadsheets/d/x/edit", "mpspace": True})
 j = wait_job(d["data"]["job"]) if d["ok"] else None
 check("создать ВМ — задание: журнал и итог", j and j["state"] == "done" and j["result"]["id"] == 3000
-      and any("mp.space" in x for x in j["log"]), j)
+      and any("mobileproxy.space" in x for x in j["log"]) and any("── Образ ──" in x for x in j["log"]), j)
 r, d = G("/api/overview")
 check("новая ВМ в обзоре (кэш сброшен)", any(s["id"] == 3000 and s["mode"] == "gw" for s in d["data"]["servers"]))
 r, d = P("/api/servers", {"name": "fail-vm", "mode": "usb"})
@@ -739,6 +739,52 @@ check("после неудач — пауза 429 даже с верным па�
 httpd.shutdown()
 httpd.app.close_terms()
 httpd.server_close()
+
+print("обзор: сначала запас, свежий — в фоне (stale-while-revalidate):")
+from pcs.web.panel import Panel  # noqa: E402
+
+
+class SlowApi:
+    def __init__(self):
+        self.n, self.delay = 0, 0.0
+
+    def host_info(self):
+        time.sleep(self.delay)
+        self.n += 1
+        return {"name": "h", "n": self.n}
+
+    def servers(self):
+        time.sleep(self.delay)
+        return [{"id": 1000, "name": "a"}]
+
+
+sa = SlowApi()
+ovp = os.path.join(tempfile.mkdtemp(), "ov.json")
+pn = Panel(sa, ov_path=ovp)
+pn.OV_FRESH = 0.3
+d1 = pn.overview({}, {})["data"]
+check("первый раз — собирается сразу и ложится на диск", d1["host"]["n"] == 1 and not d1.get("stale") and os.path.exists(ovp), d1)
+d2 = pn.overview({}, {})["data"]
+check("свежий — без пересборки", d2["host"]["n"] == 1 and not d2.get("stale"))
+time.sleep(0.35)
+sa.delay = 0.5
+t0 = time.time()
+d3 = pn.overview({}, {})["data"]
+check("устарел — сразу прежний с stale, без ожидания опроса ВМ", d3.get("stale") and d3["host"]["n"] == 1 and time.time() - t0 < 0.2, (d3, time.time() - t0))
+pn.OV_FRESH = 5.0
+time.sleep(1.0)
+d4 = pn.overview({}, {})["data"]
+check("фон собрал свежий — следующий запрос его отдаёт", d4["host"]["n"] == 2 and not d4.get("stale"), d4)
+pn2 = Panel(sa, ov_path=ovp)
+sa.delay = 0.5
+t0 = time.time()
+d5 = pn2.overview({}, {})["data"]
+check("после перезапуска панели — сразу обзор с диска (stale)", d5.get("stale") and d5["host"]["n"] == 2 and time.time() - t0 < 0.2, d5)
+time.sleep(1.3)
+sa.delay = 0
+pn2.forget()
+d6 = pn2.overview({}, {})["data"]
+check("после действия (forget) — свежий сразу, не запас", not d6.get("stale") and d6["host"]["n"] >= 4, d6)
 
 print("\nитого: ok %d, fail %d" % (passed, failed))
 sys.exit(1 if failed else 0)

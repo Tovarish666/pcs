@@ -215,11 +215,11 @@ def _job(title, lines, done=None):
                     j["log"].append("%s %s" % (time.strftime("%H:%M:%S"), ln))
             res = done() if done else None
             with _lock:
-                j["result"], j["state"] = res, "done"
+                j["result"], j["state"], j["finished"] = res, "done", _now()
         except Fail as e:
             with _lock:
                 j["log"].append("%s ✗ %s" % (time.strftime("%H:%M:%S"), e))
-                j["state"], j["result"] = "failed", {"error": str(e)}
+                j["state"], j["result"], j["finished"] = "failed", {"error": str(e)}, _now()
     threading.Thread(target=work, daemon=True).start()
     return jid
 
@@ -236,19 +236,24 @@ def create_server(params):
         S[sid] = None                    # номер занят, пока идёт задание
     mode = params.get("mode") or "usb"
     ip = "192.168.88.%d" % (30 + sid // 1000)
-    lines = ["ВМ %d «%s»: образ Ubuntu 24.04 — сумма сходится" % (sid, name),
-             "ВМ создана: %s ядер, %s ГБ ОЗУ, диск %s ГБ" % (params.get("cores"), params.get("ram_gb"),
-                                                            params.get("disk_gb")),
-             "cloud-init: обновление пакетов…", "cloud-init: готово, перезагрузка на новое ядро",
-             "адрес ВМ: %s" % ip, "PCS %s → /opt/pcs" % VERSION,
-             "proxyveth setup (%s)%s" % (mode, ": dummy_hcd собран под ядро 6.8.0-142" if mode == "usb" else "")]
+    # как в настоящем журнале: «── этап ──» (ui.hdr) — панель рисует по ним этапы
+    lines = ["── Образ ──", "  ✓ образ Ubuntu 24.04 — сумма сходится",
+             "── ВМ %d (%s): %s ядер, %s ГБ, диск %s ГБ, proxyveth %s ──" % (sid, name, params.get("cores"), params.get("ram_gb"),
+                                                                            params.get("disk_gb"), mode),
+             "  ✓ ВМ %d создана и запущена" % sid,
+             "── Первая загрузка: пакеты, обновление системы%s ──" % (", ядро с USB-модулями" if mode == "usb" else ""),
+             "  ✓ адрес %s" % ip, "  → жду cloud-init (apt upgrade идёт на ВМ, это несколько минут)",
+             "  ✓ cloud-init отработал", "  → перезагрузка на новое ядро", "  ✓ ядро 6.8.0-142-generic",
+             "── Код PCS на сервер %d ──" % sid, "  ✓ PCS %s → /opt/pcs" % VERSION,
+             "── proxyveth setup ──", "  ✓ proxyveth %s%s" % (mode, ": dummy_hcd собран под ядро 6.8.0-142" if mode == "usb" else ""),
+             "── modlink setup ──", "  ✓ modlink: 3proxy 1.0.0"]
     if params.get("sheet"):
-        lines += ["proxyveth source %s" % params["sheet"], "proxyveth sync: создано 0 (таблица пуста)"]
+        lines += ["── Модемы по таблице ──", "  ✓ proxyveth source %s" % params["sheet"], "  ✓ proxyveth sync: создано 0 (таблица пуста)"]
     if params.get("mpspace"):
-        lines += ["mp.space: зеркала и пакеты…", "mp.space: установлен, перезагрузка"]
+        lines += ["── mobileproxy.space на сервере %d (%s) ──" % (sid, ip), "  → зеркала и пакеты…", "  ✓ установлен, перезагрузка"]
     if name.startswith("fail"):
         lines.append(Fail("cloud-init не закончился за 15 минут — смотри консоль ВМ %d в Proxmox" % sid))
-    lines.append("готово: ВМ %d %s %s" % (sid, name, ip))
+    lines.append("── Готово за 1 мин ──")
 
     def done():
         with _lock:
