@@ -45,7 +45,8 @@ MAX_TERMS = 24
 LOG_DIR = "/var/log/pcs"
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self' ws: wss:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
-TYPES = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+OV_CACHE = "/var/lib/pcs/web-overview.json"     # последний обзор: панель после перезапуска показывает его сразу
+TYPES = {".woff2": "font/woff2", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json",
          ".txt": "text/plain; charset=utf-8", ".map": "application/json", "": "text/plain; charset=utf-8"}
 
@@ -59,7 +60,8 @@ class App:
         self.fail_delay, self.log_dir, self.quiet = fail_delay, log_dir, quiet
         self.sessions = auth.Sessions()
         self.throttle = throttle or auth.Throttle()
-        self.panel = Panel(api, audit=lambda user, m, p: self.log("%s %s %s" % (user, m, p)))
+        self.panel = Panel(api, audit=lambda user, m, p: self.log("%s %s %s" % (user, m, p)),
+                           ov_path=None if fake else OV_CACHE)
         self.terms = {}
         self.tlock = threading.Lock()
         self.cookie = "pcs_sid_%d" % port      # куки не различают порты — у фейка и панели свои

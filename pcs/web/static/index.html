@@ -3,28 +3,43 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0d11" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
 <title>PCS</title>
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/theme.js"></script>
 </head>
 <body>
-<header class="top">
-  <span class="brand">PCS</span>
-  <span id="h-host" class="muted">…</span>
-  <span class="muted" id="h-kind">Proxmox</span>
-  <span id="h-port" class="muted mono"></span>
-  <span id="h-fake" class="badge" hidden>фейковые данные</span>
-  <span class="spacer"></span>
-  <button id="theme" class="link" title="тема: авто / светлая / тёмная">◐</button>
-  <span id="h-user"></span>
-  <button id="logout" class="link">выйти</button>
-</header>
-<div class="layout">
-  <nav id="tree" aria-label="хост и ВМ"></nav>
-  <main id="main"><p class="muted">загрузка…</p></main>
+<div id="progress" class="progress" aria-hidden="true"></div>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="side-head">
+      <a class="brand" href="#/" title="PCS — обзор хоста"><span class="mark" aria-hidden="true"></span>PCS</a>
+      <span id="h-port" class="brand-sub"></span>
+    </div>
+    <label class="side-search" id="tree-search"><span class="sr-only" hidden>поиск ВМ</span></label>
+    <nav id="tree" aria-label="хосты и ВМ"></nav>
+    <div class="side-foot">
+      <button id="theme" class="ghost icon" title="тема: авто / светлая / тёмная" aria-label="тема">◐</button>
+      <span id="h-user"></span>
+      <button id="logout" class="ghost">выйти</button>
+    </div>
+  </aside>
+  <div class="main-col">
+    <header class="top">
+      <button id="menu-btn" class="ghost icon menu-btn" aria-label="хосты и ВМ" aria-expanded="false"></button>
+      <nav class="crumbs" id="crumbs" aria-label="где я"></nav>
+      <span class="spacer"></span>
+      <span id="h-fake" class="badge" hidden>фейковые данные</span>
+      <span id="h-sum" class="top-sum"></span>
+    </header>
+    <main id="main"></main>
+  </div>
 </div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

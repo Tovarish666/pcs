@@ -25,10 +25,120 @@
   const btn = (text, onclick, cls, title) => el("button", {type: "button", class: cls || "", title: title || null, onclick}, text);
   const link = (text, href, cls) => el("a", {href, class: cls || "btn"}, text);
 
+  // Иконки — свой набор, одна толщина линии (24×24, stroke 1.7). Только украшение: подпись — в title/aria-label.
+  const ICONS = {
+    play: "M7 5.5v13l11-6.5z", stop: "M7 7h10v10H7z", redo: "M20 11a8 8 0 1 0-2.4 5.7M20 4.5V11h-6.5",
+    pulse: "M3 12h4l2.5-6 4 12 2.5-6H21", more: "M5.5 12h.01M12 12h.01M18.5 12h.01", chev: "M6 9l6 6 6-6",
+    term: "M4 6l5 5-5 5M11 18h9", plus: "M12 5v14M5 12h14", search: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM20 20l-4.6-4.6",
+    copy: "M9 9h11v11H9zM5 15V4h11", power: "M12 3v8M6.4 6.6a8 8 0 1 0 11.2 0", bolt: "M13 3 5 14h6l-1 7 8-11h-6z",
+    link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
+    sync: "M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5",
+    edit: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4", trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+    out: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+    menu: "M4 7h16M4 12h16M4 17h16", list: "M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01",
+    gauge: "M12 14l4-4M4.9 19a9 9 0 1 1 14.2 0", wand: "M15 4V2M15 10V8M11 6H9M21 6h-2M5 21l10-10M17.8 3.8l1.4 1.4",
+  };
+  function ic(name) {
+    const NS = "http://www.w3.org/2000/svg";
+    const s = document.createElementNS(NS, "svg");
+    s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("class", "ic"); s.setAttribute("aria-hidden", "true");
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", ICONS[name] || "");
+    if (name === "play" || name === "stop") p.setAttribute("fill", "currentColor");
+    if (name === "more") {                 // три точки — кружками, иначе их почти не видно
+      for (const x of [6, 12, 18]) {
+        const c = document.createElementNS(NS, "circle");
+        c.setAttribute("cx", String(x)); c.setAttribute("cy", "12"); c.setAttribute("r", "1.6"); c.setAttribute("fill", "currentColor"); c.setAttribute("stroke", "none");
+        s.append(c);
+      }
+      return s;
+    }
+    s.append(p);
+    return s;
+  }
+  // кнопка-иконка с подписью для экранных читалок и подсказкой; label — короткая видимая подпись (по желанию)
+  function ibtn(icon, title, onclick, cls, label) {
+    return el("button", {type: "button", class: cls || "", title, "aria-label": title, onclick}, ic(icon), label ? el("span", {class: "lbl", text: label}) : null);
+  }
+  // всплывающее сообщение внизу справа
+  function toast(text, kind) {
+    const box = $("#toasts");
+    if (!box) return;
+    const t = el("div", {class: "toast"}, el("span", {class: "dot " + (kind || "ok")}), el("div", {text}));
+    box.append(t);
+    setTimeout(() => { t.classList.add("out"); setTimeout(() => t.remove(), 260); }, kind === "bad" ? 6000 : 3200);
+  }
+  // меню по кнопке: пункты [значение, подпись, иконка?, класс?] или "-" (черта)
+  function menuBtn(label, items, onPick, title, opts) {
+    opts = opts || {};
+    const left = opts.left != null ? opts.left : label !== null;      // кнопка с подписью — меню вправо от неё; «⋯» в конце строки — влево
+    const menu = el("div", {class: "menu" + (left ? " left" : ""), hidden: true, role: "menu"});
+    const b = label === null ? ibtn("more", title || "ещё", null, "ghost icon") : btn(label, null, opts.cls || "", title);
+    if (label !== null) b.append(ic("chev"));
+    b.setAttribute("aria-haspopup", "menu");
+    const close = () => { menu.hidden = true; b.setAttribute("aria-expanded", "false"); };
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      for (const m of document.querySelectorAll(".menu")) if (m !== menu) m.hidden = true;
+      menu.hidden = !menu.hidden; b.setAttribute("aria-expanded", String(!menu.hidden));
+    });
+    for (const it of items) {
+      if (it === "-") { menu.append(el("hr")); continue; }
+      if (!it) continue;
+      const [v, t, icon, cls, hint] = it;
+      menu.append(el("button", {type: "button", role: "menuitem", class: cls || "", onclick: (e) => { e.stopPropagation(); close(); onPick(v, b); }},
+        icon ? ic(icon) : null, el("span", {}, t, hint ? el("span", {class: "hint", text: hint}) : null)));
+    }
+    return el("span", {class: "menu-wrap"}, b, menu);
+  }
+  document.addEventListener("click", () => { for (const m of document.querySelectorAll(".menu")) m.hidden = true; });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") for (const m of document.querySelectorAll(".menu")) m.hidden = true; });
+  // плавный счёт числа при первом показе (один раз)
+  function countTo(node, to, suffix) {
+    const v = Number(to);
+    if (!isFinite(v) || matchMedia("(prefers-reduced-motion: reduce)").matches || node.dataset.counted) {
+      node.textContent = String(to) + (suffix || ""); return;
+    }
+    node.dataset.counted = "1";
+    const t0 = performance.now(), dur = 650;
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      node.textContent = String(Math.round(v * e)) + (suffix || "");
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  // скелет на время первой загрузки: n строк по образцу таблицы
+  function skelRows(n) {
+    return el("div", {class: "skel-rows"}, Array.from({length: n || 6}, (_, i) => el("div", {},
+      ...[30, 70, 55, 40, 85].map((w) => el("span", {class: "skel", style: "width:" + Math.max(20, w - (i * 7) % 25) + "%"})))));
+  }
+  function stagger(container) {
+    if (!container || container.dataset.staggered) return;
+    container.dataset.staggered = "1";
+    container.classList.add("stagger");
+    [...container.children].forEach((c, i) => c.style.setProperty("--i", String(i)));
+  }
+
   // ── API ───────────────────────────────────────────────────────────────────
   const S = {session: null, ov: null, ovErr: null, page: null};
 
+  // Полоса сверху — только для того, что запустил человек: фоновый опрос её не дёргает.
+  let inflight = 0, pollDepth = 0, busyT = null;
+  function busy(d) {
+    inflight = Math.max(0, inflight + d);
+    const p = $("#progress");
+    if (!p) return;
+    clearTimeout(busyT);
+    if (inflight > 0) busyT = setTimeout(() => p.classList.add("on"), 180);
+    else p.classList.remove("on");
+  }
   async function api(method, path, body) {
+    const quiet = pollDepth > 0;
+    if (!quiet) busy(1);
+    try { return await api0(method, path, body); } finally { if (!quiet) busy(-1); }
+  }
+  async function api0(method, path, body) {
     const opt = {method, credentials: "same-origin", headers: {}};
     if (method === "POST") {
       opt.headers["Content-Type"] = "application/json";
@@ -381,16 +491,40 @@
     return r;
   }
 
-  // Журнал фонового задания хаба: опрос, пока не кончится.
+  // Журнал фонового задания хаба: опрос, пока не кончится. Этапы — строки «── что ──» из вывода
+  // команды (ui.hdr): видно, где задание сейчас, без чтения всего журнала; часы — сколько идёт.
+  const STAGE_RE = /^\s*(?:\d\d:\d\d:\d\d\s+)?── (.+?) ──\s*$/;
+  const clock = (sec) => { sec = Math.max(0, Math.floor(sec)); const m = Math.floor(sec / 60), s = sec % 60; return m >= 60 ? Math.floor(m / 60) + " ч " + (m % 60) + " мин" : m + ":" + String(s).padStart(2, "0"); };
   function jobView(jid, opts) {
     opts = opts || {};
     const st = el("span", {class: "res run", text: "идёт…"});
+    const timer = el("span", {class: "job-time num"});
+    const title = el("b", {text: opts.title || "Задание " + jid});
+    const stages = el("ol", {class: "stages", hidden: true});
     const pre = el("pre", {text: "…"});
+    const raw = opts.page ? el("div", {}, pre) : pre;
     const tail = el("div");
-    const box = el("div", {class: "joblog"},
-      el("div", {}, el("b", {text: opts.title || "Задание " + jid}), " · ", st, " ",
-        opts.page || opts.base ? null : el("a", {href: "#/job/" + encodeURIComponent(jid), class: "muted", text: "журнал отдельно"})), pre, tail);
-    let first = true;
+    const box = el("div", {class: "joblog" + (opts.page ? " page" : "")},
+      el("div", {class: "job-head"}, title, st, timer, el("span", {class: "spacer"}),
+        opts.page || opts.base ? null : el("a", {href: "#/job/" + encodeURIComponent(jid), class: "muted", text: "журнал отдельно"})),
+      stages, raw, tail);
+    let first = true, started = 0, finished = 0, tm = null, seen = 0;
+    function tickClock() {
+      if (!box.isConnected && !first) { clearInterval(tm); tm = null; return; }
+      if (started) timer.textContent = (finished ? "за " : "") + clock((finished || Date.now() / 1000) - started);
+    }
+    function drawStages(log, state) {
+      const names = log.map((l) => (STAGE_RE.exec(l) || [])[1]).filter(Boolean);
+      stages.hidden = !names.length;
+      if (!names.length || names.length === seen && state === "running") return;
+      seen = names.length;
+      const prev = stages.childElementCount;
+      stages.replaceChildren(...names.map((n, i) => {
+        const last = i === names.length - 1;
+        const cls = !last || state === "done" ? "done" : state === "running" ? "now" : "fail";
+        return el("li", {class: cls + (i >= prev ? " fresh" : "")}, el("span", {class: "mk", "aria-hidden": "true"}), el("span", {text: n}));
+      }));
+    }
     async function tick() {
       if (!first && !box.isConnected) return;
       first = false;
@@ -398,10 +532,17 @@
       if (!r.ok && r.net) { setRes(st, "run", "связь прервалась — задание идёт на хосте, жду…"); setTimeout(tick, 3000); return; }
       if (!r.ok) { setRes(st, "err", "Ошибка: " + r.error); return; }
       const j = r.data || {};
-      if (j.title && !opts.title) box.firstChild.firstChild.textContent = j.title;
+      if (j.title && !opts.title) title.textContent = j.title;
+      if (opts.onTitle && j.title) opts.onTitle(j);
+      started = +j.started || 0;
+      finished = j.state === "running" || j.state === "queued" ? 0 : (+j.finished || Date.now() / 1000);
+      tickClock();
+      if (!tm && !finished) tm = setInterval(tickClock, 1000);
+      if (finished && tm) { clearInterval(tm); tm = null; }
       const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
       pre.textContent = (j.log || []).join("\n") || "…";
       if (atEnd) pre.scrollTop = pre.scrollHeight;
+      drawStages(j.log || [], j.state);
       if (j.state === "running" || j.state === "queued") { setTimeout(tick, 1500); return; }
       if (j.state === "done") {
         setRes(st, "ok", "готово");
@@ -428,13 +569,38 @@
   }
 
   // ── шапка и дерево ────────────────────────────────────────────────────────
+  // Сверху — где я (хост › ВМ › вкладка) и общая сводка; слева — дерево хостов и их ВМ.
+  const TAB_NAMES = {"": "обзор", proxyveth: "proxyveth", modlink: "modlink", term: "терминал", settings: "настройка"};
   function renderHeader() {
-    const host = (S.ov && S.ov.host) || {};
-    $("#h-host").textContent = host.name || "хост";
-    $("#h-kind").textContent = (host.kind || "proxmox") === "proxmox" ? "Proxmox" : "VPS";
     $("#h-port").textContent = S.session ? ":" + S.session.port : "";
     $("#h-user").textContent = S.session ? S.session.user : "";
     $("#h-fake").hidden = !(S.session && S.session.fake);
+    const cur = S.route || {};
+    const X = ctx(cur.node || null);
+    const crumbs = [el("a", {href: X.href("/"), text: X.node ? X.node : (((S.ov || {}).host || {}).name || "хост")})];
+    if (cur.kind === "vm") {
+      const s = X.srv(cur.id);
+      crumbs.push(el("span", {class: "sep", text: "/"}), el("a", {href: X.href("/vm/" + cur.id), text: "ВМ " + cur.id + (s && s.name ? " · " + s.name : "")}));
+    }
+    if (cur.kind === "create") crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: "новая ВМ"}));
+    if (cur.kind === "job") crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: "задание"}));
+    if (cur.kind === "join") crumbs.splice(0, 1, el("b", {text: "присоединить хост"}));
+    const tab = cur.tab != null ? cur.tab : "";
+    if ((cur.kind === "vm" || cur.kind === "host") && TAB_NAMES[tab] != null && !(cur.kind === "vm" && !tab)) {
+      crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: TAB_NAMES[tab]}));
+    }
+    $("#crumbs").replaceChildren(...crumbs);
+    // сводка: ВМ и модемы на своём хосте
+    const ov = S.ov || {}, list = ov.servers || [];
+    let ok = 0, total = 0, up = 0;
+    for (const sv of list) { const c = counts(sv); ok += c.ok; total += c.total; if (!BAD_VM.includes(String(sv.state || "").toLowerCase())) up++; }
+    const hc = counts(ov.host || {});
+    ok += hc.ok; total += hc.total;
+    const lv = S.ov ? hostLevel() : "";
+    $("#h-sum").replaceChildren(
+      S.ov ? el("span", {}, el("span", {class: "dot " + lv}), lv === "ok" ? "всё в порядке" : lv === "warn" ? "есть замечания" : "есть проблемы") : el("span", {class: "muted", text: "загрузка…"}),
+      list.length ? el("span", {class: "num", text: "ВМ " + up + "/" + list.length}) : null,
+      total ? el("span", {class: "num", text: "модемы " + ok + "/" + total}) : null);
   }
   function hostLevel(X) {
     X = X || ctx(null);
@@ -445,57 +611,136 @@
     if (h.modems && counts(h).total) lv.push(level({state: "running", modems: h.modems}));
     return lv.includes("bad") ? "bad" : lv.includes("warn") ? "warn" : "ok";
   }
+  const TREE = {q: "", closed: (() => { try { return JSON.parse(localStorage.getItem("pcs-tree-closed") || "{}"); } catch (e) { return {}; } })()};
+  function treeToggle(key) {
+    TREE.closed[key] = !TREE.closed[key];
+    try { localStorage.setItem("pcs-tree-closed", JSON.stringify(TREE.closed)); } catch (e) { /* без хранилища */ }
+  }
+  function meterOf(c) {
+    const v = c.total ? c.ok / c.total : 0;
+    return el("span", {class: "meter" + (c.broken ? " bad" : c.ok < c.total ? " warn" : ""), style: "--v:" + v.toFixed(3), "aria-hidden": "true"});
+  }
   function renderTree() {
     const nav = $("#tree");
-    const cur = S.page || {};
+    const cur = S.route || {};
+    const q = TREE.q.trim().toLowerCase();
     const kids = [];
+    const loading = !S.ov && !S.ovErr;
     function hostBlock(X) {
       const h = X.ov().host || {}, n = X.node ? (X.ov().node || {}) : null;
+      const key = X.node || "";
       const here = (cur.node || null) === X.node;
       const off = X.node && n && !n.ok;
-      kids.push(el("a", {class: "tree-host" + (here && cur.kind === "host" ? " active" : "") + (X.node ? " joined" : ""), href: X.href("/"),
-        title: off ? (n.error || "нет связи") : "", style: X.node ? "--h:" + hueOf({id: 0, color: n && n.color}) : null},
-        el("span", {class: "dot " + (off ? "bad" : hostLevel(X))}), X.node ? X.node : (h.name || "хост"),
-        el("span", {class: "muted", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"})));
-      for (const sv of X.ov().servers || []) {
+      const vms = (X.ov().servers || []).filter((sv) => !q || (String(sv.id) + " " + (sv.name || "") + " " + (sv.ip || "")).toLowerCase().includes(q));
+      if (q && !vms.length) return;
+      const closed = !q && TREE.closed[key];
+      const twist = el("button", {type: "button", class: "t-twist", "aria-label": closed ? "развернуть" : "свернуть", "aria-expanded": String(!closed),
+        onclick: (e) => { e.preventDefault(); e.stopPropagation(); treeToggle(key); renderTree(); }}, ic("chev"));
+      const head = el("a", {class: "t-row" + (here && cur.kind === "host" ? " active" : "") + (off ? " off" : ""), href: X.href("/"),
+        title: off ? (n.error || "нет связи") : ""},
+        twist, el("span", {class: "dot " + (loading && !X.node ? "" : off ? "bad" : hostLevel(X))}),
+        el("span", {class: "t-name", text: X.node ? X.node : (h.name || (loading ? "хост" : "хост"))}),
+        el("span", {class: "t-meta", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"}));
+      const inner = el("div");
+      for (const sv of vms) {
         const c = counts(sv);
-        kids.push(el("a", {class: "tree-vm" + (here && cur.kind === "vm" && String(cur.id) === String(sv.id) ? " active" : ""),
+        inner.append(el("a", {class: "t-row t-vm" + (here && cur.kind === "vm" && String(cur.id) === String(sv.id) ? " active" : "") +
+          (sv.state === "stopped" || sv.state === "absent" ? " off" : ""),
           href: X.href("/vm/" + sv.id), title: levelText(sv), style: "--h:" + hueOf(sv, X)},
-          el("span", {class: "dot " + level(sv)}), el("span", {}, el("b", {text: String(sv.id)}), " ", sv.name || ""),
-          el("span", {class: "sub", text: sv.state === "absent" ? "нет в Proxmox" : modeShort(sv.mode) + " · " + c.ok + "/" + c.total})));
+          el("span", {class: "chip"}), el("span", {class: "dot " + level(sv)}),
+          el("span", {class: "t-name"}, el("b", {text: String(sv.id)}), sv.name || ""),
+          el("span", {class: "t-meta"}, sv.state === "absent" ? "нет в Proxmox" : sv.state === "stopped" ? "выкл"
+            : [c.total ? meterOf(c) : null, el("span", {text: c.total ? c.ok + "/" + c.total : modeShort(sv.mode)})])));
       }
-      if (X.isPve() && !off) kids.push(el("a", {class: "tree-add", href: X.href("/create"), text: "+ Создать ВМ" + (X.node ? " на " + X.node : "")}));
+      if (loading && !X.node && !vms.length) for (let i = 0; i < 3; i++) inner.append(el("div", {class: "t-row t-vm"}, el("span"), el("span"), el("span", {class: "skel", style: "width:" + (70 - i * 12) + "%"}), el("span")));
+      if (X.isPve() && !off && !q) inner.append(el("a", {class: "t-add" + (here && cur.kind === "create" ? " active" : ""), href: X.href("/create")}, ic("plus"), "Создать ВМ" + (X.node ? " на " + X.node : "")));
+      kids.push(el("div", {class: "t-host" + (closed ? " closed" : "")}, head, el("div", {class: "t-kids"}, inner)));
     }
     hostBlock(ctx(null));
     const nodes = S.nodes || [];
-    if (nodes.length) kids.push(el("div", {class: "tree-sec", text: "Присоединённые хосты"}));
+    if (nodes.length) kids.push(el("div", {class: "t-sec", text: "Присоединённые хосты"}));
     for (const n of nodes) hostBlock(ctx(n.name));
-    kids.push(el("a", {class: "tree-add", href: "#/join", text: "+ Присоединить хост"}));
+    if (!q) kids.push(el("a", {class: "t-add" + (cur.kind === "join" ? " active" : ""), href: "#/join", style: "padding-left:8px;margin-top:10px"}, ic("link"), "Присоединить хост"));
+    if (q && !kids.some((k) => k.classList.contains("t-host"))) kids.push(el("div", {class: "t-empty", text: "ничего не нашлось"}));
     nav.replaceChildren(...kids);
+  }
+  function treeSearch() {
+    const box = $("#tree-search");
+    const inp = el("input", {type: "search", placeholder: "Поиск ВМ…", autocomplete: "off", spellcheck: false, "aria-label": "поиск ВМ по номеру, имени, IP",
+      oninput: () => { TREE.q = inp.value; renderTree(); },
+      onkeydown: (e) => {
+        if (e.key === "Enter") { const a = $("#tree .t-vm"); if (a) { location.hash = a.getAttribute("href"); inp.blur(); } }
+        if (e.key === "Escape") { inp.value = ""; TREE.q = ""; renderTree(); inp.blur(); }
+      }});
+    box.replaceChildren(ic("search"), inp);
+    // «/» — к поиску, как в Gmail и GitHub
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "") && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault(); inp.focus();
+      }
+    });
+    const mb = $("#menu-btn");
+    mb.replaceChildren(ic("menu"));
+    mb.addEventListener("click", () => { const o = !document.body.classList.contains("side-open"); document.body.classList.toggle("side-open", o); mb.setAttribute("aria-expanded", String(o)); });
+    document.addEventListener("click", (e) => {
+      if (document.body.classList.contains("side-open") && !e.target.closest(".side") && !e.target.closest("#menu-btn")) document.body.classList.remove("side-open");
+    });
   }
 
   // ── страница хоста: вкладки, как у ВМ (сам хост — тоже узел: proxyveth, modlink, mp.space) ──
   const HTABS = [["", "обзор"], ["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
   const isPve = () => ctx(null).isPve();
 
+  // Шапка страницы: имя, строка сведений, состояние и главные действия справа.
+  function pageHead(opts) {
+    const title = el("h1"), meta = el("div", {class: "meta"}), state = el("span", {class: "tag"});
+    const right = el("div", {class: "side-r"}, state, opts.actions || null);
+    const chip = opts.chip ? el("span", {class: "chip", "aria-hidden": "true"}) : null;
+    const box = el("div", {class: "ph" + (chip ? "" : " plain")}, chip, title, right, meta);
+    return {el: box, set(t, metas, lv, lvText, hueVal) {
+      title.replaceChildren(...[].concat(t));
+      meta.replaceChildren(...metas.filter(Boolean).map((m) => m instanceof Node ? el("span", {}, m) : el("span", {text: m})));
+      state.className = "tag " + (lv || "");
+      state.replaceChildren(el("span", {class: "dot " + (lv || "")}), lvText || "");
+      state.hidden = !lvText;
+      if (hueVal != null) box.style.setProperty("--h", String(hueVal));
+    }};
+  }
+  // Вкладки с бегунком под активной (бегунок едет, а не прыгает)
+  function tabsBar() {
+    const box = el("div", {class: "tabs", role: "tablist"}), ind = el("span", {class: "ind", "aria-hidden": "true"});
+    let first = true;
+    function set(items, active) {
+      box.replaceChildren(...items.map(([href, t, on]) => el("a", {href, class: on ? "active" : "", role: "tab", "aria-selected": String(!!on), text: t})), ind);
+      requestAnimationFrame(() => {
+        const a = box.querySelector("a.active");
+        if (!a) { ind.style.opacity = "0"; return; }
+        if (first) { ind.style.transition = "none"; first = false; }
+        ind.style.opacity = "1";
+        ind.style.transform = "translateX(" + a.offsetLeft + "px) scaleX(" + (a.offsetWidth / 100) + ")";
+        if (ind.style.transition === "none") requestAnimationFrame(() => { ind.style.transition = ""; });
+      });
+    }
+    return {el: box, set};
+  }
   function plaqueHost(X) {
-    const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
-    const box = el("div", {class: "plaque host"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
+    const ph = pageHead({});
     function update() {
       const h = (X.ov() && X.ov().host) || {}, c = counts(h);
-      big.textContent = "Хост " + (h.name || "");
-      line.textContent = [h.ip, h.os || (X.isPve() ? "Proxmox" : ""), X.isPve() ? "ВМ: " + ((X.ov() && X.ov().servers) || []).length : "VPS — модемы на нём",
-        h.mode ? "proxyveth " + modeShort(h.mode) + " · модемы " + c.ok + "/" + c.total : null,
-        h.mpspace_ok ? mpText(h.mpspace) : null].filter(Boolean).join(" · ");
-      stDot.className = "dot " + hostLevel(X);
-      stText.textContent = hostLevel(X) === "ok" ? "в порядке" : hostLevel(X) === "warn" ? "есть замечания" : "есть проблемы";
+      const lv = (X.ov() && X.ov().host) ? hostLevel(X) : "";
+      ph.set([X.node ? X.node : (h.name || "хост"), el("span", {class: "id", text: X.isPve() ? "Proxmox" : "VPS"})],
+        [h.ip ? el("span", {class: "mono", text: h.ip}) : null, h.os || null,
+          X.isPve() ? "ВМ " + ((X.ov() && X.ov().servers) || []).length : "модемы прямо на хосте",
+          h.mode ? "proxyveth " + modeShort(h.mode) + " · " + c.ok + "/" + c.total : null,
+          h.mpspace_ok ? mpText(h.mpspace) : null],
+        lv, lv ? (lv === "ok" ? "в порядке" : lv === "warn" ? "есть замечания" : "есть проблемы") : "");
     }
-    return {el: box, update};
+    return {el: ph.el, update};
   }
 
   function pageHost(X) {
     const pl = plaqueHost(X);
-    const tabsEl = el("div", {class: "tabs"}), body = el("div"), panes = {};
+    const tb = tabsBar(), tabsEl = tb.el, body = el("div"), panes = {};
     let cur = null;
     const make = {"": () => hostOverview(X), proxyveth: () => pvTab(X, "host"), modlink: () => mlTab(X, "host"),
       term: () => termTab(X, "host", true), settings: () => setTab(X, "host")};
@@ -506,8 +751,9 @@
       if (cur !== null) panes[cur].el.hidden = true;
       if (!panes[tab]) { panes[tab] = make[tab](); body.append(panes[tab].el); }
       panes[tab].el.hidden = false;
+      panes[tab].el.classList.remove("pane-in"); void panes[tab].el.offsetWidth; panes[tab].el.classList.add("pane-in");
       cur = tab;
-      tabsEl.replaceChildren(...HTABS.map(([k, t]) => el("a", {href: k ? X.href("/host/" + k) : X.href("/"), class: k === tab ? "active" : "", text: t})));
+      tb.set(HTABS.map(([k, t]) => [k ? X.href("/host/" + k) : X.href("/"), t, k === tab]));
       if (panes[tab].show) panes[tab].show();
       if (panes[tab].update) panes[tab].update();
     }
@@ -520,15 +766,18 @@
     return {kind: "host", node: X.node, el: el("div", {}, pl.el, tabsEl, body), show, update, dispose};
   }
 
-  // вкладка «обзор» хоста: карточки, ВМ (на Proxmox), фоновые задания
+  // вкладка «обзор» хоста: показатели одной полосой, ВМ таблицей, фоновые задания
   function hostOverview(X) {
-    const banner = el("div"), cards = el("div", {class: "cards"}), list = el("div", {class: "list"});
-    const vmHead = el("h2", {text: "Виртуальные машины"});
+    const banner = el("div"), kpis = el("div", {class: "kpis"}), list = el("div", {class: "list"});
+    const vmHead = el("div", {class: "sec-head"}, el("h2", {text: "Виртуальные машины"}), el("span", {class: "count"}), el("span", {class: "spacer"}),
+      link("", X.href("/create"), "btn"));
+    vmHead.lastChild.replaceChildren(ic("plus"), "Создать ВМ");
     const jobsBox = el("div", {class: "list"});
     const others = otherVms(X);
     const nodeBar = X.node ? nodeTools(X) : null;
-    const root = el("div", {}, nodeBar ? nodeBar.el : null, banner, cards, vmHead, list, others.el, el("h2", {text: "Фоновые задания"}), jobsBox);
-    let othersLoaded = 0;
+    const root = el("div", {}, nodeBar ? nodeBar.el : null, banner, kpis, vmHead, list, others.el,
+      el("div", {class: "sec-head"}, el("h2", {text: "Фоновые задания"})), jobsBox);
+    let othersLoaded = 0, listShown = false;
     const JOB_ST = {running: ["info", "идёт"], done: ["ok", "готово"], failed: ["bad", "ошибка"]};
     async function loadJobs() {
       const r = await X.GET("/jobs");
@@ -538,81 +787,117 @@
         const [cls, txt] = JOB_ST[j.state] || ["", j.state];
         return el("div", {class: "item"}, el("span", {class: "dot " + cls, title: txt}),
           el("div", {class: "grow"}, el("div", {class: "title", text: j.title || j.id}),
-            el("div", {class: "sub", text: [txt, j.started ? new Date(j.started * 1000).toLocaleString() : "", j.error || ""].filter(Boolean).join(" · ")})),
-          el("div", {class: "btns"}, link("Журнал", X.href("/job/" + encodeURIComponent(j.id)))));
-      }) : [el("div", {class: "item muted", text: "заданий пока нет: долгое (обновление, установка, перенос) идёт здесь в фоне и не боится обрыва связи"})]));
+            el("div", {class: "sub", text: [txt, j.started ? new Date(j.started * 1000).toLocaleString("ru-RU") : "", j.error || ""].filter(Boolean).join(" · ")})),
+          el("div", {class: "btns"}, link("Журнал", X.href("/job/" + encodeURIComponent(j.id)), "btn ghost")));
+      }) : [el("div", {class: "item muted", text: "Заданий пока нет. Долгое — обновление, установка, перенос — идёт здесь в фоне и не боится обрыва связи."})]));
+    }
+    function kpi(k, v, total, cls, meterC) {
+      const val = el("div", {class: "v " + (cls || "")});
+      const num = el("span");
+      val.append(num);
+      if (total != null) val.append(el("small", {text: " / " + total}));
+      countTo(num, v);
+      return el("div", {class: "kpi"}, el("div", {class: "k", text: k}), val, meterC ? meterOf(meterC) : null);
+    }
+    function skeleton() {
+      kpis.replaceChildren(...[1, 2, 3, 4].map(() => el("div", {class: "kpi"}, el("span", {class: "skel", style: "width:60%"}),
+        el("span", {class: "skel h", style: "margin-top:12px;width:40%"}))));
+      list.replaceChildren(skelRows(3));
     }
     function update() {
       const ov = X.ov() || {}, host = ov.host || {}, list_ = ov.servers || [];
+      const loading = !X.node ? (!S.ov && !S.ovErr) : !ov.host && !ov.host_error;
       const errs = [!X.node && S.ovErr, ov.host_error && (X.node ? "нет связи: " : "хост: ") + ov.host_error,
         ov.servers_error && "серверы: " + ov.servers_error].filter(Boolean);
       banner.replaceChildren(...errs.map((t) => el("div", {class: "banner", text: t})));
       if (nodeBar) nodeBar.update();
+      if (loading) { skeleton(); return; }
       loadJobs();
       if (Date.now() - othersLoaded > 30000) { othersLoaded = Date.now(); others.load(); }
-      const card = (k, v, cls) => el("div", {class: "card"}, el("div", {class: "k", text: k}), el("div", {class: "v " + (cls || ""), text: v}));
       const hc = counts(host);
       if (!X.isPve()) {                      // VPS: модемы и софт прямо здесь, ВМ нет
         vmHead.hidden = true; list.hidden = true;
-        cards.replaceChildren(
-          card("Модемы", hc.ok + " / " + hc.total, hc.ok < hc.total ? "warn" : ""),
-          card("Режим proxyveth", host.mode ? modeShort(host.mode) : "не задан", host.mode ? "" : "warn"),
-          card("mp.space", mpText(host.mpspace).replace("mp.space ", "")),
-          card("ОЗУ хоста", gb(host.ram)));
+        kpis.replaceChildren(
+          kpi("Модемы", hc.ok, hc.total, hc.ok < hc.total ? "warn" : "", hc),
+          el("div", {class: "kpi"}, el("div", {class: "k", text: "Режим proxyveth"}), el("div", {class: "v " + (host.mode ? "" : "warn"), text: host.mode ? modeShort(host.mode) : "не задан"})),
+          el("div", {class: "kpi"}, el("div", {class: "k", text: "mp.space"}), el("div", {class: "v", style: "font-size:18px", text: mpText(host.mpspace).replace("mp.space ", "")})),
+          el("div", {class: "kpi"}, el("div", {class: "k", text: "ОЗУ хоста"}), el("div", {class: "v", style: "font-size:18px", text: gb(host.ram)})));
         return;
       }
       vmHead.hidden = false; list.hidden = false;
-      let ok = 0, total = 0, probs = 0, up = 0;
+      let ok = 0, total = 0, probs = 0, up = 0, broken = 0;
       for (const s of list_) {
         const c = counts(s);
-        ok += c.ok; total += c.total; probs += c.warn + c.broken;
+        ok += c.ok; total += c.total; probs += c.warn + c.broken; broken += c.broken;
         if (!BAD_VM.includes(String(s.state || "").toLowerCase())) up += 1; else probs += 1;
       }
       const h = host.hivelink || {};
       const real = Array.isArray(h.modems) ? h.modems.length : (+h.modems || 0);
-      cards.replaceChildren(
-        card("ВМ работают", up + " / " + list_.length, up < list_.length ? "bad" : ""),
-        card("Модемы в ВМ", ok + " / " + total, ok < total ? "warn" : ""),
-        card("Проблемы", String(probs), probs ? "warn" : ""),
-        card("Настоящие модемы (hivelink)", h.installed === false ? "не установлен" : String(real)),
-        card("ОЗУ хоста", gb(host.ram)));
+      const ram = host.ram || {};
+      kpis.replaceChildren(
+        kpi("ВМ работают", up, list_.length, up < list_.length ? "bad" : ""),
+        kpi("Модемы в ВМ", ok, total, ok < total ? "warn" : "", {ok, total, broken}),
+        kpi("Требуют внимания", probs, null, probs ? "warn" : ""),
+        h.installed === false ? el("div", {class: "kpi"}, el("div", {class: "k", text: "Настоящие модемы"}), el("div", {class: "v", style: "font-size:18px", text: "hivelink не стоит"}))
+          : kpi("Настоящие модемы", real),
+        el("div", {class: "kpi"}, el("div", {class: "k", text: "ОЗУ хоста"}), el("div", {class: "v", style: "font-size:18px;margin-top:8px", text: gb(host.ram)}),
+          ram.total_gb ? el("span", {class: "meter lg" + ((ram.used_gb / ram.total_gb) > .85 ? " warn" : ""), style: "--v:" + Math.min(1, (ram.used_gb || 0) / ram.total_gb).toFixed(3)}) : null));
+      vmHead.children[1].textContent = String(list_.length);
       if (!list_.length) {
-        list.replaceChildren(el("div", {class: "item"}, el("span", {class: "muted", text: "ВМ пока нет — "}), link("+ Создать ВМ", X.href("/create"), "")));
+        list.replaceChildren(el("div", {class: "item"}, el("span", {class: "muted", text: "ВМ пока нет."}), link("Создать ВМ", X.href("/create"), "btn primary")));
         return;
       }
-      list.replaceChildren(...list_.map((s) => {
-        const c = counts(s);
-        return el("div", {class: "item"}, el("span", {class: "dot " + level(s), title: levelText(s)}),
-          el("div", {class: "grow"}, el("div", {class: "title", text: s.id + " " + (s.name || "")}),
-            el("div", {class: "sub", text: [s.ip || "—", modeShort(s.mode), "модемы " + c.ok + "/" + c.total, mpText(s.mpspace)].join(" · ")})),
-          vmButtons(X, s));
-      }));
+      const rows = [el("div", {class: "vmrow vmhead"}, el("span"), el("span", {text: "ВМ"}), el("span", {class: "cell", text: "режим"}),
+        el("span", {class: "cell", text: "модемы"}), el("span", {class: "cell", text: "mp.space"}), el("span"))];
+      for (const s of list_) {
+        const c = counts(s), st = String(s.state || "").toLowerCase();
+        rows.push(el("div", {class: "vmrow", style: "--h:" + hueOf(s, X)},
+          el("span", {class: "dot " + level(s), title: levelText(s)}),
+          el("div", {class: "who"}, el("a", {href: X.href("/vm/" + s.id)}, el("span", {class: "id", text: String(s.id)}), s.name || ""),
+            el("div", {class: "sub", text: (s.ip || "—") + (st !== "running" ? "  ·  " + (VM_STATE[st] || st) : "")})),
+          el("span", {class: "cell", text: modeShort(s.mode)}),
+          el("div", {class: "cell mod"}, el("span", {}, el("b", {text: c.ok + " / " + c.total}), c.warn + c.broken ? el("span", {class: "problems", text: "  ·  " + (c.warn + c.broken) + " с бедой"}) : null), meterOf(c)),
+          el("span", {class: "cell", text: mpText(s.mpspace).replace("mp.space ", "")}),
+          vmButtons(X, s)));
+      }
+      list.replaceChildren(...rows);
+      if (!listShown) { listShown = true; stagger(list); }
     }
     return {el: root, update};
   }
 
-  // Кнопки ВМ в списке хоста: открыть, терминал, питание, убрать из PCS, удалить
+  // Действия с ВМ в строке хоста: «Открыть», «Терминал» и меню ⋯ (питание, убрать из PCS, удалить)
   function vmButtons(X, s) {
     const st = String(s.state || "").toLowerCase();
-    const b = [];
-    const pw = (action, text, title, ask, cls) => btn(text, async (e) => {
-      if (ask && !window.confirm(ask)) return;
-      const r = await act(e.target, null, () => X.POST("/servers/" + s.id + "/power", {action}), "Готово");
-      if (r && !r.ok) showText("ВМ " + s.id + ": не вышло", "Ошибка: " + r.error);
-      X.node ? refreshNodes() : refresh();
-    }, "icon" + (cls ? " " + cls : ""), title);
+    const items = [];
     if (st !== "absent") {
-      b.push(link("Открыть", X.href("/vm/" + s.id)), link("Терминал", X.href("/vm/" + s.id + "/term")));
-      if (st === "stopped") b.push(pw("start", "▶", "включить"));
-      else {
-        b.push(pw("shutdown", "⏻", "выключить штатно (до 2 мин)", "Выключить ВМ " + s.id + " (" + (s.name || "") + ")? Модемы на ней пропадут."));
-        b.push(pw("reboot", "↻", "перезагрузить", "Перезагрузить ВМ " + s.id + " (" + (s.name || "") + ")?"));
-        b.push(pw("stop", "■", "остановить жёстко (как выдернуть питание)", "Жёстко остановить ВМ " + s.id + "? Как выдернуть питание.", "danger"));
-      }
+      if (st === "stopped") items.push(["start", "Включить", "play"]);
+      else items.push(["shutdown", "Выключить штатно", "power", "", "до 2 минут"], ["reboot", "Перезагрузить", "redo"],
+        ["stop", "Остановить жёстко", "stop", "danger", "как выдернуть питание"]);
+      items.push("-");
     }
-    b.push(btn("Убрать из PCS", () => forgetVm(X, s), st === "absent" ? "danger" : "", "PCS перестанет управлять ВМ; сама ВМ, диски и модемы не трогаются"));
-    if (st !== "absent") b.push(btn("Удалить", () => deleteVm(X, s), "danger", "удалить ВМ вместе с дисками"));
-    return el("div", {class: "btns"}, b);
+    items.push(["forget", "Убрать из PCS", "out", st === "absent" ? "danger" : "", "ВМ и модемы останутся"]);
+    if (st !== "absent") items.push(["delete", "Удалить ВМ", "trash", "danger", "вместе с дисками"]);
+    const ask = {shutdown: "Выключить ВМ " + s.id + " (" + (s.name || "") + ")? Модемы на ней пропадут.",
+      reboot: "Перезагрузить ВМ " + s.id + " (" + (s.name || "") + ")?", stop: "Жёстко остановить ВМ " + s.id + "? Как выдернуть питание."};
+    const menu = menuBtn(null, items, async (v) => {
+      if (v === "forget") return forgetVm(X, s);
+      if (v === "delete") return deleteVm(X, s);
+      if (ask[v] && !window.confirm(ask[v])) return;
+      const r = await X.POST("/servers/" + s.id + "/power", {action: v});
+      if (r && !r.ok) toast("ВМ " + s.id + ": " + r.error, "bad");
+      else toast("ВМ " + s.id + ": " + ({start: "включается", shutdown: "выключается", reboot: "перезагружается", stop: "остановлена"})[v]);
+      X.node ? refreshNodes() : refresh();
+    }, "питание и прочее");
+    const b = [];
+    if (st !== "absent") {
+      b.push(link("Открыть", X.href("/vm/" + s.id), "btn"));
+      const t = link("", X.href("/vm/" + s.id + "/term"), "btn ghost icon");
+      t.title = "терминал"; t.setAttribute("aria-label", "терминал ВМ " + s.id); t.append(ic("term"));
+      b.push(t);
+    }
+    b.push(menu);
+    return el("div", {class: "row-acts"}, b);
   }
 
   async function forgetVm(X, s) {
@@ -628,7 +913,7 @@
 
   // ВМ Proxmox, которых нет в PCS: «Добавить в PCS» (ключ хаба по паролю root, код, части — заданием)
   function otherVms(X) {
-    const box = el("div", {class: "list"}), head = el("h2", {text: "ВМ Proxmox не под PCS"});
+    const box = el("div", {class: "list"}), head = el("div", {class: "sec-head"}, el("h2", {text: "ВМ Proxmox не под PCS"}));
     const jobs = el("div", {class: "joblog-slot"});
     if (X.node) jobs.dataset.base = X.base;
     async function load() {
@@ -637,11 +922,11 @@
       const lst = r.ok ? r.data || [] : [];
       head.hidden = box.hidden = !lst.length;
       box.replaceChildren(...lst.map((v) => el("div", {class: "item"}, el("span", {class: "dot " + (v.state === "running" ? "" : "off")}),
-        el("div", {class: "grow"}, el("div", {class: "title", text: v.id + " " + (v.name || "")}),
+        el("div", {class: "grow"}, el("div", {class: "title"}, el("span", {class: "id", text: String(v.id)}), v.name || ""),
           el("div", {class: "sub", text: v.state === "running" ? "работает · не под PCS" : (v.state || "?") + " · не под PCS"})),
         el("div", {class: "btns"}, btn("Добавить в PCS", () => adoptVm(X, v, jobs), "", "PCS начнёт управлять этой ВМ: ключ хаба, код, proxyveth и modlink")))));
     }
-    return {el: el("div", {}, head, box, jobs), load};
+    return {el: el("div", {class: "sub-sec"}, head, box, jobs), load};
   }
 
   async function adoptVm(X, v, jobs) {
@@ -677,30 +962,27 @@
   const TABS = [["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
 
   function plaque(X, id) {
-    const big = el("div", {class: "big"}), line = el("div", {class: "line"}), stDot = el("span", {class: "dot"}), stText = el("span");
-    const box = el("div", {class: "plaque"}, el("div", {}, big, line), el("div", {class: "state"}, stDot, stText));
+    const term = link("", X.href("/vm/" + id + "/term"), "btn");
+    term.replaceChildren(ic("term"), "Терминал");
+    const ph = pageHead({chip: true, actions: term});
     function update() {
-      box.style.setProperty("--h", String(hueOf(X.srv(id) || {id}, X)));
       const s = X.srv(id);
       if (!s) {
-        big.textContent = "ВМ " + id;
-        line.textContent = X.ov() ? "нет в списке PCS — удалена или ещё создаётся" : "загрузка…";
-        stDot.className = "dot"; stText.textContent = "";
+        ph.set(["ВМ ", el("span", {class: "id", text: String(id)})], [X.ov() && (X.ov().servers || []).length ? "нет в списке PCS — удалена или ещё создаётся" : "загрузка…"], "", "", hueOf({id}, X));
         return;
       }
       const c = counts(s);
-      big.textContent = "ВМ " + s.id + " · " + (s.name || "");
-      line.textContent = [s.ip || "без IP", modeLong(s.mode), "модемы " + c.ok + "/" + c.total, mpText(s.mpspace)].join(" · ");
-      stDot.className = "dot " + level(s);
-      stText.textContent = levelText(s);
+      ph.set([s.name || "ВМ " + s.id, el("span", {class: "id", text: "ВМ " + s.id})],
+        [el("span", {class: "mono", text: s.ip || "без IP"}), modeLong(s.mode), "модемы " + c.ok + "/" + c.total, mpText(s.mpspace)],
+        level(s), levelText(s), hueOf(s, X));
       document.title = s.id + " " + (s.name || "") + " — PCS";
     }
-    return {el: box, update};
+    return {el: ph.el, update};
   }
 
   function pageVm(X, id) {
     const pl = plaque(X, id);
-    const tabsEl = el("div", {class: "tabs"});
+    const tb = tabsBar(), tabsEl = tb.el;
     const body = el("div");
     const panes = {};
     let cur = null;
@@ -712,8 +994,9 @@
       if (cur) panes[cur].el.hidden = true;
       if (!panes[tab]) { panes[tab] = make[tab](); body.append(panes[tab].el); }
       panes[tab].el.hidden = false;
+      panes[tab].el.classList.remove("pane-in"); void panes[tab].el.offsetWidth; panes[tab].el.classList.add("pane-in");
       cur = tab;
-      tabsEl.replaceChildren(...TABS.map(([k, t]) => el("a", {href: X.href("/vm/" + id + (k === "proxyveth" ? "" : "/" + k)), class: k === tab ? "active" : "", text: t})));
+      tb.set(TABS.map(([k, t]) => [X.href("/vm/" + id + (k === "proxyveth" ? "" : "/" + k)), t, k === tab]));
       if (panes[tab].show) panes[tab].show();
     }
     function update() {
@@ -729,7 +1012,7 @@
     let t = null, on = false;
     const loop = async () => {
       if (!on) return;
-      if (!document.hidden) { try { await fn(); } catch (e) { console.error(e); } }
+      if (!document.hidden) { pollDepth++; try { await fn(); } catch (e) { console.error(e); } finally { pollDepth--; } }
       if (on) t = setTimeout(loop, ms);
     };
     return {
@@ -740,36 +1023,41 @@
 
   // ── вкладка proxyveth ─────────────────────────────────────────────────────
   function pvTab(X, id) {
-    const info = el("div", {class: "kv"});
+    const info = el("div", {class: "srcline"});
     const res = el("span", {class: "res"});
     const extra = el("div");
-    const cnt = el("span", {class: "muted"});
-    const onlyBad = el("input", {type: "checkbox", onchange: () => renderRows()});
+    const chips = el("div", {class: "chips"});
     const tbl = el("div", {class: "tbl-wrap"});
     const editor = el("div");
-    let rows = [], source = null, statusErr = null;
+    let rows = [], source = null, statusErr = null, flt = "all", firstRows = true;
+    const prevState = {};
 
-    const bSync = btn("Синхронизировать", () => sync(false), "primary", "привести модемы к таблице");
-    const bEdit = btn("Править локально", () => openEditor(), "", "править локальную копию таблицы прямо здесь");
-    const bQuick = btn("Быстрый тест", async (e) => {
-      e.target.disabled = true; setRes(res, "run", "проверяю свою сторону…");
-      await load(false); e.target.disabled = false; setRes(res, "ok", "быстрый тест готов");
-    }, "", "proxyveth status — своя сторона: юниты, адреса, маршруты, USB (секунды)");
-    const bWan = btn("Долгий тест (внешний IP)", async (e) => {
-      e.target.disabled = true; setRes(res, "run", "проверяю внешний IP через каждый модем — минута-две…");
-      await load(true); e.target.disabled = false; setRes(res, "ok", "долгий тест готов, внешний IP обновлён");
-    }, "", "proxyveth status --wan — выход в интернет через каждый модем");
-    const allBar = el("div", {class: "bar"}, el("span", {class: "muted", text: "все модемы:"}),
-      btn("поднять", (e) => updown(e.target, "up"), "", "proxyveth up all — поднять всех из таблицы, снять «остановлен»"),
-      btn("остановить", (e) => updown(e.target, "down"), "", "proxyveth down all — снять всех; таймер не поднимет, пока не «поднять»"),
-      btn("пересоздать", (e) => updown(e.target, "restart"), "", "proxyveth restart all — снять и поднять всех заново"));
-    const bSrc = btn("Сменить ссылку", async () => {
+    const bSync = btn("Синхронизировать", () => sync(false), "primary", "привести модемы к таблице (proxyveth sync)");
+    bSync.prepend(ic("sync"));
+    const tests = menuBtn("Тест", [
+      ["quick", "Быстрый тест", "bolt", "", "своя сторона: юниты, адреса, USB — секунды"],
+      ["wan", "Долгий тест", "gauge", "", "внешний IP через каждый модем — минута-две"]], async (v, b) => {
+      b.disabled = true;
+      setRes(res, "run", v === "wan" ? "проверяю внешний IP через каждый модем — минута-две…" : "проверяю свою сторону…");
+      await load(v === "wan");
+      b.disabled = false;
+      setRes(res, "ok", v === "wan" ? "долгий тест готов — внешний IP обновлён" : "быстрый тест готов");
+    }, "проверить модемы");
+    const allMenu = menuBtn("Все модемы", [
+      ["up", "Поднять все", "play", "", "из таблицы; «остановлен» снимается"],
+      ["down", "Остановить все", "stop", "", "таймер не поднимет, пока не «поднять»"],
+      ["restart", "Пересоздать все", "redo", "", "по одному, около минуты на модем"]], (v, b) => updown(b, v), "действия со всеми модемами сервера");
+    const tableMenu = menuBtn("Таблица", [
+      ["edit", "Править локально", "edit", "", "локальная копия прямо здесь"],
+      ["src", "Сменить ссылку", "link", "", "Google-таблица или local"]], async (v) => {
+      if (v === "edit") return openEditor();
       const url = await askText("Источник таблицы", "Ссылка на Google-таблицу (из адресной строки) или local:",
         source && source.url || "", "https://docs.google.com/spreadsheets/d/…");
       if (!url) return;
       await act(null, res, () => X.run(id, "proxyveth", ["source", url]), "Сохранено");
       load(false);
-    }, "link");
+    }, "источник модемов");
+    const bEdit = {set disabled(v) { tableMenu.querySelector("button").disabled = v; }};
 
     async function sync(force) {
       extra.replaceChildren();
@@ -787,57 +1075,69 @@
       refresh();
     }
 
+    // одна строка: режим · откуда таблица · когда синхронизирована
     function renderInfo() {
       const s = X.ent(id) || {};
-      const kv = [["Режим", s.mode === "usb" ? "USB — модем как USB Huawei E3372h, до 40 на сервер"
-        : s.mode === "gw" ? "шлюз — без USB и без такого предела" : modeShort(s.mode)]];
+      const parts = [el("span", {title: s.mode === "usb" ? "модем как USB Huawei E3372h, до 40 на сервер" : s.mode === "gw" ? "шлюз — без USB и без такого предела" : "",
+        text: s.mode === "usb" ? "режим USB" : s.mode === "gw" ? "режим шлюз" : "режим не задан"})];
       const d = source && source.ok ? source.data : null;
-      if (source && !source.ok) kv.push(["Таблица", "Ошибка: " + source.error]);
+      if (source && !source.ok) parts.push(el("span", {class: "problems", text: "таблица: " + source.error}));
       else if (d && typeof d === "object") {
         const kind = d.source || d.kind || (d.url ? "google" : null);
         const url = d.url || (typeof d.source === "string" && /^https?:/.test(d.source) ? d.source : null);
-        const urlEl = url ? el("a", {href: url, target: "_blank", rel: "noopener noreferrer", text: url.length > 70 ? url.slice(0, 70) + "…" : url}) : "не задана";
-        if (kind === "local") {
-          kv.push(["Главная", "локальная копия " + (d.local || "/etc/proxyveth/table.csv") + " (правится в панели)"]);
-          kv.push(["Google", el("span", {}, urlEl, " — не главная")]);
-        } else {
-          kv.push(["Главная", el("span", {}, "Google-таблица ", urlEl)]);
-          kv.push(["Локальная копия", (d.local || "/etc/proxyveth/table.csv")]);
-        }
-        kv.push(["Синхронизирована", ago(d.synced || d.pulled || d.mtime)]);
-        if (d.stale) kv.push(["", el("span", {class: "problems", text: "⚠ Google недоступен — работает локальная копия"})]);
-      } else if (d) kv.push(["Таблица", String(d)]);
-      info.replaceChildren(...kv.flatMap(([k, v]) => [el("div", {class: "k", text: k}), el("div", {}, v)]));
+        const g = url ? el("a", {href: url, target: "_blank", rel: "noopener noreferrer", title: url}, "Google-таблица", ic("out")) : el("span", {text: "Google — не задана"});
+        if (kind === "local") parts.push(el("span", {title: d.local || "/etc/proxyveth/table.csv", text: "главная — локальная копия"}), g);
+        else parts.push(el("span", {}, "главная — ", g), el("span", {class: "mono", title: "локальная копия", text: d.local || "/etc/proxyveth/table.csv"}));
+        parts.push(el("span", {text: "синхронизирована " + ago(d.synced || d.pulled || d.mtime)}));
+        if (d.stale) parts.push(el("span", {class: "problems", text: "Google недоступен — работает локальная копия"}));
+      } else if (!source) parts.push(el("span", {class: "skel", style: "width:260px;display:inline-block"}));
+      info.replaceChildren(...parts);
     }
 
+    // счётчики — они же фильтры таблицы
+    const kindOf = (r) => r.state === "warn" && r.side === "server" ? "server" : r.state;
+    const FLT = [["all", "Все", ""], ["ok", "Работают", "ok"], ["server", "Ждут сервер", "warn"], ["warn", "Апстрим", "warn"],
+      ["broken", "Сломаны", "bad"], ["stopped", "Остановлены", "off"], ["rebooting", "Перезагрузка", "info"], ["absent", "Нет", "off"], ["disabled", "Выключены", "off"]];
+    function renderChips() {
+      const c = {all: rows.length};
+      for (const r of rows) { const k = kindOf(r); c[k] = (c[k] || 0) + 1; }
+      if (flt !== "all" && !c[flt]) flt = "all";
+      chips.replaceChildren(...FLT.filter(([k]) => k === "all" || c[k]).map(([k, t, dot]) =>
+        el("button", {type: "button", class: flt === k ? "on" : "", "aria-pressed": String(flt === k),
+          onclick: () => { flt = k; renderRows(); }}, dot ? el("span", {class: "dot " + dot}) : null, t, el("span", {class: "n", text: String(c[k] || 0)}))));
+      chips.hidden = !rows.length;
+    }
     function renderRows() {
-      if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + statusErr})); cnt.textContent = ""; return; }
-      const c = {ok: 0, warn: 0, broken: 0, server: 0, stopped: 0};
-      for (const r of rows) if (r.state === "warn" && r.side === "server") c.server += 1; else if (c[r.state] != null) c[r.state] += 1;
-      cnt.textContent = "работают " + c.ok + " · апстрим " + c.warn + (c.server ? " · ждут сервер " + c.server : "")
-        + " · сломаны " + c.broken + (c.stopped ? " · остановлены " + c.stopped : "") + " · всего " + rows.length;
-      const shown = onlyBad.checked ? rows.filter((r) => !["ok", "stopped", "disabled"].includes(r.state)) : rows;
-      if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", text: "модемов нет — таблица пуста или не задана"})); return; }
-      const head = el("tr", {}, ["n", "real", "прокси", "состояние", "внешний IP", "проблемы", ""].map((t) => el("th", {text: t})));
+      if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: "Ошибка: " + statusErr})); chips.hidden = true; return; }
+      renderChips();
+      if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", style: "padding:16px", text: "Модемов нет — таблица пуста или не задана. «Таблица» → «Сменить ссылку» или «Править локально»."})); return; }
+      const shown = flt === "all" ? rows : rows.filter((r) => kindOf(r) === flt);
+      const head = el("tr", {}, ["n", "real", "прокси", "состояние", "внешний IP", "заметки"].map((t) => el("th", {text: t})), el("th", {class: "acts-cell", text: "действия"}));
       const body = shown.map((r) => {
         const [cls, txt] = r.state === "warn" && r.side === "server" ? ["warn", "сервер"]
           : ROW_STATE[r.state] || ["", r.state || "—"];
-        return el("tr", {},
+        const note = (r.problems || []).length ? (r.problems || []).join("; ") : r.note || "";
+        const changed = !firstRows && prevState[r.n] && prevState[r.n] !== r.state;
+        prevState[r.n] = r.state;
+        const stopped = r.state === "stopped";
+        return el("tr", {class: changed ? "flash" : ""},
           el("td", {class: "num", text: String(r.n)}), el("td", {class: "num", text: r.real == null ? "—" : String(r.real)}),
           el("td", {class: "mono", text: maskProxy(r.proxy)}),
           el("td", {}, el("span", {class: "pill", title: (r.side === "server" ? "беда на стороне сервера, не у прокси: сервер (mp.space) "
               + "ещё не взял модем — адрес, правило маршрутизации, USB. " : "") + (r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : "")},
             el("span", {class: "dot " + cls}), txt)),
           el("td", {class: "mono", text: r.ext_ip || "—"}),
-          r.note && !(r.problems || []).length ? el("td", {class: "muted note", text: r.note, title: r.note})
-            : el("td", {class: "problems", text: (r.problems || []).join("; ")}),
-          el("td", {class: "acts-cell"}, btn("диагн.", () => diag(r.n), "icon", "долгий тест модема: прокси → логин → модем → SIM → интернет (proxyveth diag " + r.n + ")"),
-            r.state === "stopped"
-              ? btn("поднять", (e) => updown(e.target, "up", r.n), "icon", "proxyveth up " + r.n)
-              : btn("остановить", (e) => updown(e.target, "down", r.n), "icon", "снять модем " + r.n + "; таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")"),
-            btn("пересоздать", (e) => updown(e.target, "restart", r.n), "icon", "снять интерфейс модема " + r.n + " и поднять заново (proxyveth restart " + r.n + ")")));
+          el("td", {class: "clip " + ((r.problems || []).length ? "problems" : "note"), title: note}, el("span", {text: note})),
+          el("td", {class: "acts-cell"}, el("span", {class: "ia"},
+            stopped
+              ? ibtn("play", "поднять модем " + r.n + " (proxyveth up " + r.n + ")", (e) => updown(e.currentTarget, "up", r.n), "", "поднять")
+              : ibtn("stop", "остановить модем " + r.n + ": таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")", (e) => updown(e.currentTarget, "down", r.n), "", "остановить"),
+            ibtn("redo", "пересоздать модем " + r.n + ": интерфейс снимется и поднимется заново (proxyveth restart " + r.n + ")", (e) => updown(e.currentTarget, "restart", r.n)),
+            ibtn("pulse", "диагностика модема " + r.n + ": прокси → логин → модем → SIM → интернет", () => diag(r.n)))));
       });
-      tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), el("tbody", {}, body)));
+      const tb = el("tbody", {}, body);
+      tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), tb));
+      if (firstRows) { firstRows = false; stagger(tb); }
     }
 
     // up / down / restart — один модем (n) или все (n не задан)
@@ -852,6 +1152,7 @@
       const done = {up: "поднят", down: "остановлен", restart: "пересоздан"}[cmd] + (all ? "ы" : "");
       const r = await act(button, res, () => X.run(id, "proxyveth", args), what + ": " + done);
       if (r && !r.ok) showText(what[0].toUpperCase() + what.slice(1) + ": не " + done, "Ошибка: " + r.error);
+      else if (r && r.ok) toast(what[0].toUpperCase() + what.slice(1) + ": " + done);
       load(false);
     }
 
@@ -941,12 +1242,11 @@
     }
 
     const pl = poller(10000, pollStatus);
-    const root = el("div", {}, info, el("div", {class: "bar"}, bSync, bQuick, bWan, bEdit, bSrc, res), allBar, extra, editor,
-      el("div", {class: "bar"}, cnt, el("span", {class: "spacer"}), el("label", {class: "pill"}, onlyBad, "только проблемные")), tbl);
+    const root = el("div", {}, info, el("div", {class: "toolbar"}, bSync, tests, allMenu, tableMenu, res), extra, editor, chips, tbl);
     let loaded = false;
     return {
       el: root,
-      show() { if (!loaded) { loaded = true; tbl.replaceChildren(el("div", {class: "item muted", text: "загрузка…"})); load(false); } else pollStatus(); pl.start(); },
+      show() { if (!loaded) { loaded = true; renderInfo(); tbl.replaceChildren(skelRows(8)); load(false); } else pollStatus(); pl.start(); },
       hide() { pl.stop(); },
       dispose() { pl.stop(); },
       update() { renderInfo(); },
@@ -984,8 +1284,6 @@
     ["reboot_port", "Порт ребута", "GET http://IP:порт/reboot; 0 — нет ссылки"],
     ["reconnect_port", "Порт реконнекта", "GET http://IP:порт/reconnect; 0 — нет ссылки"],
     ["interval_min", "Авто-реконнект, мин", "0 — выкл"]];
-  const ML_NEW = {enabled: true, name: "", login: "", password: "", port: "", lan_ip: "", modem_ip: "",
-    reboot_port: "", reconnect_port: "", interval_min: "0", protect: true};
 
   function mlTab(X, id) {
     const where = id === "host" ? "хост" : "ВМ " + id;
@@ -1084,9 +1382,53 @@
     function setEdit(r, k, v) {
       const e = edits[r.id] || (edits[r.id] = {});
       const o = k === "password" ? revealed[r.id] : r[k];
+      // IP модема выводится из IP интерфейса (как в modlink для Windows): 192.168.N.100 → 192.168.N.1,
+      // если его не правили отдельно
+      if (k === "lan_ip" && val(r, "modem_ip") === gateway(val(r, "lan_ip")) && gateway(v)) {
+        const g = gateway(v);
+        if (g === String(r.modem_ip || "")) delete e.modem_ip; else e.modem_ip = g;
+      }
       if (String(v) === String(o == null ? "" : o)) delete e[k]; else e[k] = v;
       if (!Object.keys(e).length) delete edits[r.id];
       markDirty();
+    }
+    const gateway = (ip) => { const m = /^(\d+\.\d+\.\d+)\.\d+$/.exec(String(ip || "").trim()); return m ? m[1] + ".1" : ""; };
+    // ── автозаполнение новых строк (логика modlink для Windows) ──
+    const PW_ABC = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    function genPw(n) {
+      const a = new Uint32Array(n || 12);
+      crypto.getRandomValues(a);
+      return Array.from(a, (x) => PW_ABC[x % PW_ABC.length]).join("");
+    }
+    function usedN() { return new Set([...orig.map((r) => +r.id), ...added.map((a) => +a.fields.n)].filter((x) => x >= 1 && x <= 254)); }
+    function nextN(used) {
+      used = used || usedN();
+      let hi = 0;
+      for (const u of used) if (u > hi) hi = u;
+      let n = hi + 1;
+      if (n > 254) { n = 1; while (used.has(n) && n <= 254) n++; }
+      return n <= 254 ? n : null;
+    }
+    function nextPorts() {
+      const base = (S0 && +S0.base_port) || 10000;
+      if (S0 && S0.mode === "shared") return [base, base + 1, base + 1];
+      const all = [...orig.map((r) => +val(r, "port")), ...added.map((a) => +a.fields.port)].filter((x) => x > 0);
+      const p = all.length ? Math.max(...all) + 3 : base;
+      return [p, p + 1, p + 2];
+    }
+    const DERIVED = {lan_ip: (n) => "192.168." + n + ".100", modem_ip: (n) => "192.168." + n + ".1", login: (n) => "modem" + n, name: (n) => "modem " + n};
+    function newRow(n) {
+      const [p, b, rc] = nextPorts();
+      const f = {enabled: true, n: n || "", password: genPw(12), port: String(p), reboot_port: String(b), reconnect_port: String(rc),
+        interval_min: "0", protect: true};
+      for (const [k, fn] of Object.entries(DERIVED)) f[k] = n ? fn(n) : "";
+      return {tmp: ++seq, touched: {}, fields: f};
+    }
+    function setN(a, v) {
+      const n = parseInt(v, 10);
+      a.fields.n = v;
+      if (!(n >= 1 && n <= 254)) return;
+      for (const [k, fn] of Object.entries(DERIVED)) if (!a.touched[k]) a.fields[k] = fn(n);
     }
     function markDirty() {
       const n = dirtyCount();
@@ -1114,9 +1456,18 @@
         return el("label", {class: "guard" + (on ? "" : " off"), title: "закрыты ЛК и сайты операторов, опасные порты и веб модема"},
           box, el("span", {text: on ? "защита активна" : "защита НЕ активна"}));
       }
-      return el("input", {value: v == null ? "" : String(v), class: cls,
+      return el("input", {value: v == null ? "" : String(v), class: cls, spellcheck: false, autocomplete: "off",
         placeholder: isNew && /port/.test(k) ? "auto" : isNew && k === "password" ? "gen" : "",
-        oninput: (e) => isNew ? (r.fields[k] = e.target.value) : setEdit(r, k, e.target.value)});
+        oninput: (e) => {
+          if (!isNew) return setEdit(r, k, e.target.value);
+          r.fields[k] = e.target.value;
+          r.touched[k] = true;
+          if (k === "lan_ip" && !r.touched.modem_ip && gateway(e.target.value)) {
+            r.fields.modem_ip = gateway(e.target.value);
+            const mi = tbl.querySelector('tr[data-tmp="' + r.tmp + '-more"] input[data-k="modem_ip"]');
+            if (mi) mi.value = r.fields.modem_ip;
+          }
+        }, "data-k": k});
     }
     function pwCell(r) {
       const e = edits[r.id] || {};
@@ -1195,7 +1546,7 @@
     function draw() {
       if (err) { tbl.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + err})); return; }
       const head = el("tr", {}, el("th", {text: "№"}), ML_MAIN.map(([, t, title]) => el("th", {text: t, title: title || null})),
-        el("th", {text: "Внешний IP"}), el("th"));
+        el("th", {text: "Внешний IP"}), el("th", {class: "acts-cell", text: "действия"}));
       const body = [];
       for (const r of orig) {
         const st = states[r.id];
@@ -1205,12 +1556,12 @@
           el("td", {class: "ml-n", title: mlStateText(st)}, el("span", {class: "dot " + mlDot(st)}), String(r.id)),
           ML_MAIN.map(([k]) => el("td", {}, k === "password" ? pwCell(r) : inputFor(r, k))),
           el("td", {class: "ml-ext"}, extCell(r)),
-          el("td", {class: "acts-cell"},
-            btn("Test", () => test(r), "icon", "внешний IP через этот прокси + HiLink"),
-            btn("⟳", () => rowAct(r, "реконнект", ["reconnect", String(r.id)]), "icon", "реконнект: сменить IP"),
-            btn("⧉", () => copyRow(r), "icon", "копировать строку: прокси и ссылки"),
-            btn(open ? "▴" : "▾", () => { open ? opened.delete(r.id) : opened.add(r.id); draw(); }, "icon", "ещё: порты, автореконнект, защита, ребут, скорость"),
-            btn("✕", () => { if (gone) deleted.delete(r.id); else deleted.add(r.id); draw(); markDirty(); }, "icon danger", gone ? "не удалять" : "удалить строку (при «Применить»)"))));
+          el("td", {class: "acts-cell"}, el("span", {class: "ia"},
+            ibtn("bolt", "Test: внешний IP через этот прокси + HiLink", () => test(r), "", "test"),
+            ibtn("redo", "реконнект: сменить IP", () => rowAct(r, "реконнект", ["reconnect", String(r.id)])),
+            ibtn("copy", "копировать строку: прокси и ссылки", () => copyRow(r)),
+            ibtn("chev", open ? "свернуть" : "ещё: порты, автореконнект, защита, ребут, скорость", () => { open ? opened.delete(r.id) : opened.add(r.id); draw(); }, open ? "on" : ""),
+            ibtn("trash", gone ? "не удалять" : "удалить строку (при «Применить»)", () => { if (gone) deleted.delete(r.id); else deleted.add(r.id); draw(); markDirty(); }, "danger")))));
         if (open) body.push(el("tr", {class: "ml-more"}, el("td"), el("td", {colspan: ML_MAIN.length + 2},
           el("div", {class: "ml-more-grid"}, ML_MORE.map(([k, t, title]) => el("label", {title: title || null}, el("span", {class: "muted", text: t}), inputFor(r, k)))),
           el("div", {class: "bar"}, inputFor(r, "enabled"), inputFor(r, "protect"),
@@ -1221,15 +1572,20 @@
           el("div", {class: "muted", text: mlStateText(st)}))));
       }
       for (const a of added) {
-        body.push(el("tr", {class: "new"}, el("td", {class: "ml-n", text: "+"}),
+        const nIn = el("input", {value: String(a.fields.n || ""), class: "w-xs", inputmode: "numeric", "aria-label": "номер модема N",
+          title: "№ модема: от него IP 192.168.N.100, IP модема .1, логин modemN", oninput: (e) => { setN(a, e.target.value); draw(); nIn2(); }});
+        const nIn2 = () => { const x = tbl.querySelector('tr[data-tmp="' + a.tmp + '"] td.ml-n input'); if (x) { x.focus(); const L = x.value.length; x.setSelectionRange(L, L); } };
+        body.push(el("tr", {class: "new", "data-tmp": String(a.tmp)}, el("td", {class: "ml-n"}, nIn),
           ML_MAIN.map(([k]) => el("td", {}, inputFor(a, k, true))), el("td", {class: "muted", text: "новая"}),
-          el("td", {class: "acts-cell"}, btn("✕", () => { added = added.filter((x) => x !== a); draw(); markDirty(); }, "icon danger", "убрать новую строку"))));
-        body.push(el("tr", {class: "ml-more"}, el("td"), el("td", {colspan: ML_MAIN.length + 2},
+          el("td", {class: "acts-cell"}, el("span", {class: "ia"}, ibtn("trash", "убрать новую строку", () => { added = added.filter((x) => x !== a); draw(); markDirty(); }, "danger")))));
+        body.push(el("tr", {class: "ml-more", "data-tmp": a.tmp + "-more"}, el("td"), el("td", {colspan: ML_MAIN.length + 2},
           el("div", {class: "ml-more-grid"}, ML_MORE.map(([k, t, title]) => el("label", {title: title || null}, el("span", {class: "muted", text: t}), inputFor(a, k, true)))),
           el("div", {class: "bar"}, inputFor(a, "protect", true)))));
       }
       if (!body.length) body.push(el("tr", {}, el("td", {colspan: ML_MAIN.length + 3, class: "muted", text: "модемов нет — «+ Модем» или «Из интерфейсов»"})));
-      tbl.replaceChildren(el("table", {class: "t ml"}, el("thead", {}, head), el("tbody", {}, body)));
+      const tb = el("tbody", {}, body);
+      tbl.replaceChildren(el("table", {class: "t ml"}, el("thead", {}, head), tb));
+      if (orig.length && !tbl.dataset.shown) { tbl.dataset.shown = "1"; stagger(tb); }
       cnt.textContent = orig.length ? "модемов " + orig.length + (S0 ? " · " + (S0.mode === "shared" ? "один порт" : "свои порты") + " · " +
         (S0.traffic === "tcp" ? "только TCP" : "TCP+UDP") : "") : "";
     }
@@ -1301,10 +1657,34 @@
     }
 
     // ── кнопки над таблицей ──────────────────────────────────────────────
-    const bAdd = btn("+ Модем", () => {
-      added.push({tmp: ++seq, fields: Object.assign({}, ML_NEW)});
+    const bAdd = btn("Модем", () => {
+      added.push(newRow(nextN()));
       draw(); markDirty();
-    }, "", "новая строка: порт, логин и пароль подставятся сами (auto/gen)");
+      const x = tbl.querySelector("tr.new:last-of-type td.ml-n input, tr.new td.ml-n input");
+      const all = tbl.querySelectorAll("tr.new td.ml-n input");
+      if (all.length) all[all.length - 1].focus();
+      void x;
+    }, "", "новая строка: №, IP, логин, пароль и порты — сами (как в modlink для Windows); № можно поменять — IP и логин пойдут за ним");
+    bAdd.prepend(ic("plus"));
+    const bRange = btn("Диапазон", () => {
+      const from = el("input", {inputmode: "numeric", value: String(nextN() || 1), style: "width:90px"});
+      const to = el("input", {inputmode: "numeric", value: String(Math.min(254, (nextN() || 1) + 9)), style: "width:90px"});
+      modal("Добавить модемы диапазоном · " + where, el("div", {class: "form", style: "border:0;padding:0"},
+        el("p", {class: "muted", text: "Строка на каждый № из диапазона: IP 192.168.N.100, IP модема .1, логин modemN, случайный пароль, порты подряд " +
+          (S0 && S0.mode === "shared" ? "(режим «один порт» — общие)" : "тройками") + ". Занятые № пропускаются. Вступят в силу после «Применить»."}),
+        el("div", {style: "display:flex;gap:12px;align-items:center"}, el("label", {}, "с №", from), el("label", {}, "по №", to))), [
+        {text: "Отмена"},
+        {text: "Добавить", cls: "primary", onclick: (close) => {
+          const a = parseInt(from.value, 10), b = parseInt(to.value, 10);
+          if (!(a >= 1 && b <= 254 && a <= b)) { toast("№ — от 1 до 254, «с» не больше «по»", "bad"); return; }
+          const used = usedN();
+          let n = 0;
+          for (let k = a; k <= b; k++) if (!used.has(k)) { added.push(newRow(k)); used.add(k); n++; }
+          close(); draw(); markDirty();
+          toast(n ? "добавлено строк: " + n + " — «Применить»" : "все № из диапазона уже есть", n ? "ok" : "warn");
+        }}]);
+    }, "", "сразу несколько модемов: № с … по …");
+    bRange.prepend(ic("plus"));
     const bIf = btn("Из интерфейсов", async (e) => {
       const r = await act(e.target, res, () => X.run(id, "modlink", ["from-ifaces"]), (d) => "предложено строк: " + rowsOf(d).length);
       if (!r || !r.ok) return;
@@ -1333,8 +1713,8 @@
       tests = {};
       await load();
     }, "primary", "сохранить правки → конфиг 3proxy → перечитать (соединения не рвутся) → проверка портов");
-    const copyMenu = menuBtn("Копировать ▾", [["proxy", "Только прокси"], ["reboot", "Только ссылки ребута"],
-      ["reconnect", "Только ссылки реконнекта"], ["all", "Прокси + ребут + реконнект"]], copyAll, "строки для клиента — с паролями");
+    const copyMenu = menuBtn("Копировать", [["proxy", "Только прокси", "copy"], ["reboot", "Только ссылки ребута", "power"],
+      ["reconnect", "Только ссылки реконнекта", "redo"], "-", ["all", "Прокси + ребут + реконнект", "list", "", "по колонкам — для таблицы"]], copyAll, "строки для клиента — с паролями");
     const bTbl = btn("Для proxyveth", async (e) => {
       const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/export", {table: true}), "Готово");
       if (r && r.ok) showTable("Строки для таблицы proxyveth · " + where, r.data.columns, r.data.rows,
@@ -1342,31 +1722,24 @@
           el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
             " можно поменять. У строк-поставщиков защита снята: proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink."})));
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
-    const logsMenu = menuBtn("Логи ▾", [["3proxy", "Логи 3proxy"], ["modlink", "Логи modlink (демон)"]], async (which) => {
+    const logsMenu = menuBtn("Логи", [["3proxy", "Логи 3proxy", "list"], ["modlink", "Логи modlink (демон)", "list"]], async (which) => {
       const x = await X.run(id, "modlink", ["logs", which]);
       if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
       showText((which === "3proxy" ? "Логи 3proxy" : "Логи modlink") + " · " + where, ((x.data && x.data.lines) || []).join("\n") || "пусто");
     }, "журналы служб");
 
-    function menuBtn(label, items, onPick, title) {
-      const menu = el("div", {class: "menu", hidden: true});
-      const b = btn(label, (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; }, "", title);
-      for (const [v, t] of items) menu.append(el("button", {type: "button", text: t, onclick: (e) => { e.stopPropagation(); menu.hidden = true; onPick(v); }}));
-      document.addEventListener("click", () => { menu.hidden = true; });
-      return el("span", {class: "menu-wrap"}, b, menu);
-    }
-
     const root = el("div", {}, legacyBox,
-      el("div", {class: "bar"}, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
+      el("div", {class: "toolbar"}, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
       netCard,
-      el("div", {class: "bar ml-head"}, el("b", {text: "Модемы"}), cnt, el("span", {class: "spacer"}),
-        copyMenu, bAdd, bIf, bTbl, logsMenu, btn("Обновить", () => load(), "link", "перечитать (несохранённое пропадёт)"), res),
+      el("div", {class: "sec-head"}, el("h2", {text: "Модемы"}), cnt, el("span", {class: "spacer"}), res),
+      el("div", {class: "toolbar"}, bAdd, bRange, bIf, copyMenu, bTbl, logsMenu, el("span", {class: "spacer"}),
+        btn("Обновить", () => load(), "ghost", "перечитать (несохранённое пропадёт)")),
       tbl, out);
     let loaded = false;
     const pl = poller(15000, pollStatus);
     return {
       el: root,
-      show() { if (!loaded) { loaded = true; tbl.replaceChildren(el("div", {class: "item muted", text: "загрузка…"})); load(); } else pollStatus(); pl.start(); },
+      show() { if (!loaded) { loaded = true; tbl.replaceChildren(skelRows(6)); load(); } else pollStatus(); pl.start(); },
       hide() { pl.stop(); },
       dispose() { pl.stop(); },
     };
@@ -1492,7 +1865,8 @@
   function setTab(X, id) {
     const T = "/api/targets/" + id;
     const H = String(id) === "host";
-    const facts = el("div", {class: "muted"});
+    const facts = el("div", {class: "facts"}, el("span", {class: "skel", style: "width:320px"}));
+    const fact = (list) => facts.replaceChildren(...list.filter(Boolean).map((t) => el("span", {text: t})));
     const dns = el("input", {placeholder: "1.1.1.1 8.8.8.8 (необязательно)"});
     const rDns = actRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space", dns,
       btn("Починить", (e) => act(e.target, rDns.res, () => POST(T + "/dns", {dns: dns.value}), "Применено")));
@@ -1555,16 +1929,15 @@
     }
     async function loadFacts() {
       const r = await X.GET("/targets/" + id);
-      if (!r.ok) { facts.textContent = "Ошибка: " + r.error; return; }
+      if (!r.ok) { fact(["Ошибка: " + r.error]); return; }
       const d = r.data || {}, v = d.versions || {};
       if (H) {
-        facts.textContent = [d.os, d.ip, d.cpu && d.cpu.cores && d.cpu.cores + " ядер", d.ram && "ОЗУ " + gb(d.ram),
-          "PCS " + (d.version || "—"), d.proxyveth && (d.proxyveth.mode ? "proxyveth " + modeShort(d.proxyveth.mode) : "proxyveth: режим не задан")]
-          .filter(Boolean).join(" · ");
+        fact([d.os, d.ip, d.cpu && d.cpu.cores && d.cpu.cores + " ядер", d.ram && "ОЗУ " + gb(d.ram),
+          "PCS " + (d.version || "—"), d.proxyveth && (d.proxyveth.mode ? "proxyveth " + modeShort(d.proxyveth.mode) : "proxyveth: режим не задан")]);
         return;
       }
-      facts.textContent = [d.os, d.cores && d.cores + " ядер", d.ram_gb && "ОЗУ " + d.ram_gb + " ГБ", d.disk_gb && "диск " + d.disk_gb + " ГБ",
-        Object.keys(v).length && "версии: " + Object.entries(v).map(([k, x]) => k + " " + (x || "—")).join(", ")].filter(Boolean).join(" · ");
+      fact([d.os, d.cores && d.cores + " ядер", d.ram_gb && "ОЗУ " + d.ram_gb + " ГБ", d.disk_gb && "диск " + d.disk_gb + " ГБ",
+        ...Object.entries(v).map(([k, x]) => k + " " + (x || "—"))]);
     }
     function update() {
       const s = X.ent(id) || {};
@@ -1578,14 +1951,15 @@
     let shownMode = null;
     if (X.node) for (const r of [rMp, rUp]) r.jobs.dataset.base = X.base;
     const power = (action, text, ask, cls) => btn(text, async (e) => {
+      const b = e.currentTarget;               // клик мог прийти в иконку внутри кнопки
       if (ask && !window.confirm(ask)) return;
-      const r = await act(e.target, rPower.res, () => X.POST("/servers/" + id + "/power", {action}), (d) => "ВМ: " + (d && d.state || "готово"));
+      const r = await act(b, rPower.res, () => X.POST("/servers/" + id + "/power", {action}), (d) => "ВМ: " + (d && d.state || "готово"));
       if (r && r.ok) (X.node ? refreshNodes() : refresh());
     }, cls);
     const rPower = actRow("Питание ВМ", "через Proxmox: включить, выключить штатно (до 2 мин), перезагрузить, остановить жёстко", el("span"),
-      power("start", "▶ Включить"), power("shutdown", "⏻ Выключить", "Выключить ВМ " + id + "? Модемы на ней пропадут."),
-      power("reboot", "↻ Перезагрузить", "Перезагрузить ВМ " + id + "?"),
-      power("stop", "■ Стоп", "Жёстко остановить ВМ " + id + "? Как выдернуть питание.", "danger"));
+      power("start", [ic("play"), "Включить"]), power("shutdown", [ic("power"), "Выключить"], "Выключить ВМ " + id + "? Модемы на ней пропадут."),
+      power("reboot", [ic("redo"), "Перезагрузить"], "Перезагрузить ВМ " + id + "?"),
+      power("stop", [ic("stop"), "Стоп"], "Жёстко остановить ВМ " + id + "? Как выдернуть питание.", "danger"));
     const rColor = actRow("Цвет", "цвет ВМ в дереве и на плашке — один из семи", colorPick((X.srv(id) || {}).color, async (c) => {
       const r = await X.POST("/servers/" + id + "/color", {color: c});
       if (r.ok) (X.node ? refreshNodes() : refresh());
@@ -1596,8 +1970,16 @@
     const fpText = el("span", {class: "mono", text: "…"});
     const rLink = actRow("Связь хостов", "чтобы управлять этим хостом с хоста Proxmox: там «+ Присоединить хост» → адрес этого хоста, логин и пароль"
       + " этой панели; отпечаток — сверить (хаб ходит сюда только по HTTPS к этому сертификату)", fpText);
-    const root = el("div", {}, facts, el("div", {class: "acts", style: "margin-top:10px"}, H ? null : rPower.el, H ? null : rColor.el,
-      rDns.el, rPw.el, rKey.el, rMp.el, rHl.el, rMode.el, rUp.el, H ? (X.node ? null : rLink.el) : rForget.el));
+    // разделы: что с машиной, как на неё попасть, сеть и софт; опасное — в конце
+    const sec = (title, ...rows) => {
+      rows = rows.filter(Boolean);
+      return rows.length ? el("section", {class: "set-sec"}, el("h2", {text: title}), el("div", {class: "acts"}, rows)) : null;
+    };
+    const root = el("div", {class: "stagger-sec"}, facts,
+      sec(H ? "Хост" : "Машина", H ? null : rPower.el, H ? null : rColor.el, rUp.el),
+      sec("Доступ", rPw.el, rKey.el, H && !X.node ? rLink.el : null),
+      sec("Сеть и софт", rDns.el, rMp.el, rHl.el),
+      sec("Осторожно", rMode.el, H ? null : rForget.el));
     let loaded = false;
     async function loadFp() {
       const r = await X.GET("/self");
@@ -1607,59 +1989,88 @@
   }
 
   // ── создать ВМ ────────────────────────────────────────────────────────────
+  // Форма слева, справа — план: что сделает задание с этими настройками (меняется на ходу).
+  function optCard(name, value, checked, head, sub) {
+    const input = el("input", {type: "radio", name, value, checked: checked || null});
+    return {input, el: el("label", {class: "opt"}, input, el("b", {text: head}), el("span", {text: sub}))};
+  }
+  function planList(items) {
+    return el("ol", {class: "plan"}, items.map(([t, on, sub]) => el("li", {class: on === false ? "off" : ""},
+      el("span", {class: "mk", "aria-hidden": "true"}), el("div", {}, el("div", {text: t}), sub ? el("div", {class: "sub", text: sub}) : null))));
+  }
   function pageCreate(X) {
     const f = {
-      name: el("input", {placeholder: "pcs3000", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9-]*"}),
+      name: el("input", {placeholder: "pcs3000", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9\\-]*", title: "латиница, цифры и дефис; с буквы или цифры", autocomplete: "off", spellcheck: "false"}),
       cores: el("input", {type: "number", min: 1, max: 256, value: "4"}),
       ram: el("input", {type: "number", min: 1, max: 4096, value: "8"}),
       disk: el("input", {type: "number", min: 8, max: 65536, value: "40"}),
       sheet: el("input", {type: "url", placeholder: "https://docs.google.com/spreadsheets/d/…/edit#gid=0"}),
       mp: el("input", {type: "checkbox"}),
     };
-    const usb = el("input", {type: "radio", name: "mode", value: "usb", checked: true});
-    const gw = el("input", {type: "radio", name: "mode", value: "gw"});
+    const usb = optCard("mode", "usb", true, "USB", "модем виден как USB Huawei E3372h; до 40 на ВМ");
+    const gw = optCard("mode", "gw", false, "Шлюз", "без USB и без такого предела");
     const res = el("span", {class: "res"});
-    const submit = el("button", {type: "submit", class: "primary"}, "Создать");
+    const submit = el("button", {type: "submit", class: "primary"}, "Создать ВМ");
+    const plan = el("div");
     const form = el("form", {class: "form"},
-      el("label", {}, "Имя ВМ (это и имя хоста)", f.name),
-      el("div", {class: "row3"}, el("label", {}, "Ядра", f.cores), el("label", {}, "ОЗУ, ГБ", f.ram), el("label", {}, "Диск, ГБ", f.disk)),
-      el("div", {class: "radio"}, el("b", {text: "Режим proxyveth"}),
-        el("label", {}, usb, el("span", {}, "USB — модем выглядит как USB Huawei E3372h; ", el("span", {class: "muted", text: "до 40 на сервер"}))),
-        el("label", {}, gw, el("span", {}, "шлюз — без USB и без такого предела"))),
-      el("label", {}, "Ссылка на таблицу модемов (можно потом)", f.sheet),
-      el("label", {class: "inline"}, f.mp, "поставить mobileproxy.space"),
-      el("div", {class: "bar"}, submit, res));
+      el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Машина"}),
+        el("label", {}, "Имя ВМ — оно же имя хоста", f.name),
+        el("div", {class: "row3"}, el("label", {}, "Ядра", f.cores), el("label", {}, "ОЗУ, ГБ", f.ram), el("label", {}, "Диск, ГБ", f.disk))),
+      el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Режим proxyveth"}), el("div", {class: "opts"}, usb.el, gw.el)),
+      el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Модемы"}),
+        el("label", {}, "Ссылка на таблицу модемов — можно дать потом", f.sheet),
+        el("label", {class: "inline"}, f.mp, "поставить mobileproxy.space")),
+      el("div", {class: "fs bar-end"}, submit, res));
+    function drawPlan() {
+      const n = f.name.value.trim() || "…";
+      plan.replaceChildren(el("div", {class: "aside-t", text: "Что будет"}), planList([
+        ["ВМ «" + n + "» в Proxmox", true, (+f.cores.value || "?") + " ядер · " + (+f.ram.value || "?") + " ГБ ОЗУ · диск " + (+f.disk.value || "?") + " ГБ"],
+        ["Ubuntu 24.04 и обновления", true, usb.input.checked ? "и ядро с USB-модулями — одна перезагрузка" : null],
+        ["PCS, proxyveth и modlink", true, "proxyveth — " + (usb.input.checked ? "USB" : "шлюз")],
+        ["Модемы по таблице", !!f.sheet.value.trim(), f.sheet.value.trim() ? null : "таблицы нет — добавишь потом во вкладке proxyveth"],
+        ["mobileproxy.space", f.mp.checked, f.mp.checked ? "в конце ВМ перезагрузится" : "не ставим"],
+      ]), el("p", {class: "aside-note", text: "Идёт в фоне: страницу можно закрыть, задание доработает. Журнал откроется сам."}));
+    }
+    form.addEventListener("input", drawPlan);
+    form.addEventListener("change", drawPlan);
+    drawPlan();
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const body = {name: f.name.value.trim(), cores: +f.cores.value, ram_gb: +f.ram.value, disk_gb: +f.disk.value,
-        mode: gw.checked ? "gw" : "usb", sheet: f.sheet.value.trim(), mpspace: f.mp.checked};
+        mode: gw.input.checked ? "gw" : "usb", sheet: f.sheet.value.trim(), mpspace: f.mp.checked};
       const r = await act(submit, res, () => X.POST("/servers", body), "Запущено");
       if (r && r.ok && r.data && r.data.job != null) location.hash = X.href("/job/" + encodeURIComponent(r.data.job));
     });
-    return {kind: "create", node: X.node, el: el("div", {}, el("h1", {text: "Создать ВМ" + (X.node ? " на хосте " + X.node : "")}),
-      el("p", {class: "muted", text: "Ubuntu 24.04 под ключ: ОС, PCS, proxyveth в выбранном режиме, модемы по таблице, по желанию — mobileproxy.space. Долго — журнал ниже обновляется сам."}),
-      form), update() { document.title = "Создать ВМ — PCS"; }};
+    const ph = pageHead({});
+    ph.set("Новая ВМ", [X.node ? "на хосте " + X.node : "на этом хосте", "Ubuntu 24.04 под ключ"]);
+    return {kind: "create", node: X.node, el: el("div", {}, ph.el, el("div", {class: "split"}, form, el("aside", {class: "aside-card"}, plan))),
+      update() { document.title = "Новая ВМ — PCS"; }};
   }
 
   function pageJob(X, jid) {
-    return {kind: "job", el: el("div", {}, el("h1", {text: "Задание"}), jobView(jid, {page: true, base: X.node ? X.base : undefined})), update() { document.title = "Задание — PCS"; }};
+    const ph = pageHead({});
+    ph.set("Задание", ["задание " + jid]);
+    const jv = jobView(jid, {page: true, base: X.node ? X.base : undefined,
+      onTitle: (j) => ph.set(j.title || "Задание", ["задание " + jid, j.started ? "начато " + new Date(j.started * 1000).toLocaleString("ru-RU", {hour: "2-digit", minute: "2-digit", day: "numeric", month: "short"}) : null])});
+    return {kind: "job", el: el("div", {}, ph.el, jv), update() { document.title = "Задание — PCS"; }};
   }
 
   // ── присоединить хост (VPS или другой Proxmox) ──────────────────────────
   function pageJoin() {
-    const f = {addr: el("input", {placeholder: "95.165.83.236 или vps.example.ru (порт 666 — по умолчанию)", required: true}),
+    const f = {addr: el("input", {placeholder: "95.165.83.236 или vps.example.ru", required: true, autocomplete: "off", spellcheck: "false"}),
       user: el("input", {value: "admin", autocomplete: "off"}),
       pw: el("input", {type: "password", autocomplete: "new-password", required: true}),
-      name: el("input", {placeholder: "необязательно — по умолчанию имя того хоста"}),
-      fp: el("input", {placeholder: "необязательно — AB:CD:… со страницы того хоста (настройка)"})};
+      name: el("input", {placeholder: "как у того хоста", autocomplete: "off"}),
+      fp: el("input", {placeholder: "AB:CD:… — со страницы того хоста", autocomplete: "off", spellcheck: "false", class: "mono"})};
     const res = el("span", {class: "res"});
     const submit = el("button", {type: "submit", class: "primary"}, "Присоединить");
     const form = el("form", {class: "form"},
-      el("p", {class: "muted", text: "На том хосте уже стоит PCS (bash <(curl …/install.sh)) и открыт порт 666. Логин и пароль — его панели: " +
-        "нужны один раз, хаб получит свой токен и дальше ходит только по HTTPS к сертификату того хоста."}),
-      el("label", {}, "Адрес хоста", f.addr), el("div", {class: "row3"}, el("label", {}, "Логин панели", f.user), el("label", {}, "Пароль панели", f.pw),
-        el("label", {}, "Имя здесь", f.name)),
-      el("label", {}, "Отпечаток сертификата (проверить, что это он)", f.fp), el("div", {class: "bar"}, submit, res));
+      el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Тот хост"}),
+        el("label", {}, "Адрес — порт 666 по умолчанию", f.addr),
+        el("div", {class: "row3"}, el("label", {}, "Логин его панели", f.user), el("label", {}, "Пароль его панели", f.pw), el("label", {}, "Имя здесь", f.name))),
+      el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Проверка"}),
+        el("label", {}, "Отпечаток сертификата — необязательно, но так надёжнее", f.fp)),
+      el("div", {class: "fs bar-end"}, submit, res));
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const r = await act(submit, res, () => POST("/api/nodes/join", {addr: f.addr.value, user: f.user.value, password: f.pw.value,
@@ -1667,7 +2078,19 @@
       f.pw.value = "";
       if (r && r.ok) { await refreshNodes(); location.hash = "#/n/" + encodeURIComponent(r.data.name); }
     });
-    return {kind: "join", el: el("div", {}, el("h1", {text: "Присоединить хост"}), form), update() { document.title = "Присоединить хост — PCS"; }};
+    const cmd = "bash <(curl -fsSL https://raw.githubusercontent.com/Tovarish666/pcs/main/install.sh)";
+    const aside = el("aside", {class: "aside-card"}, el("div", {class: "aside-t", text: "Как это работает"}),
+      planList([["На том хосте стоит PCS", true, "Ubuntu-VPS или Proxmox; установка — одной командой:"]]),
+      el("div", {class: "cmd"}, el("code", {text: cmd}), ibtn("copy", "скопировать команду", async () => {
+        const ok = await copy(cmd);
+        toast(ok ? "Команда скопирована" : "Не вышло — выделите и Ctrl+C", ok ? "ok" : "bad");
+      }, "ghost")),
+      planList([["Открыт порт 666", true, "панель того хоста; хаб ходит только по HTTPS"],
+        ["Логин и пароль — один раз", true, "дальше у хаба свой токен к тому хосту"],
+        ["Хост появится в дереве слева", true, "его ВМ и модемы — как свои"]]));
+    const ph = pageHead({});
+    ph.set("Присоединить хост", ["управлять другим хостом PCS отсюда"]);
+    return {kind: "join", el: el("div", {}, ph.el, el("div", {class: "split"}, form, aside)), update() { document.title = "Присоединить хост — PCS"; }};
   }
 
 
@@ -1720,29 +2143,45 @@
   }
   function route() {
     const r = parse();
+    S.route = r;
+    document.body.classList.remove("side-open");
     const same = S.page && (S.page.node || null) === (r.node || null) && S.page.kind === r.kind &&
       (r.kind === "host" || (r.kind === "vm" && S.page.id === r.id));
-    if (same) { S.page.show(r.tab); renderTree(); return; }
+    if (same) { S.page.show(r.tab); renderTree(); renderHeader(); return; }
     if (S.page && S.page.dispose) S.page.dispose();
     const X = ctx(r.node);
     const page = r.kind === "vm" ? pageVm(X, r.id) : r.kind === "create" ? pageCreate(X) : r.kind === "job" ? pageJob(X, r.id)
       : r.kind === "join" ? pageJoin() : pageHost(X);
     S.page = page;
-    $("#main").replaceChildren(page.el);
+    $("#main").replaceChildren(el("div", {class: "page page-in"}, page.el));
     if (page.update) page.update();
     if (page.show) page.show(r.tab);
     renderTree();
+    renderHeader();
     $("#main").scrollTop = 0;
   }
 
+  // Обзор хаба. Последний удачный — в localStorage: при входе дерево и шапки рисуются сразу,
+  // а свежие данные приходят следом (раньше экран ждал опрос всех ВМ — до 20 с).
+  const OV_KEY = "pcs-ov";
+  function ovCache(v) {
+    try {
+      if (v === undefined) { const x = JSON.parse(localStorage.getItem(OV_KEY) || "null"); return x && x.host ? x : null; }
+      localStorage.setItem(OV_KEY, JSON.stringify(v));
+    } catch (e) { return null; }
+    return null;
+  }
   let refreshing = null;
   function refresh() {
     if (refreshing) return refreshing;
     refreshing = (async () => {
       const r = await GET("/api/overview");
-      if (r.ok) { S.ov = r.data; S.ovErr = null; } else S.ovErr = "Хаб: " + r.error;
+      if (r.ok) { S.ov = r.data; S.ovErr = null; S.ovStale = !!(r.data && r.data.stale); ovCache(r.data); }
+      else S.ovErr = "Хаб: " + r.error;
       renderHeader(); renderTree();
       if (S.page && S.page.update) S.page.update();
+      // хаб отдал сохранённое и обновляет в фоне — спросить ещё раз вскоре
+      if (S.ovStale) setTimeout(() => refresh(), 2500);
     })().finally(() => { refreshing = null; });
     return refreshing;
   }
@@ -1764,14 +2203,17 @@
 
   async function boot() {
     themeBtn();
+    treeSearch();
+    const cached = ovCache();
+    if (cached) { S.ov = cached; S.ovStale = true; }
+    renderHeader(); renderTree();
     const r = await GET("/api/session");
     if (!r.ok) return;
     S.session = r.data;
     $("#logout").addEventListener("click", async () => { await POST("/api/logout", {}); location.href = "/login"; });
-    renderHeader();
-    await refresh();
     window.addEventListener("hashchange", route);
-    route();
+    route();                                 // страница — сразу, данные дотянутся
+    refresh();
     poller(10000, refresh).start();
     refreshNodes();
     poller(15000, refreshNodes).start();
