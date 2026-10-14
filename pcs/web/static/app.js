@@ -1293,6 +1293,42 @@
     const dirtyEl = el("span", {class: "problems"});
     const pill = el("span", {class: "pill"}, el("span", {class: "dot"}), el("span", {text: "3proxy: …"}));
     const engineEl = el("span", {class: "muted"});
+    // Выключатель: modlink запускается только по явному «включить»; выключен — ни 3proxy, ни демона,
+    // ни одного порта modlink в ss -tulpn. Таблицу можно править и применять и выключенной.
+    let isOn = null;
+    const swT = el("b", {text: "modlink"});
+    const swSub = el("span", {class: "muted", text: "…"});
+    const swRes = el("span", {class: "res"});
+    const sw = el("button", {type: "button", class: "switch", role: "switch", "aria-checked": "false", "aria-label": "modlink включён",
+      title: "включить или выключить modlink: 3proxy и демон", onclick: () => power()}, el("span", {class: "knob", "aria-hidden": "true"}));
+    const powerBar = el("div", {class: "ml-power"}, sw, el("div", {class: "ml-power-t"}, swT, swSub), swRes);
+    function showPower(d) {
+      if (d.on === undefined) {                 // старый modlink без выключателя — как раньше
+        powerBar.hidden = true; pill.hidden = false;
+        return;
+      }
+      powerBar.hidden = false; pill.hidden = true;
+      isOn = !!d.on;
+      sw.setAttribute("aria-checked", String(isOn));
+      powerBar.classList.toggle("on", isOn);
+      const st = (x) => x === "active" ? "работает" : x || "—";
+      swT.textContent = isOn ? "modlink включён" : "modlink выключен";
+      swSub.textContent = isOn ? "3proxy: " + st(d.proxy) + " · демон: " + st(d.daemon)
+        : "3proxy и демон не запущены, портов modlink нет — таблицу можно править";
+    }
+    async function power() {
+      const want = !isOn;
+      if (!want && !window.confirm("Выключить modlink (" + where + ")? 3proxy и демон остановятся — все прокси и ссылки modlink " +
+          "перестанут отвечать. Таблица и настройки останутся.")) return;
+      sw.disabled = true;
+      setRes(swRes, "run", want ? "включаю…" : "выключаю…");
+      const r = await X.run(id, "modlink", [want ? "on" : "off"]);
+      sw.disabled = false;
+      if (!r.ok) { setRes(swRes, "err", "Ошибка: " + r.error); return; }
+      setRes(swRes, "", "");
+      toast("modlink " + (want ? "включён" : "выключен") + " · " + where, want ? "ok" : "info");
+      await pollStatus();
+    }
     const cnt = el("span", {class: "muted"});
     const tbl = el("div", {class: "tbl-wrap ml-rows"});
     let orig = [], states = {}, edits = {}, added = [], deleted = new Set(), revealed = {}, opened = new Set();
@@ -1632,6 +1668,7 @@
       if (St && St.ok && St.data && typeof St.data === "object") {
         for (const x of rowsOf(St.data)) if (x && x.id != null) states[x.id] = x;
         if (!Array.isArray(St.data)) {
+          showPower(St.data);
           const up = St.data.proxy === "active";
           pill.className = "pill"; pill.firstChild.className = "dot " + (up ? "ok" : "bad");
           pill.lastChild.textContent = "3proxy: " + (up ? "работает" : St.data.proxy || "—") + " · демон: " + (St.data.daemon === "active" ? "работает" : St.data.daemon || "—");
@@ -1706,7 +1743,8 @@
         del: [...deleted],
         set: Object.entries(edits).filter(([k]) => !deleted.has(Number(k)) && !deleted.has(k)).map(([k, f]) => ({id: Number(k), fields: f})),
         add: added.map((a) => a.fields), apply: true};
-      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/save", payload), "Применено — 3proxy перечитал конфиг");
+      const r = await act(e.target, res, () => X.POST("/targets/" + id + "/modlink/save", payload),
+        isOn === false ? "Применено — заработает после включения modlink" : "Применено — 3proxy перечитал конфиг");
       if (r && !r.ok && r.data && r.data.steps) {
         out.textContent = r.data.steps.map((s) => (s.ok ? "✓ " : "✗ ") + s.what + (s.error ? ": " + s.error : "")).join("   ");
       }
@@ -1728,8 +1766,9 @@
       showText((which === "3proxy" ? "Логи 3proxy" : "Логи modlink") + " · " + where, ((x.data && x.data.lines) || []).join("\n") || "пусто");
     }, "журналы служб");
 
+    powerBar.hidden = true;
     const root = el("div", {}, legacyBox,
-      el("div", {class: "toolbar"}, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
+      el("div", {class: "toolbar"}, powerBar, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
       netCard,
       el("div", {class: "sec-head"}, el("h2", {text: "Модемы"}), cnt, el("span", {class: "spacer"}), res),
       el("div", {class: "toolbar"}, bAdd, bRange, bIf, copyMenu, bTbl, logsMenu, el("span", {class: "spacer"}),
@@ -1746,13 +1785,14 @@
   }
 
   const ML_STATE = {ok: ["ok", "работает"], warn: ["warn", "модем/выход"], broken: ["bad", "сломан"],
-    disabled: ["", "выключен"], pending: ["info", "ждёт «Применить»"]};
+    disabled: ["", "выключен"], pending: ["info", "ждёт «Применить»"], off: ["", "modlink выключен"]};
   const mlDot = (st) => st ? (ML_STATE[st.state] || ["bad"])[0] : "";
   function mlStateText(st) {
     if (!st) return "";
     const t = [(ML_STATE[st.state] || [, st.state])[1]];
-    if (st.port_up === false) t.push("порт " + (st.port || "") + " не слушает");
-    if (st.trigger_up === false) t.push("порт управления не слушает" + (st.trigger_error ? ": " + st.trigger_error : ""));
+    const idle = st.state === "off" || st.state === "disabled";     // не слушает — так и задумано
+    if (st.port_up === false && !idle) t.push("порт " + (st.port || "") + " не слушает");
+    if (st.trigger_up === false && !idle) t.push("порт управления не слушает" + (st.trigger_error ? ": " + st.trigger_error : ""));
     if (st.wan_ip) t.push("внешний IP " + st.wan_ip + (st.wan_t ? " (" + new Date(st.wan_t * 1000).toLocaleTimeString("ru-RU") + ")" : ""));
     else if (st.wan_error) t.push("внешний IP: " + st.wan_error);
     if (st.iface) t.push("интерфейс " + st.iface);

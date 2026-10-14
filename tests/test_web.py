@@ -368,6 +368,15 @@ ml = d["data"]["list"]["data"]["rows"]
 check("modlink: строки §8 без паролей", len(ml) == 5 and all("password" not in x for x in ml)
       and {"id", "enabled", "name", "login", "port", "lan_ip", "modem_ip", "reconnect_port", "interval_min"} <= set(ml[0]))
 check("modlink: состояние строк из status", d["data"]["status"]["ok"] and d["data"]["status"]["data"]["rows"][0]["state"] == "ok")
+check("modlink: выключатель в status", d["data"]["status"]["data"].get("on") is True)
+r, d = P("/api/run", {"target": 2000, "part": "modlink", "args": ["off"]})
+r2, d2 = G("/api/targets/2000/modlink?only=status")
+st = d2["data"]["status"]["data"]
+check("modlink off: 3proxy и демон остановлены, включённые строки — off", d["ok"] and st["on"] is False
+      and st["proxy"] == "inactive" and st["daemon"] == "inactive" and st["rows"][0]["state"] == "off", (d, st))
+r, d = P("/api/run", {"target": 2000, "part": "modlink", "args": ["on"]})
+check("modlink on: снова работает", d["ok"] and d["data"]["on"] is True
+      and G("/api/targets/2000/modlink?only=status")[1]["data"]["status"]["data"]["rows"][0]["state"] == "ok", d)
 r, d = P("/api/targets/2000/modlink/reveal", {"id": 201})
 check("пароль — только по явному запросу", d["ok"] and d["data"]["password"] == fake_api.S[2000]["modlink"][0]["password"])
 r, d = P("/api/targets/2000/modlink/export")

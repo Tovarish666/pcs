@@ -281,6 +281,23 @@ def settings(path=None):
     return out
 
 
+def is_on(path=None):
+    """Выключатель modlink (config.json "on"). Включается только явно — `modlink on` (флажок в панели)
+    или переносом из modlink-linux. Выключен (по умолчанию) — 3proxy и демон остановлены: ни одного
+    порта modlink в `ss -tulpn`; таблицу можно править и применять — заработает после включения."""
+    c = jload(path or P.config, {})
+    return isinstance(c, dict) and c.get("on") is True
+
+
+def set_on(on, path=None):
+    path = path or P.config
+    c = jload(path, {})
+    c = c if isinstance(c, dict) else {}
+    c["on"] = bool(on)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    jsave(path, c, 0o600)
+
+
 def save_settings(path=None, **kw):
     """kw: base_port, lan_ip, wan_ip ("" или "auto" — определять самим), mode, traffic,
     access_log, wan_check, speedtest. → новые настройки."""

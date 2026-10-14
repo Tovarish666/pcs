@@ -7,6 +7,9 @@
 
 В modlink-linux `modlink.service` — это его sing-box (/usr/local/bin/sing-box). Такой юнит
 без явного `modlink migrate` не трогаем; перенос кладёт копию в /etc/modlink/legacy/.
+
+Выключатель (store.is_on): по умолчанию modlink выключен — оба юнита остановлены и выключены,
+порты свободны. Запускается только по `modlink on` (флажок в панели); `modlink off` — снова тишина.
 """
 import json
 import os
@@ -36,7 +39,7 @@ Wants=network-online.target
 [Service]
 ExecStart=%s %s daemon
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
+Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
 ProtectHome=yes
@@ -280,6 +283,7 @@ def apply(log, binary=None):
                    "modlink migrate --force --stop-panel (порты и пароли его строк — как были)")
     if not threeproxy.installed(binary or threeproxy.BIN):
         raise Fail("нет 3proxy %s — поставить: modlink setup" % threeproxy.VERSION)
+    on = store.is_on()
     rows = store.load()["proxies"]
     text = store.config3(rows, store.settings(), store.guard_extra())
     en = [r for r in rows if r["enabled"]]
@@ -291,6 +295,12 @@ def apply(log, binary=None):
                    % (", ".join(map(str, busy[:5])), who["id"]))
     dirs()
     warn = []
+    if not on:
+        wr(P.cfg3, text, 0o600)
+        jsave(P.applied, {"t": int(time.time()), "proxies": rows}, 0o600)
+        stop_all()
+        log("modlink выключен — таблица применена, но 3proxy и демон не запущены (включить: modlink on)")
+        return {"on": False, "enabled": len(en), "proxy": active(PROXY), "daemon": active(SVC), "warnings": []}
     reserve_ports({p for r in en for p in ports_of(r)}, log)
     if en:
         how = start_proxy(text, {r["port"] for r in en})
@@ -308,6 +318,7 @@ def apply(log, binary=None):
                         % (r["id"], r["lan_ip"]))
     ours = owner(SVC) == "ours"
     if ours:
+        systemctl("enable", SVC)
         systemctl("reload-or-restart", SVC)
     elif owner(SVC) == "legacy":
         warn.append("modlink.service — от старого modlink-linux: ссылки и таймеры не работают; перенос: modlink migrate")
@@ -320,7 +331,44 @@ def apply(log, binary=None):
             warn.append("порт управления %s: не поднят — %s" % (rid, t.get("error") or "?"))
     for w in warn:
         log("⚠ " + w)
-    return {"enabled": len(en), "proxy": active(PROXY), "daemon": active(SVC), "warnings": warn}
+    return {"on": True, "enabled": len(en), "proxy": active(PROXY), "daemon": active(SVC), "warnings": warn}
+
+
+def stop_all():
+    """Выключено: ни 3proxy, ни демона (только своих юнитов — чужой modlink-linux не трогаем);
+    свои порты — из резерва. → что остановили."""
+    out = []
+    for name in (PROXY, SVC):
+        if owner(name) == "ours":
+            if active(name) not in ("inactive", "unknown"):
+                out.append(name)
+            systemctl("disable", "--now", name)
+    reserve_ports(set())
+    return out
+
+
+def turn_on(log, binary=None):
+    """`modlink on`: включить и запустить по уже применённой таблице (правки не применяет)."""
+    if owner(SVC) == "legacy":
+        raise Fail("на машине старый modlink-linux: его modlink.service держит порты прокси. "
+                   "Включать — переносом: modlink migrate --dry-run, затем modlink migrate --force --stop-panel")
+    store.set_on(True)
+    res = setup(log, binary=binary)
+    rows = applied_rows()
+    n = len([r for r in rows if r["enabled"]])
+    log("modlink включён: 3proxy %s, демон %s%s" % (res["proxy"], res["daemon"],
+        "" if n else " — включённых строк нет: 3proxy поднимется после «Применить»"))
+    if pending(store.load()["proxies"], rows):
+        log("⚠ есть неприменённые правки таблицы — modlink apply")
+    return {"on": True, "enabled": n, "proxy": res["proxy"], "daemon": res["daemon"], "warnings": res["warnings"]}
+
+
+def turn_off(log):
+    """`modlink off`: остановить и выключить 3proxy и демон; таблица и настройки остаются."""
+    store.set_on(False)
+    was = stop_all()
+    log("modlink выключен: %s" % ("остановлены " + ", ".join(was) if was else "и так ничего не работало"))
+    return {"on": False, "stopped": was, "proxy": active(PROXY), "daemon": active(SVC)}
 
 
 def drop_singbox(log):
@@ -337,7 +385,7 @@ def drop_singbox(log):
 def resync(log, binary=None):
     """После обновления кода: конфиг из уже применённого, если генератор поменялся. Правки не применяет."""
     rows = applied_rows()
-    if not rows:
+    if not rows or not store.is_on():
         return False
     text = store.config3(rows, store.settings(), store.guard_extra())
     en = [r for r in rows if r["enabled"]]
@@ -393,15 +441,20 @@ def setup(log, takeover=False, binary=None):
     if changed:
         systemctl("daemon-reload")
     drop_singbox(log)
-    resync(log, binary)
-    if owner(SVC) == "ours":
-        systemctl("enable", SVC)
-        systemctl("restart", SVC)
+    if store.is_on():
+        resync(log, binary)
+        if owner(SVC) == "ours":
+            systemctl("enable", SVC)
+            systemctl("restart", SVC)
+    else:
+        stop_all()
+        log("modlink выключен — 3proxy и демон не запущены, порты свободны (включить: modlink on)")
     if active(PANEL) == "active":
         warn.append("работает старая панель modlink-panel (:5000) — не трогаю")
     for w in warn:
         log("⚠ " + w)
-    return {"3proxy": binary or threeproxy.BIN, "daemon": active(SVC), "proxy": active(PROXY), "warnings": warn}
+    return {"3proxy": binary or threeproxy.BIN, "on": store.is_on(), "daemon": active(SVC), "proxy": active(PROXY),
+            "warnings": warn}
 
 
 def uninstall(log, purge=False):
@@ -468,6 +521,7 @@ def migrate(log, src=None, stop_panel=False, force=False, dry_run=False, binary=
         save_ext_ip(ext_ip)
     if rows and "base_port" not in jload(P.config, {}):
         store.save_settings(base_port=min(r["port"] for r in rows))     # базовый порт — как был
+    store.set_on(True)              # перенос — явное распоряжение: прокси modlink-linux работают и дальше
     s = setup(log, takeover=True, binary=binary)
     a = apply(log, binary=binary)
     panel = active(PANEL)
@@ -493,6 +547,7 @@ def status():
     doc = store.load()
     applied = {r["id"]: r for r in applied_rows()}
     addrs, lst = local_addrs(), listening()
+    on = store.is_on()
     st = jload(P.state, {})
     trig, nxt = st.get("triggers", {}), st.get("next", {})
     checks = jload(P.checks, {})
@@ -515,6 +570,8 @@ def status():
              "speed": chk.get("speed")}
         if not r["enabled"]:
             e["state"] = "disabled"
+        elif not on:
+            e["state"] = "off"
         elif not a or not a["enabled"]:
             e["state"] = "pending"
         elif (addrs and not e["iface"]) or e["port_up"] is False:
@@ -525,7 +582,7 @@ def status():
             e["state"] = "ok"
         rows.append(e)
     s = store.settings()
-    out = {"proxy": active(PROXY), "daemon": active(SVC), "unit": owner(SVC), "engine": "3proxy %s" % threeproxy.VERSION,
+    out = {"on": on, "proxy": active(PROXY), "daemon": active(SVC), "unit": owner(SVC), "engine": "3proxy %s" % threeproxy.VERSION,
            "mode": s["mode"], "traffic": s["traffic"],
            "pending": pending(doc["proxies"], list(applied.values())), "rows": rows}
     if out["unit"] == "legacy" or os.path.exists(unit_path(PANEL)):

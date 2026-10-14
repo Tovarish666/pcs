@@ -617,9 +617,12 @@ open(os.path.join(store.P.units, "modlink-panel.service"), "w").write("[Service]
 ran = []
 
 
+SVCST = {}                                         # is-active по юнитам; нет в словаре — active
+
+
 def fake_sh(*c, **k):
     ran.append(c)
-    out = "active\n" if c[:2] == ("systemctl", "is-active") else ""
+    out = SVCST.get(c[2], "active") + "\n" if c[:2] == ("systemctl", "is-active") else ""
     return types.SimpleNamespace(stdout=out, stderr="", returncode=0)
 
 
@@ -651,6 +654,7 @@ try:
     if True:
         res = system.migrate(lambda m: None, binary=sbb)
         doc = store.load()
+        check("migrate — явное распоряжение: modlink включён", store.is_on())
         check("migrate: таблица перенесена, порты и пароли те же",
               [(r["port"], r["password"]) for r in doc["proxies"]][:2] == [(20000, "secret81"), (20002, "fromrunning")])
         check("migrate: старый sing-box остановлен, его юнит — в legacy/",
@@ -707,6 +711,13 @@ try:
     check("apply: порт занят кем-то другим — отказ до записи конфига",
           "10002" in (fails(system.apply, lambda m: None, binary=sbb) or "") and not os.path.exists(store.P.cfg3))
     store.PROBE[0] = lambda p: True
+    check("по умолчанию modlink выключен", not store.is_on())
+    ran.clear()
+    res = system.apply(lambda m: None, binary=sbb)
+    check("apply у выключенного: таблица применена, но 3proxy и демон не запущены и не перечитаны",
+          res["on"] is False and len(system.applied_rows()) == 2 and os.path.exists(store.P.cfg3)
+          and not any(c[1:2] in (("restart",), ("reload",), ("enable",), ("reload-or-restart",)) for c in ran), ran)
+    store.set_on(True)
     if True:
         ran.clear()
         res = system.apply(lambda m: None, binary=sbb)
@@ -749,6 +760,32 @@ try:
               ("systemctl", "disable", "--now", "modlink-sb.service") in ran
               and not os.path.exists(os.path.join(store.P.units, "modlink-sb.service"))
               and system.owner("modlink-3proxy.service") == "ours", ran)
+
+        print("выключатель: modlink on / off:")
+        ran.clear()
+        res = system.turn_off(lambda m: None)
+        check("off: 3proxy и демон остановлены и выключены, флаг снят",
+              not store.is_on() and res["on"] is False and ("systemctl", "disable", "--now", "modlink-3proxy.service") in ran
+              and ("systemctl", "disable", "--now", "modlink.service") in ran, ran)
+        ran.clear()
+        res = system.setup(lambda m: None, binary=sbb)
+        check("setup у выключенного (как после pcs update): юниты на месте, но ничего не запущено",
+              res["on"] is False and system.owner("modlink.service") == "ours"
+              and ("systemctl", "disable", "--now", "modlink.service") in ran
+              and not any(c[1:2] in (("restart",), ("enable",), ("reload",)) for c in ran), ran)
+        SVCST.update({"modlink-3proxy.service": "inactive", "modlink.service": "inactive"})
+        ran.clear()
+        res = system.turn_on(lambda m: None, binary=sbb)
+        SVCST.clear()
+        check("on: флаг стоит, демон включён и запущен, 3proxy запущен по применённой таблице",
+              store.is_on() and res["on"] is True and ("systemctl", "enable", "modlink.service") in ran
+              and ("systemctl", "restart", "modlink.service") in ran
+              and any(c[:2] == ("systemctl", "enable") and "modlink-3proxy.service" in c for c in ran), ran)
+        store.set_on(False)
+        rc, out, err = run_cli("daemon")
+        check("демон у выключенного сразу выходит с 0 (юнит его не перезапускает)", rc == 0 and "выключен" in out
+              and "Restart=on-failure" in system.unit_daemon(), (rc, out, err))
+        store.set_on(True)
 finally:
     (system.sh, system.net.ensure_base, system.threeproxy.install, system.threeproxy.installed,
      system.time.sleep, system.listening) = real
@@ -795,6 +832,10 @@ check("set без «=» — понятная ошибка", rc == 1 and "пол�
 rc, out, err = run_cli("export", "--ip", "203.0.113.1")
 check("export печатает строки для клиента (прокси, ребут, реконнект)", rc == 0 and out.startswith("203.0.113.1:10000:modem201:")
       and "\thttp://203.0.113.1:10001/reboot\thttp://203.0.113.1:10002/reconnect" in out, out)
+rc, out, err = run_cli("status", "--json")
+check("status --json у выключенного: on=false, включённые строки — off", rc == 0 and json.loads(out)["data"]["on"] is False
+      and json.loads(out)["data"]["rows"][0]["state"] == "off", out)
+store.set_on(True)
 rc, out, err = run_cli("status", "--json")
 check("status --json: строки и состояния служб", rc == 0 and json.loads(out)["data"]["rows"][0]["state"] == "pending", out)
 rc, out, err = run_cli("log", "201", "--json")
