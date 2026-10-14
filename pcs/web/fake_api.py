@@ -778,11 +778,19 @@ def _ml(srv, a, inp):
             for r in rows:
                 r["password"] = None
         return {"proxies": rows, "pending": pend}
+    on = srv.get("ml_on", True)
+    if cmd in ("on", "off"):
+        if srv.get("legacy"):
+            raise Fail("на машине старый modlink-linux — включать переносом: modlink migrate --force --stop-panel")
+        srv["ml_on"] = cmd == "on"
+        st = "active" if srv["ml_on"] else "inactive"
+        return {"on": srv["ml_on"], "enabled": len([r for r in srv["modlink"] if r["enabled"]]), "proxy": st, "daemon": st,
+                "warnings": []}
     if cmd == "status":
         t, out = _now(), []
         for r in srv["modlink"]:
             applied = srv["ml_applied"].get(r["id"]) == r
-            st = "pending" if not applied else "disabled" if not r["enabled"] else "ok"
+            st = "disabled" if not r["enabled"] else "off" if not on else "pending" if not applied else "ok"
             out.append({"id": r["id"], "name": r["name"], "enabled": r["enabled"], "applied": applied, "state": st,
                         "port": r["port"], "port_up": None if st == "pending" else st == "ok", "lan_ip": r["lan_ip"],
                         "iface": "eth%d" % (r["id"] % 100), "reconnect_port": r["reconnect_port"],
@@ -795,11 +803,11 @@ def _ml(srv, a, inp):
                         "wan_ip": _ml_ip(r["id"]) if st == "ok" and st_["wan_check"] else None,
                         "wan_t": t - 1200 if st == "ok" else None, "wan_error": None,
                         "speed": srv["ml_speed"].get(r["id"])})
-        base = {"daemon": "active", "engine": "3proxy 1.0.0", "mode": st_["mode"], "traffic": st_["traffic"],
-                "pending": pend, "rows": out}
+        base = {"on": on, "daemon": "active" if on else "inactive", "engine": "3proxy 1.0.0", "mode": st_["mode"],
+                "traffic": st_["traffic"], "pending": pend, "rows": out}
         if srv.get("legacy"):
             return dict(base, proxy="inactive", unit="legacy", panel="active")
-        return dict(base, proxy="active", unit="ours")
+        return dict(base, proxy="active" if on else "inactive", unit="ours")
     if cmd == "add":
         noprot = "--no-protect" in a
         a = [x for x in a if x != "--no-protect"]
@@ -912,8 +920,8 @@ def _ml(srv, a, inp):
     if cmd == "apply":
         srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
         srv["ml_pending"] = False
-        return {"enabled": len([r for r in srv["modlink"] if r["enabled"]]), "proxy": "active", "daemon": "active",
-                "warnings": []}
+        return {"on": on, "enabled": len([r for r in srv["modlink"] if r["enabled"]]), "proxy": "active" if on else "inactive",
+                "daemon": "active" if on else "inactive", "warnings": []}
     if cmd == "test":
         r = _ml_find(srv, a[1])
         if not r["enabled"]:

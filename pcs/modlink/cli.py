@@ -1,5 +1,8 @@
 """modlink — из сетевого интерфейса прокси (PCS). Движок — 3proxy: HTTP и SOCKS5 (с UDP) на одном порту.
 
+  modlink on | off                        включить / выключить modlink целиком. По умолчанию выключен:
+                                          3proxy и демон не запущены, портов modlink в ss -tulpn нет.
+                                          on — запуск по применённой таблице; off — остановить всё
   modlink list [--show-pass]              таблица прокси
   modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
               [--modem-ip IP] [--reboot-port N|auto|0] [--reconnect-port N|auto|0]
@@ -34,7 +37,7 @@
   modlink migrate [--from DIR] [--dry-run] [--force] [--stop-panel]   из modlink-linux
   modlink setup | uninstall --yes [--purge] | daemon | version
 
-  Правки таблицы вступают в силу после `modlink apply`.
+  Правки таблицы вступают в силу после `modlink apply` (и только у включённого modlink).
   --json у любой команды: {"ok": true, "data": …} или {"ok": false, "error": "…"}.
   Пароль — `-`: прочитать из stdin (не светить в командной строке).
 """
@@ -107,7 +110,7 @@ def parser():
     c = sub.add_parser("logs")
     c.add_argument("which", nargs="?", choices=("3proxy", "modlink"), default="3proxy")
     c.add_argument("-n", type=int, default=200)
-    for name in ("apply", "status", "setup", "daemon", "version"):
+    for name in ("apply", "status", "setup", "daemon", "version", "on", "off"):
         sub.add_parser(name)
     c = sub.add_parser("export")
     c.add_argument("--ip")
@@ -320,8 +323,19 @@ def cmd_apply(a):
         return 0, system.apply(log)
 
 
+def cmd_on(a):
+    with edit():
+        return 0, system.turn_on(log)
+
+
+def cmd_off(a):
+    with edit():
+        return 0, system.turn_off(log)
+
+
 def cmd_status(a):
     s = system.status()
+    say("  modlink: %s" % ("включён" if s["on"] else "ВЫКЛЮЧЕН — 3proxy и демон не запущены (включить: modlink on)"))
     say("  %s (modlink-3proxy): %s    демон (modlink): %s%s" % (
         s["engine"], s["proxy"], s["daemon"], "" if s["unit"] != "legacy" else "  — юнит от старого modlink-linux: modlink migrate"))
     if "panel" in s:
@@ -502,7 +516,7 @@ def cmd_migrate(a):
 def cmd_setup(a):
     with edit():
         res = system.setup(log)
-    say("  3proxy: %s, демон: %s" % (res["proxy"], res["daemon"]))
+    say("  modlink %s; 3proxy: %s, демон: %s" % ("включён" if res["on"] else "выключен", res["proxy"], res["daemon"]))
     return 0, res
 
 
@@ -515,6 +529,9 @@ def cmd_uninstall(a):
 
 def cmd_daemon(a):
     from .daemon import Daemon
+    if not store.is_on():           # выключен — демону делать нечего (юнит его и не запускает)
+        say("  modlink выключен — демон не нужен (включить: modlink on)")
+        return 0, None
     return Daemon().run(), None
 
 
@@ -523,7 +540,7 @@ CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enabl
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
         "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log, "speedtest": cmd_speedtest, "logs": cmd_logs,
         "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,
-        "setup": cmd_setup, "uninstall": cmd_uninstall, "daemon": cmd_daemon}
+        "setup": cmd_setup, "uninstall": cmd_uninstall, "daemon": cmd_daemon, "on": cmd_on, "off": cmd_off}
 
 
 def main(argv=None):
