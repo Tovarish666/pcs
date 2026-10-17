@@ -60,8 +60,16 @@ class App:
         self.fail_delay, self.log_dir, self.quiet = fail_delay, log_dir, quiet
         self.sessions = auth.Sessions()
         self.throttle = throttle or auth.Throttle()
+        if fake:
+            from . import fake_api
+            br = fake_api.FakeBrowser()
+        elif callable(getattr(api, "browser_install", None)):
+            from . import browser
+            br = browser.Manager(jobs_start=api.browser_install)
+        else:
+            br = None
         self.panel = Panel(api, audit=lambda user, m, p: self.log("%s %s %s" % (user, m, p)),
-                           ov_path=None if fake else OV_CACHE)
+                           ov_path=None if fake else OV_CACHE, browser=br)
         self.terms = {}
         self.tlock = threading.Lock()
         self.cookie = "pcs_sid_%d" % port      # куки не различают порты — у фейка и панели свои
@@ -206,6 +214,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/ws/term":
                 return self._ws_term(u)
+            if path == "/ws/browser":
+                return self._ws_browser(u)
             if path == "/api/v1/ws/term":
                 return self._v1_ws(u)
             m = re.fullmatch(r"/ws/node/([a-z0-9-]{1,40})/term", path)
@@ -522,6 +532,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with app.tlock:
                 app.terms.pop(term.pid, None)
         app.log("%s терминал %s закрыт: %s" % (s["user"], t, why))
+
+
+    def _ws_browser(self, u):
+        """Окно браузера вкладок mp.space и ЮMoney: noVNC ↔ unix-сокет Xtigervnc этого сеанса."""
+        app = self.app
+        s = self._session()
+        if s is None:
+            return self._send(401, "нужен вход", "text/plain; charset=utf-8")
+        if not self._origin_ok(required=True):
+            return self._send(403, "чужой Origin", "text/plain; charset=utf-8")
+        h = self.headers
+        key = h.get("Sec-WebSocket-Key") or ""
+        if (h.get("Upgrade") or "").lower() != "websocket" or not ws.key_ok(key) \
+                or (h.get("Sec-WebSocket-Version") or "").strip() != "13":
+            return self._send(400, "нужен WebSocket 13", "text/plain; charset=utf-8")
+        br = app.panel.browser
+        q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
+        try:
+            if br is None:
+                raise Fail("браузер здесь недоступен")
+            k = br.key(q.get("kind", ""), q.get("target", ""), q.get("node") or None)
+            path = br.vnc_socket(k)
+            if not path:
+                raise Fail("браузер не запущен")
+            far = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            far.connect(path)
+        except (Fail, OSError) as e:
+            return self._send(409, str(e), "text/plain; charset=utf-8")
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ws.accept(key))
+        self.end_headers()
+        self.wfile.flush()
+        self.close_connection = True
+        br.seen(k, +1)
+        app.log("%s браузер %s: окно открыто" % (s["user"], k))
+        try:
+            why = ws.bridge_socket(self.connection, far)
+        finally:
+            br.seen(k, -1)
+            far.close()
+        app.log("%s браузер %s: окно закрыто (%s)" % (s["user"], k, why))
 
 
 def _relay(a, b, chunk=65536):

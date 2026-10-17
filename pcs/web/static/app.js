@@ -570,7 +570,8 @@
 
   // ── шапка и дерево ────────────────────────────────────────────────────────
   // Сверху — где я (хост › ВМ › вкладка) и общая сводка; слева — дерево хостов и их ВМ.
-  const TAB_NAMES = {"": "обзор", proxyveth: "proxyveth", modlink: "modlink", term: "терминал", settings: "настройка"};
+  const TAB_NAMES = {"": "обзор", net: "сетевые интерфейсы", modlink: "modlink", term: "терминал", settings: "управление",
+    mp: "mp.space", ym: "ЮMoney"};
   function renderHeader() {
     $("#h-port").textContent = S.session ? ":" + S.session.port : "";
     $("#h-user").textContent = S.session ? S.session.user : "";
@@ -688,7 +689,8 @@
   }
 
   // ── страница хоста: вкладки, как у ВМ (сам хост — тоже узел: proxyveth, modlink, mp.space) ──
-  const HTABS = [["", "обзор"], ["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
+  const HTABS = [["", "обзор"], ["net", "сетевые интерфейсы"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "управление"],
+    ["mp", "mp.space"], ["ym", "ЮMoney"]];
   const isPve = () => ctx(null).isPve();
 
   // Шапка страницы: имя, строка сведений, состояние и главные действия справа.
@@ -742,8 +744,9 @@
     const pl = plaqueHost(X);
     const tb = tabsBar(), tabsEl = tb.el, body = el("div"), panes = {};
     let cur = null;
-    const make = {"": () => hostOverview(X), proxyveth: () => pvTab(X, "host"), modlink: () => mlTab(X, "host"),
-      term: () => termTab(X, "host", true), settings: () => setTab(X, "host")};
+    const make = {"": () => hostOverview(X), net: () => netTab(X, "host"), modlink: () => mlTab(X, "host"),
+      term: () => termTab(X, "host", true), settings: () => setTab(X, "host"),
+      mp: () => browserTab(X, "host", "mp"), ym: () => browserTab(X, "host", "ym")};
     function show(tab) {
       if (!make[tab]) tab = "";
       if (cur === tab) return;
@@ -838,7 +841,7 @@
         kpi("ВМ работают", up, list_.length, up < list_.length ? "bad" : ""),
         kpi("Модемы в ВМ", ok, total, ok < total ? "warn" : "", {ok, total, broken}),
         kpi("Требуют внимания", probs, null, probs ? "warn" : ""),
-        h.installed === false ? el("div", {class: "kpi"}, el("div", {class: "k", text: "Настоящие модемы"}), el("div", {class: "v", style: "font-size:18px", text: "hivelink не стоит"}))
+        h.installed === false ? el("div", {class: "kpi"}, el("div", {class: "k", text: "Физические модемы"}), el("div", {class: "v", style: "font-size:18px", text: "hivelink не стоит"}))
           : kpi("Настоящие модемы", real),
         el("div", {class: "kpi"}, el("div", {class: "k", text: "ОЗУ хоста"}), el("div", {class: "v", style: "font-size:18px;margin-top:8px", text: gb(host.ram)}),
           ram.total_gb ? el("span", {class: "meter lg" + ((ram.used_gb / ram.total_gb) > .85 ? " warn" : ""), style: "--v:" + Math.min(1, (ram.used_gb || 0) / ram.total_gb).toFixed(3)}) : null));
@@ -959,7 +962,8 @@
   }
 
   // ── страница ВМ ───────────────────────────────────────────────────────────
-  const TABS = [["proxyveth", "proxyveth"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "настройка и управление"]];
+  const TABS = [["net", "сетевые интерфейсы"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "управление"],
+    ["mp", "mp.space"], ["ym", "ЮMoney"]];
 
   function plaque(X, id) {
     const term = link("", X.href("/vm/" + id + "/term"), "btn");
@@ -986,9 +990,10 @@
     const body = el("div");
     const panes = {};
     let cur = null;
-    const make = {proxyveth: () => pvTab(X, id), modlink: () => mlTab(X, id), term: () => termTab(X, id), settings: () => setTab(X, id)};
+    const make = {net: () => netTab(X, id), modlink: () => mlTab(X, id), term: () => termTab(X, id), settings: () => setTab(X, id),
+      mp: () => browserTab(X, id, "mp"), ym: () => browserTab(X, id, "ym")};
     function show(tab) {
-      if (!make[tab]) tab = "proxyveth";
+      if (!make[tab]) tab = "net";
       if (cur === tab) return;
       if (cur && panes[cur].hide) panes[cur].hide();
       if (cur) panes[cur].el.hidden = true;
@@ -996,7 +1001,7 @@
       panes[tab].el.hidden = false;
       panes[tab].el.classList.remove("pane-in"); void panes[tab].el.offsetWidth; panes[tab].el.classList.add("pane-in");
       cur = tab;
-      tb.set(TABS.map(([k, t]) => [X.href("/vm/" + id + (k === "proxyveth" ? "" : "/" + k)), t, k === tab]));
+      tb.set(TABS.map(([k, t]) => [X.href("/vm/" + id + (k === "net" ? "" : "/" + k)), t, k === tab]));
       if (panes[tab].show) panes[tab].show();
     }
     function update() {
@@ -1021,8 +1026,313 @@
     };
   }
 
+  // ── вкладка «Сетевые интерфейсы»: физические модемы (hivelink) и виртуальные (proxyveth) ─
+  // Обычно на сервере что-то одно, но бывает и то и другое — тогда всё в одном месте, без дублей.
+  // Раздел с модемами — сверху (физические первыми); пустой сжимается в строку внизу.
+  function netTab(X, id) {
+    const cnt = {phys: null, virt: null, physOk: 0, virtOk: 0};
+    const sum = el("div", {class: "net-sum"});
+    const hl = hlSection(X, id, {onCount: (n, ok) => { cnt.phys = n; cnt.physOk = ok; arrange(); }});
+    const pv = pvTab(X, id, {onCount: (n, ok) => { cnt.virt = n; cnt.virtOk = ok; arrange(); }});
+    const virtCount = el("span", {class: "count"});
+    const secPhys = el("section", {class: "net-sec"}, el("div", {class: "sec-head"}, el("h2", {text: "Физические модемы"}), hl.count,
+      el("span", {class: "spacer"}), hl.tools), hl.el);
+    const secVirt = el("section", {class: "net-sec"}, el("div", {class: "sec-head"}, el("h2", {text: "Виртуальные модемы"}), virtCount,
+      el("span", {class: "spacer"}), el("span", {class: "muted", text: "proxyveth"})), pv.el);
+    const root = el("div", {}, sum, secPhys, secVirt);
+    function arrange() {
+      virtCount.textContent = cnt.virt == null ? "" : String(cnt.virt);
+      const parts = [];
+      if (cnt.phys) parts.push(el("span", {}, el("b", {text: String(cnt.phys)}), " физических · работают " + cnt.physOk));
+      if (cnt.virt) parts.push(el("span", {}, el("b", {text: String(cnt.virt)}), " виртуальных · работают " + cnt.virtOk));
+      sum.replaceChildren(...parts);
+      sum.hidden = !(cnt.phys && cnt.virt);          // сводка нужна, только когда есть и те и другие
+      // пустой раздел — вниз и тише; физические, если есть, — первыми
+      const physFirst = cnt.phys || !cnt.virt;
+      if (physFirst && root.children[1] !== secPhys) root.insertBefore(secPhys, secVirt);
+      if (!physFirst && root.children[1] !== secVirt) root.insertBefore(secVirt, secPhys);
+      secPhys.classList.toggle("empty", cnt.phys === 0);
+      secVirt.classList.toggle("empty", cnt.virt === 0);
+    }
+    sum.hidden = true;
+    return {
+      el: root,
+      show() { hl.show(); pv.show(); },
+      hide() { hl.hide(); pv.hide(); },
+      dispose() { hl.dispose(); pv.dispose(); },
+      update() { pv.update(); },
+    };
+  }
+
+  // физические USB-модемы (hivelink): связь, сеть, данные; починка — кнопками в строке
+  const SIG = (v) => el("span", {class: "sig", title: v == null ? "сигнал неизвестен" : "сигнал " + v + " из 5", "aria-label": "сигнал " + (v ?? "?")},
+    [1, 2, 3, 4, 5].map((i) => el("i", {class: v != null && i <= v ? "on" : ""})));
+  function hlSection(X, id, opts) {
+    const count = el("span", {class: "count"});
+    const res = el("span", {class: "res"});
+    const info = el("div", {class: "srcline"});
+    const box = el("div");
+    let data = null, err = null, first = true;
+    const bWan = btn("Проверить внешние IP", async (e) => {
+      const b = e.currentTarget;
+      b.disabled = true;
+      setRes(res, "run", "внешний IP через каждый модем…");
+      await load(true);
+      b.disabled = false;
+      setRes(res, err ? "err" : "ok", err ? "Ошибка: " + err : "готово");
+    }, "", "hivelink status: внешний IP через каждый физический модем — до минуты");
+    const tools = el("span", {class: "row-tools"}, res, bWan);
+    async function act1(button, cmd, n, okText) {
+      const r = await act(button, res, () => X.run(id, "hivelink", [cmd, String(n)]), okText);
+      if (r && r.ok) toast("Модем " + n + ": " + okText);
+      load(false);
+    }
+    function draw() {
+      if (err) { box.replaceChildren(el("div", {class: "banner", style: "margin:0", text: "hivelink: " + err})); tools.hidden = true; return; }
+      if (!data) { box.replaceChildren(el("div", {class: "tbl-wrap"}, skelRows(2))); return; }
+      const rows = data.modems || [];
+      count.textContent = String(rows.length);
+      tools.hidden = !rows.length;
+      if (data.installed === false) {
+        box.replaceChildren(el("div", {class: "net-empty"}, "hivelink не установлен — физические USB-модемы здесь не обслуживаются. ",
+          btn("Установить hivelink", (e) => act(e.currentTarget, res, () => X.run(id, "hivelink", ["install"]), "Установлено").then(() => load(false)), "", "драйвер физических модемов Huawei"), res));
+        return;
+      }
+      info.replaceChildren(...[
+        el("span", {text: data.net === "on" ? "сеть модемов — своя (DHCP и маршруты)" : "сеть модемов — у mp.space, hivelink: USB и связь"}),
+        data.fix ? el("span", {text: "фикс приёма " + (data.fix.active ? "активен" : data.fix.needed ? "НЕ активен" : "не нужен")}) : null,
+        el("span", {class: "muted", text: "чинит сам: дозвон → откл/вкл → перерегистрация → перезагрузка"})].filter(Boolean));
+      if (!rows.length) {
+        box.replaceChildren(el("div", {class: "net-empty", text: "Физических модемов нет — USB-модемов Huawei hivelink не видит."}));
+        return;
+      }
+      const head = el("tr", {}, ["N", "интерфейс", "связь", "сеть", "данные", "внешний IP", "заметки"].map((t) => el("th", {text: t})),
+        el("th", {class: "acts-cell", text: "действия"}));
+      const tb = el("tbody", {}, rows.map((r) => {
+        const okc = r.conn === 901 && !(r.errors || []).length;
+        const cls = r.conn === 901 ? (okc ? "ok" : "warn") : r.conn == null ? "off" : "bad";
+        const note = (r.errors || []).join("; ");
+        const can = r.n != null;
+        return el("tr", {},
+          el("td", {class: "num", text: r.n == null ? "—" : String(r.n)}),
+          el("td", {class: "mono", title: (r.usb_id || "") + " · USB " + (r.usb_port || "?") + " · конфигурация " + (r.cfg || "?") + " · " + (r.driver || "без драйвера")},
+            el("div", {text: r.iface || "—"}), el("div", {class: "sub", text: "USB " + (r.usb_port || "?") + (r.driver ? " · " + r.driver : "")})),
+          el("td", {}, el("span", {class: "pill"}, el("span", {class: "dot " + cls}), r.conn_text || (r.mode === "cdrom" ? "Zero-CD" : "—"))),
+          el("td", {}, el("span", {class: "net-cell"}, SIG(r.signal), el("span", {text: r.net || "—"}))),
+          el("td", {text: r.dataswitch === 1 ? "вкл" : r.dataswitch === 0 ? "выкл" : "—"}),
+          el("td", {class: "mono", text: r.ext_ip || "—"}),
+          el("td", {class: "clip " + (note ? "problems" : "note"), title: note}, el("span", {text: note})),
+          el("td", {class: "acts-cell"}, el("span", {class: "ia"},
+            r.dataswitch === 0 && can ? ibtn("bolt", "включить мобильные данные (hivelink dataon " + r.n + ")", (e) => act1(e.currentTarget, "dataon", r.n, "данные включены"), "", "данные") : null,
+            can ? ibtn("redo", "переподключить: откл → вкл (hivelink reconnect " + r.n + ")", (e) => act1(e.currentTarget, "reconnect", r.n, "переподключён")) : null,
+            ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
+              (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }))));
+      }));
+      box.replaceChildren(info, el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, head), tb)));
+      if (first) { first = false; stagger(tb); }
+    }
+    async function load(ext) {
+      const r = await X.run(id, "hivelink", ext ? ["status"] : ["status", "--fast"]);
+      err = r.ok ? null : r.error;
+      data = r.ok ? r.data || {} : data;
+      draw();
+      const rows = (data && data.modems) || [];
+      if (opts.onCount) opts.onCount(err ? 0 : rows.length, rows.filter((x) => x.conn === 901 && !(x.errors || []).length).length);
+    }
+    const pl = poller(15000, () => load(false));
+    let loaded = false;
+    return {
+      el: box, count, tools,
+      show() { if (!loaded) { loaded = true; draw(); load(false); } pl.start(); },
+      hide() { pl.stop(); },
+      dispose() { pl.stop(); },
+    };
+  }
+
+  // ── вкладки mp.space и ЮMoney: браузер на одно окно через прокси ─────────────
+  // Firefox на этой машине (хабе), свой профиль на хост/ВМ и вкладку — куки, вход и вкладки
+  // сохраняются. Окно — через noVNC. Сверху прокси и внешний адрес через него (понятно, что
+  // прокси применился), под ним — кнопки-помогаторы на нужные страницы.
+  let RFBmod = null;
+  async function loadRFB() {
+    if (!RFBmod) RFBmod = (await import("/static/vendor/novnc/core/rfb.js")).default;
+    return RFBmod;
+  }
+  function browserTab(X, id, kind) {
+    const q = X.node ? "?node=" + encodeURIComponent(X.node) : "";
+    const B = "/api/browser/" + kind + "/" + id;
+    const GETb = () => GET(B + q), POSTb = (what, body) => POST(B + "/" + what + q, body || {});
+    let st = null, rfb = null, lastClip = "", shown = false;
+
+    // прокси
+    const ptype = el("select", {"aria-label": "тип прокси"}, el("option", {value: "http", text: "HTTP"}), el("option", {value: "socks5", text: "SOCKS5"}));
+    const pin = el("input", {class: "br-proxy-in", placeholder: "host:port:логин:пароль  ·  socks5://логин:пароль@host:port", autocomplete: "off", spellcheck: "false"});
+    const pres = el("span", {class: "res"});
+    const ipLine = el("div", {class: "br-ip"});
+    const bApply = btn("Применить", async (e) => {
+      if (!pin.value.trim()) { pin.focus(); setRes(pres, "err", "впиши прокси"); return; }
+      const r = await act(e.currentTarget, pres, () => POSTb("proxy", {proxy: pin.value.trim(), type: ptype.value}),
+        (d) => d.running ? "применён — браузер уже ходит через него (открытые страницы обнови F5)" : "применён");
+      if (r && r.ok) { pin.value = ""; await load(); }
+    }, "primary", "проверить прокси и сохранить: браузер пойдёт через него");
+    const bCheck = btn("Проверить", async (e) => {
+      const r = await act(e.currentTarget, pres, () => POSTb("check"), "адрес обновлён");
+      if (r && r.ok) await load();
+    }, "", "внешний адрес через сохранённый прокси прямо сейчас");
+    pin.addEventListener("keydown", (e) => { if (e.key === "Enter") bApply.click(); });
+    const proxyCard = el("div", {class: "br-card"},
+      el("div", {class: "br-row"}, el("span", {class: "br-lbl", text: "Прокси"}), ptype, pin, bApply, bCheck),
+      el("div", {class: "br-row br-row2"}, ipLine, pres));
+
+    // кнопки-помогаторы
+    const links = el("div", {class: "br-links"});
+    const bLinks = ibtn("edit", "настроить кнопки", () => editLinks(), "ghost icon");
+
+    // экран
+    const screenBox = el("div", {class: "br-screen"});
+    const sres = el("span", {class: "res"});
+    const sState = el("span", {class: "pill"});
+    const bPaste = btn("Вставить текст", async () => {
+      const t = await askText("Вставить в браузер", "Текст попадёт в буфер обмена браузера — дальше Ctrl+V в нужном поле", "", "");
+      if (t == null || !rfb) return;
+      rfb.clipboardPasteFrom(t);
+      rfb.focus();
+      toast("Текст в буфере браузера — Ctrl+V в нужном поле");
+    }, "", "буфер обмена: отсюда → в браузер");
+    const bCopy = btn("Скопировать из браузера", async () => {
+      if (!lastClip) { toast("В браузере ничего не скопировано — сначала Ctrl+C там", "info"); return; }
+      toast(await copy(lastClip) ? "Скопировано из браузера" : "Не вышло скопировать", "ok");
+    }, "", "буфер обмена: из браузера → сюда (что скопировано там Ctrl+C)");
+    const bFull = ibtn("out", "во весь экран", () => { if (screenBox.requestFullscreen) screenBox.requestFullscreen(); }, "ghost icon");
+    const bStop = btn("Закрыть браузер", async (e) => {
+      const r = await act(e.currentTarget, sres, () => POSTb("stop"), "закрыт — вход и вкладки сохранены");
+      if (r && r.ok) { disconnect(); await load(); }
+    }, "", "закрыть Firefox; профиль, куки и вкладки остаются");
+    const screenBar = el("div", {class: "br-bar"}, sState, el("span", {class: "spacer"}), sres, bPaste, bCopy, bFull, bStop);
+    const body = el("div");
+
+    async function startAnd(openUrl) {
+      if (!st || !st.running) {
+        setRes(sres, "run", "открываю браузер…");
+        const r = await POSTb("start");
+        if (!r.ok) { setRes(sres, "err", "Ошибка: " + r.error); return false; }
+        setRes(sres, "", "");
+        await load();
+      }
+      if (openUrl) {
+        const r = await POSTb("open", {url: openUrl});
+        if (!r.ok) toast("Не открылось: " + r.error, "bad");
+      }
+      return true;
+    }
+    function drawLinks() {
+      const L = (st && st.links) || [];
+      links.replaceChildren(el("span", {class: "br-lbl", text: "Перейти"}),
+        ...L.map(([name, url]) => btn([ic("out"), name], () => startAnd(url), "", url)), bLinks);
+    }
+    async function editLinks() {
+      const cur = ((st && st.links) || []).map(([n, u]) => n + " | " + u).join("\n");
+      const ta = el("textarea", {rows: 8, spellcheck: false}, cur);
+      ta.value = cur;
+      modal("Кнопки-помогаторы · " + (st ? st.title : ""), el("div", {}, el("p", {class: "note", text: "По строке на кнопку: «Название | https://адрес». Пусто — вернутся стандартные."}), ta),
+        [{text: "Отмена"}, {text: "Сохранить", cls: "primary", onclick: async (close) => {
+          const L = ta.value.split("\n").map((x) => x.split("|").map((y) => y.trim())).filter((x) => x[0] && x[1]).map((x) => [x[0], x.slice(1).join("|")]);
+          const r = await POSTb("links", {links: L});
+          if (!r.ok) { toast("Ошибка: " + r.error, "bad"); return; }
+          close();
+          await load();
+        }}]);
+    }
+    function drawIp() {
+      const c = st && st.check;
+      if (!st || !st.proxy) { ipLine.replaceChildren(el("span", {class: "muted", text: "прокси не задан — нужен " + (st ? st.want : "")})); return; }
+      const parts = [el("span", {class: "mono", text: st.proxy})];
+      if (c) {
+        parts.push(el("span", {}, "внешний адрес ", el("b", {class: "mono", text: c.ip})));
+        if (c.country) parts.push(el("span", {text: [c.cc, c.country, c.city].filter(Boolean).join(" · ")}));
+        if (c.region_ok === true) parts.push(el("span", {class: "tag ok"}, el("span", {class: "dot ok"}), st.want + " ✓"));
+        else if (c.region_ok === false) parts.push(el("span", {class: "tag bad"}, el("span", {class: "dot bad"}), "нужен " + st.want));
+        parts.push(el("span", {class: "muted", text: "проверено " + ago(c.t)}));
+      }
+      ipLine.replaceChildren(...parts);
+    }
+    function drawScreen() {
+      if (!st) { body.replaceChildren(el("div", {class: "br-screen br-skel"}, el("span", {class: "skel", style: "width:40%"}))); return; }
+      if (!st.installed) {
+        const jobs = el("div");
+        body.replaceChildren(el("div", {class: "br-empty"},
+          el("div", {class: "br-empty-t", text: "Браузер ещё не установлен на этом хосте"}),
+          el("p", {class: "muted", text: "Firefox ESR и виртуальный экран — около 300 МБ, пара минут. Ставится один раз на хост с панелью и служит всем вкладкам mp.space и ЮMoney."}),
+          el("div", {class: "bar"}, btn("Установить браузер", async (e) => {
+            const r = await act(e.currentTarget, sres, () => POST("/api/browser/install", {}), "ставлю…");
+            if (r && r.ok && r.data && r.data.job) jobs.replaceChildren(jobView(r.data.job, {title: "Установка браузера", onDone: () => load()}));
+          }, "primary"), sres), jobs));
+        return;
+      }
+      if (/став/.test(sres.textContent)) setRes(sres, "", "");
+      if (!st.running) {
+        disconnect();
+        body.replaceChildren(el("div", {class: "br-empty"},
+          el("div", {class: "br-empty-t", text: st.used ? "Браузер закрыт — сеанс сохранён" : "Браузер ещё не открывали"}),
+          el("p", {class: "muted", text: st.used ? "Куки, вход и вкладки лежат в профиле на хосте — откроется как было."
+            : "Свой профиль для этой вкладки: вход и куки будут сохраняться между запусками."}),
+          el("div", {class: "bar"}, btn("Открыть браузер", () => startAnd(null), "primary", st.proxy ? "" : "сначала прокси"), sres),
+          st.proxy ? null : el("p", {class: "problems", text: "Сначала прокси — без него браузер вышел бы в сеть с адреса сервера."})));
+        return;
+      }
+      sState.replaceChildren(el("span", {class: "dot ok"}), "работает · без зрителя закроется сам через " + st.idle_min + " мин");
+      if (body.firstChild !== screenBar) body.replaceChildren(screenBar, screenBox);
+      if (st.fake) { screenBox.replaceChildren(el("div", {class: "br-fake", text: "Фейковая панель: окна браузера нет. На настоящем хосте здесь Firefox через прокси."})); return; }
+      if (shown && !rfb) connect();
+    }
+    async function connect() {
+      if (rfb) return;
+      let RFB;
+      try { RFB = await loadRFB(); } catch (e) { screenBox.replaceChildren(el("div", {class: "banner", text: "noVNC не загрузился: " + e})); return; }
+      const qs = new URLSearchParams({kind, target: id});
+      if (X.node) qs.set("node", X.node);
+      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/browser?" + qs;
+      screenBox.replaceChildren();
+      rfb = new RFB(screenBox, url, {shared: true});
+      rfb.resizeSession = true;
+      rfb.scaleViewport = false;
+      rfb.focusOnClick = true;
+      rfb.background = "transparent";
+      rfb.addEventListener("connect", () => { setRes(sres, "", ""); rfb.focus(); });
+      rfb.addEventListener("clipboard", (e) => { lastClip = (e.detail && e.detail.text) || ""; });
+      rfb.addEventListener("disconnect", (e) => {
+        rfb = null;
+        if (!shown) return;
+        screenBox.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: "Окно отключилось"}),
+          el("div", {class: "bar"}, btn("Подключиться снова", () => load().then(() => connect()), "primary"))));
+        if (!(e.detail && e.detail.clean)) load();
+      });
+    }
+    function disconnect() {
+      if (rfb) { const r = rfb; rfb = null; try { r.disconnect(); } catch (e) { /* уже закрыт */ } }
+    }
+    async function load() {
+      const r = await GETb();
+      if (!r.ok) { body.replaceChildren(el("div", {class: "banner", text: "Ошибка: " + r.error})); return; }
+      st = r.data || {};
+      if (!pin.value && st.proxy_type) ptype.value = st.proxy_type;
+      drawIp(); drawLinks(); drawScreen();
+    }
+    const pl = poller(10000, load);
+    const K = kind === "mp" ? "mp.space: нужен европейский адрес — сайт открывается через прокси с ЕС-адресом" : "ЮMoney: нужен российский адрес; IP лучше не менять посреди работы";
+    const root = el("div", {class: "br"}, el("p", {class: "muted br-hint", text: K + ". Окно — обычный Firefox на хосте панели; вход и куки сохраняются."}),
+      proxyCard, links, body);
+    return {
+      el: root,
+      show() { shown = true; if (!st) { drawScreen(); load(); } else { load(); } pl.start(); },
+      hide() { shown = false; pl.stop(); disconnect(); },
+      dispose() { shown = false; pl.stop(); disconnect(); },
+    };
+  }
+
   // ── вкладка proxyveth ─────────────────────────────────────────────────────
-  function pvTab(X, id) {
+  function pvTab(X, id, opts) {
+    opts = opts || {};
     const info = el("div", {class: "srcline"});
     const res = el("span", {class: "res"});
     const extra = el("div");
@@ -1108,6 +1418,10 @@
       chips.hidden = !rows.length;
     }
     function renderRows() {
+      if (statusErr && /режим[^.]*не задан/i.test(statusErr)) {
+        tbl.replaceChildren(el("div", {class: "net-empty", text: "Виртуальных модемов нет — proxyveth здесь не настроен. Включить: «управление» → «Режим proxyveth»."}));
+        chips.hidden = true; return;
+      }
       if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: "Ошибка: " + statusErr})); chips.hidden = true; return; }
       renderChips();
       if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", style: "padding:16px", text: "Модемов нет — таблица пуста или не задана. «Таблица» → «Сменить ссылку» или «Править локально»."})); return; }
@@ -1173,12 +1487,13 @@
     }
     async function pollStatus() { apply(await X.GET("/targets/" + id + "/proxyveth?only=status")); }
     function apply(r) {
-      if (!r.ok) { statusErr = r.error; renderRows(); return; }
+      if (!r.ok) { statusErr = r.error; renderRows(); if (opts.onCount) opts.onCount(0, 0); return; }
       const st = r.data.status;
       if (r.data.source) source = r.data.source;
       statusErr = st && !st.ok ? st.error : null;
-      rows = st && st.ok ? rowsOf(st.data) : rows;
+      rows = st && st.ok ? rowsOf(st.data) : statusErr && /режим[^.]*не задан/i.test(statusErr) ? [] : rows;
       renderInfo(); renderRows();
+      if (opts.onCount) opts.onCount(rows.length, rows.filter((r) => r.state === "ok").length);
     }
 
     // редактор локальной копии таблицы
@@ -2174,11 +2489,12 @@
     let p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
     let node = null;
     if (p[0] === "n" && p[1]) { node = p[1]; p = p.slice(2); }
-    if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {node, kind: "vm", id: p[1], tab: p[2] || "proxyveth"};
+    const tabOf = (t) => t === "proxyveth" ? "net" : t;      // старые ссылки на вкладку proxyveth
+    if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {node, kind: "vm", id: p[1], tab: tabOf(p[2] || "net")};
     if (p[0] === "create") return {node, kind: "create"};
     if (p[0] === "job" && p[1]) return {node, kind: "job", id: p[1]};
     if (!node && p[0] === "join") return {kind: "join"};
-    if (p[0] === "host") return {node, kind: "host", tab: p[1] || ""};
+    if (p[0] === "host") return {node, kind: "host", tab: tabOf(p[1] || "")};
     return {node, kind: "host", tab: ""};
   }
   function route() {

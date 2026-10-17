@@ -342,6 +342,16 @@ def _job_part(p):
     return e.get("data")
 
 
+def browser_install():
+    """Браузер вкладок mp.space и ЮMoney (Firefox ESR, экран VNC) — на этот хост, заданием."""
+    return jobs.start("browser_install", {}, title="Браузер для вкладок mp.space и ЮMoney", target="host")
+
+
+def _job_browser_install(p):
+    from ..web import browser
+    return browser.install(log=lambda m: print("  " + m, flush=True))
+
+
 def _job_host_setup(p):
     d = srv.host_setup(mode=p.get("mode"))
     if d["failed"]:
@@ -350,5 +360,6 @@ def _job_host_setup(p):
 
 
 KINDS = {"create_server": _job_create, "mpspace": _job_mpspace, "update": srv.update, "part": _job_part,
-         "host_setup": _job_host_setup, "mpspace_host": srv.mpspace_host, "adopt": _job_adopt}
+         "host_setup": _job_host_setup, "mpspace_host": srv.mpspace_host, "adopt": _job_adopt,
+         "browser_install": _job_browser_install}
 summarize = node.summarize

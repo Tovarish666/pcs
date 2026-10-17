@@ -81,13 +81,13 @@ def net_text(code):
 
 
 def parse_status(text):
-    """Ответ /api/monitoring/status → {conn, net, signal, error}."""
+    """Ответ /api/monitoring/status → {conn, net, signal, sim, error}. sim — SimStatus: 1 — SIM на месте."""
     err = api_error(text)
     net = num(text, "CurrentNetworkTypeEx")
     if net is None:
         net = num(text, "CurrentNetworkType")
     return {"conn": num(text, "ConnectionStatus"), "net": net_text(net),
-            "signal": num(text, "SignalIcon"), "error": err}
+            "signal": num(text, "SignalIcon"), "sim": num(text, "SimStatus"), "error": err}
 
 
 def no_registration(code):
@@ -153,6 +153,30 @@ class Api:
 
     def dial(self, on=True):
         self.post("/api/dialup/dial", "<Action>%d</Action>" % (1 if on else 0))
+
+    def net_mode(self):
+        """Режим сети и диапазоны: (NetworkMode, NetworkBand, LTEBand); нет у прошивки — HiFail."""
+        text = self.get("/api/net/net-mode")
+        if api_error(text):
+            raise HiFail(error_text(api_error(text)))
+        return (xmlval(text, "NetworkMode") or "00", xmlval(text, "NetworkBand") or "3FFFFFFF",
+                xmlval(text, "LTEBand") or "7FFFFFFFFFFFFFFF")
+
+    def set_net_mode(self, mode, band, lte):
+        self.post("/api/net/net-mode", "<NetworkMode>%s</NetworkMode><NetworkBand>%s</NetworkBand>"
+                  "<LTEBand>%s</LTEBand>" % (mode, band, lte))
+
+    def reboot(self):
+        self.post("/api/device/control", "<Control>1</Control>")
+
+
+def reach(src, host="1.1.1.1", port=80, timeout=6):
+    """Ходит ли трафик через модем: TCP-соединение с адреса модема (без полезной нагрузки)."""
+    try:
+        socket.create_connection((host, port), timeout=timeout, source_address=(src, 0)).close()
+        return True
+    except OSError:
+        return False
 
 
 def probe(n, src, timeout=5):
