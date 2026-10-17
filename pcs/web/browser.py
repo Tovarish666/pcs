@@ -432,8 +432,16 @@ def installed():
 def install(log=print):
     """Пакеты браузера (≈300 МБ) и пользователь pcs-browser. Повторять можно."""
     from ..hivelink.common import apt_install
+    osr = ""
+    try:
+        with open("/etc/os-release") as f:
+            osr = f.read()
+    except OSError:
+        pass
+    if re.search(r"^ID=\"?ubuntu", osr, re.M):
+        raise BrowserFail("на Ubuntu Firefox ESR в apt нет (только snap) — браузер ставится на хост Proxmox/Debian")
     if not os.path.exists("/etc/debian_version"):
-        raise BrowserFail("браузер ставится на Debian/Proxmox/Ubuntu")
+        raise BrowserFail("браузер ставится на Debian/Proxmox")
     if not shutil.which("apt-get"):
         raise BrowserFail("нет apt-get")
     got = apt_install(list(PACKAGES), log=log)

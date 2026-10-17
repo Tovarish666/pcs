@@ -1368,6 +1368,7 @@
       load(false);
     }, "источник модемов");
     const bEdit = {set disabled(v) { tableMenu.querySelector("button").disabled = v; }};
+    const bar = el("div", {class: "toolbar"}, bSync, tests, allMenu, tableMenu, res);
 
     async function sync(force) {
       extra.replaceChildren();
@@ -1418,7 +1419,9 @@
       chips.hidden = !rows.length;
     }
     function renderRows() {
-      if (statusErr && /режим[^.]*не задан/i.test(statusErr)) {
+      const unset = !!(statusErr && /режим[^.]*не задан/i.test(statusErr));
+      info.hidden = bar.hidden = unset;          // не настроен — одна строка, без кнопок
+      if (unset) {
         tbl.replaceChildren(el("div", {class: "net-empty", text: "Виртуальных модемов нет — proxyveth здесь не настроен. Включить: «управление» → «Режим proxyveth»."}));
         chips.hidden = true; return;
       }
@@ -1557,7 +1560,7 @@
     }
 
     const pl = poller(10000, pollStatus);
-    const root = el("div", {}, info, el("div", {class: "toolbar"}, bSync, tests, allMenu, tableMenu, res), extra, editor, chips, tbl);
+    const root = el("div", {}, info, bar, extra, editor, chips, tbl);
     let loaded = false;
     return {
       el: root,

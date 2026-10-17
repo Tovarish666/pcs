@@ -1052,7 +1052,7 @@ class FakeBrowser:
                 "install_job": None, "running": x["running"], "proxy": self.b.masked(x["proxy"]),
                 "proxy_type": (x["proxy"] or {}).get("scheme"), "check": x["check"], "links": x["links"] or K["links"],
                 "idle_min": self.b.IDLE // 60, "profile": "/var/lib/pcs/browser/%s/profile" % k, "used": x["running"],
-                "fake": True}
+                "fake": not os.environ.get("PCS_FAKE_VNC")}
 
     def _check(self, k, up):
         _pause()
@@ -1112,7 +1112,12 @@ class FakeBrowser:
                              "  ✓ пакеты на месте", "  браузер готов: Mozilla Firefox 153.5.0esr"], done)}
 
     def vnc_socket(self, k):
-        return None
+        # для проверки окна: PCS_FAKE_VNC=host:port — настоящий VNC (например, проброшенный по ssh)
+        v = os.environ.get("PCS_FAKE_VNC")
+        if not v or not self._s(k)["running"]:
+            return None
+        h, _, p = v.rpartition(":")
+        return (h, int(p))
 
     def seen(self, k, delta):
         pass

@@ -556,8 +556,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             path = br.vnc_socket(k)
             if not path:
                 raise Fail("браузер не запущен")
-            far = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            far.connect(path)
+            if isinstance(path, tuple):         # фейк: проброшенный VNC по TCP
+                far = socket.create_connection(path, timeout=10)
+                far.settimeout(None)
+            else:
+                far = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                far.connect(path)
         except (Fail, OSError) as e:
             return self._send(409, str(e), "text/plain; charset=utf-8")
         self.send_response(101)
