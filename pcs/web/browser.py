@@ -530,7 +530,9 @@ def start(k, size=None):
            "-p", "User=" + USER, "-p", "Group=" + USER,
            "-p", "RuntimeDirectory=" + (RUNDIR % k)[5:], "-p", "RuntimeDirectoryMode=0700",
            "-p", "PrivateTmp=yes", "-p", "ProtectHome=yes", "-p", "ProtectSystem=strict",
-           "-p", "ReadWritePaths=" + h, "-p", "TimeoutStopSec=30", "-p", "KillMode=control-group",
+           # mixed: SIGTERM — только нашему процессу; он сам закрывает Firefox (тот сохраняет вкладки
+           # и куки), потом экран. control-group уронил бы экран одновременно с Firefox.
+           "-p", "ReadWritePaths=" + h, "-p", "TimeoutStopSec=30", "-p", "KillMode=mixed",
            "-p", "MemoryMax=3G", "-p", "Nice=5",
            "--setenv", "PYTHONPATH=" + root,
            sys.executable, "-m", "pcs.web.browser", "run", k, str(_display(k)), "%dx%d" % (w, hh)]
@@ -588,7 +590,8 @@ def run(k, display, size="1600x900"):
     rd = RUNDIR % k
     h = home(k)
     disp = ":%d" % int(display)
-    env = dict(os.environ, DISPLAY=disp, HOME=os.path.join(h, "home"), TZ=TZ, LANG="ru_RU.UTF-8",
+    # C.UTF-8 есть везде (ru_RU в системе может быть не собрана); язык Firefox — из его настроек
+    env = dict(os.environ, DISPLAY=disp, HOME=os.path.join(h, "home"), TZ=TZ, LANG="C.UTF-8",
                LANGUAGE="ru", MOZ_CRASHREPORTER_DISABLE="1", MOZ_DBUS_REMOTE="1", MOZ_ENABLE_WAYLAND="0",
                DBUS_SESSION_BUS_ADDRESS="unix:path=%s/bus" % rd, XDG_RUNTIME_DIR=rd)
     fw = Forward(os.path.join(rd, "proxy.sock"), conf_path(k))
@@ -604,13 +607,13 @@ def run(k, display, size="1600x900"):
     x = spawn([XVNC, disp, "-geometry", size, "-depth", "24", "-SecurityTypes", "None", "-rfbport", "-1",
                "-rfbunixpath", os.path.join(rd, "vnc.sock"), "-rfbunixmode", "0600", "-nolisten", "tcp",
                "-AlwaysShared", "-desktop", "PCS " + KINDS[kind_of(k)]["title"]])
-    for _ in range(100):
-        if os.path.exists("/tmp/.X11-unix/X%d" % int(display)) or x.poll() is not None:
+    for _ in range(100):                # экран готов, когда VNC открыл свой сокет
+        if os.path.exists(os.path.join(rd, "vnc.sock")) or x.poll() is not None:
             break
         time.sleep(0.1)
     spawn([WM, "-use_titlebar", "no"])
     profile = os.path.join(h, "profile")
-    first = not os.path.exists(os.path.join(profile, "sessionstore.jsonlz4"))
+    first = not os.path.exists(os.path.join(profile, "prefs.js"))      # профиль ещё не запускали
     start_url = [KINDS[kind_of(k)]["links"][0][1]] if first else []
     ff = spawn([FIREFOX, "--profile", profile, "--class", "pcs-browser"] + start_url)
     done = threading.Event()
