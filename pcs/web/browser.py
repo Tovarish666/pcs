@@ -44,7 +44,7 @@ FIREFOX = "firefox-esr"
 XVNC = "Xtigervnc"
 WM = "matchbox-window-manager"
 PACKAGES = ("firefox-esr", "firefox-esr-l10n-ru", "tigervnc-standalone-server", "matchbox-window-manager",
-            "xfonts-base", "fonts-dejavu-core", "fonts-liberation", "libgl1-mesa-dri", "dbus-daemon")
+            "xfonts-base", "fonts-dejavu-core", "fonts-liberation", "libgl1-mesa-dri", "dbus-daemon", "wmctrl")
 TZ = "Europe/Moscow"
 EUROPE = set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE GB CH NO IS LI "
              "MD RS ME MK AL BA AD MC SM VA".split())
@@ -411,6 +411,8 @@ def prefs(k):
         "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
         "toolkit.telemetry.reportingpolicy.firstRun": False,
         "browser.tabs.warnOnClose": False,
+        "browser.warnOnQuit": False,
+        "browser.sessionstore.max_resumed_crashes": 100,  # обрыв (свет, перезагрузка) — тоже вкладки как были
         "intl.accept_languages": "ru-RU, ru, en-US, en",
         "intl.locale.requested": "ru",
         "app.update.auto": False,
@@ -646,21 +648,27 @@ def run(k, display, size="1600x900"):
 
     threading.Thread(target=ctl, daemon=True).start()
 
-    def term(*_):
-        if ff.poll() is None:
-            ff.send_signal(signal.SIGTERM)          # Firefox сам сохраняет сеанс и куки
-
-    signal.signal(signal.SIGTERM, term)
-    signal.signal(signal.SIGINT, term)
-    while ff.poll() is None and x.poll() is None:
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    signal.signal(signal.SIGINT, lambda *_: stopping.set())
+    while ff.poll() is None and x.poll() is None and not stopping.is_set():
         try:
             ff.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+    # Закрыть по-хорошему: окно — через оконный менеджер, как крестиком. Так Firefox пишет
+    # сеанс (вкладки) и сбрасывает куки на диск; на SIGTERM он выходит наспех.
+    end = time.monotonic() + 20
+    while ff.poll() is None and x.poll() is None and time.monotonic() < end:
+        subprocess.run(["wmctrl", "-x", "-c", "pcs-browser"], env=env, capture_output=True, timeout=5)
+        try:
+            ff.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
     if ff.poll() is None:
         ff.send_signal(signal.SIGTERM)
         try:
-            ff.wait(timeout=15)
+            ff.wait(timeout=10)
         except subprocess.TimeoutExpired:
             ff.kill()
     done.set()
