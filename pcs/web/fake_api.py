@@ -82,6 +82,38 @@ def _modlink(sid, ns, count):
     return rows
 
 
+def _hl_modems(ns, bad=(), port="1-4"):
+    """Физические модемы (hivelink status): поля как у pcs.hivelink.status.ROW_KEYS."""
+    rows = []
+    for i, n in enumerate(ns):
+        ok = n not in bad
+        rows.append({"n": n, "iface": "enx0c5b8f27%04x" % n, "driver": "rndis_host", "usb_port": "%s.%d" % (port, i + 1),
+                     "usb_id": "12d1:14dc", "mode": "hilink", "cfg": "1/3", "addr": "192.168.%d.100" % n,
+                     "conn": 901 if ok else 902, "conn_text": "онлайн" if ok else "отключён", "dataswitch": 1,
+                     "net": "LTE" if ok else "3G", "signal": 4 if ok else 2, "ext_ip": None,
+                     "errors": [] if ok else ["связь: отключён"]})
+    return rows
+
+
+def _hl_status(srv, ext):
+    rows = copy.deepcopy(srv.get("hl_modems") or [])
+    for r in rows:
+        if ext and r["conn"] == 901:
+            r["ext_ip"] = _ml_ip(1000 + r["n"])
+    s = {"total": len(rows), "hilink": len(rows), "zerocd": 0, "stick": 0, "other": 0,
+         "with_addr": len(rows), "ok": len([r for r in rows if not r["errors"]])}
+    return {"version": VERSION, "installed": True, "net": "on", "virtual": len(srv.get("modems") or []), "usb": s,
+            "fix": {"active": True, "size": 16384, "needed": True, "dkms": True}, "modems": rows}
+
+
+def _hl_act(srv, cmd, n):
+    r = next((r for r in srv.get("hl_modems") or [] if str(r["n"]) == str(n)), None)
+    if not r:
+        raise Fail("модема N=%s нет среди настоящих — hivelink status" % n)
+    r.update(conn=901, conn_text="онлайн", net="LTE", signal=4, errors=[], dataswitch=1)
+    return {"n": r["n"], "done": True}
+
+
 def _server(sid, name, ip, mode, ns, bad=(), ml=0, cores=4, ram_gb=8, disk_gb=40):
     srv = {"id": sid, "name": name, "ip": ip, "state": "running", "mode": mode, "mpspace": "running",
            "cores": cores, "ram_gb": ram_gb, "disk_gb": disk_gb,
@@ -104,6 +136,8 @@ def reset():
             S[1000] = _server(1000, "server1", "192.168.88.5", "usb", list(range(201, 221)), ml=6,
                               cores=8, ram_gb=16, disk_gb=80)
             S[2000] = _server(2000, "pcs2000", "192.168.88.7", "usb", list(range(201, 206)), ml=5)
+            S[2000]["hivelink"] = True          # редкий случай: на одном сервере и физические, и виртуальные
+            S[2000]["hl_modems"] = _hl_modems([31, 32], bad=(32,))
             S[200] = _server(200, "LTEspace", "192.168.88.20", "gw",
                              [n for n in range(11, 102) if n != 88], bad=(57,), ml=3, cores=16, ram_gb=32,
                              disk_gb=120)
@@ -122,6 +156,8 @@ def reset():
             HML["modlink"] = _modlink("host", [1, 2], 2)
             HML["legacy"] = True    # как на живом хосте со старым modlink-linux
             HML["mpspace"] = None
+            HML["hivelink"] = True
+            HML["hl_modems"] = _hl_modems([1, 2, 3])
         else:                       # VPS: виртуальные модемы прямо на нём
             HML.update(_server("host", "vps-msk1", "95.165.83.236", "usb", list(range(41, 49)), bad=(44,), ml=4))
             HML["mpspace"] = None
@@ -601,14 +637,7 @@ def _host_run(part, args, inp=None):
         return _pv(HML, args, inp)
     if part != "hivelink":
         raise Fail("на хосте нет части %s" % part)
-    if args[:1] == ["status"]:
-        return {"installed": True, "version": VERSION,
-                "modems": [{"n": 1, "iface": "enx0c5b8f279a64", "state": "ok", "imei": "86xxxxxxxxx0412"},
-                           {"n": 2, "iface": "enx0c5b8f279a65", "state": "ok", "imei": "86xxxxxxxxx0533"},
-                           {"n": 3, "iface": "enx0c5b8f279a66", "state": "ok", "imei": "86xxxxxxxxx0871"}]}
-    if args[:1] == ["install"]:
-        return {"installed": True, "version": VERSION}
-    raise Fail("hivelink %s: в фейке нет" % " ".join(args))
+    return _hl(HML, args, inp)
 
 
 def _pv(srv, a, inp):
@@ -985,8 +1014,12 @@ def _hl(srv, a, inp):
     cmd = a[0] if a else ""
     if cmd == "status":
         if not srv["hivelink"]:
-            return {"installed": False, "modems": []}
-        return {"installed": True, "version": VERSION, "modems": []}
+            return {"installed": False, "modems": [], "usb": {"total": 0}}
+        return _hl_status(srv, "--fast" not in a)
+    if cmd in ("reconnect", "reset", "dataon") and len(a) > 1:
+        if not srv["hivelink"]:
+            raise Fail("hivelink не установлен — hivelink install")
+        return _hl_act(srv, cmd, a[1])
     if cmd == "install":
         srv["hivelink"] = True
         return {"installed": True, "version": VERSION}
@@ -994,6 +1027,100 @@ def _hl(srv, a, inp):
         srv["hivelink"] = False
         return {"installed": False}
     raise Fail("hivelink %s: в фейке нет" % " ".join(a))
+
+
+class FakeBrowser:
+    """Браузер вкладок mp.space и ЮMoney без браузера: состояние, прокси, «проверка» адреса.
+    Окна нет (vnc_socket — None): панель покажет, что это фейк."""
+
+    def __init__(self):
+        from . import browser
+        self.b = browser
+        self.st = {}
+        self.inst = False
+
+    def key(self, kind, target, node=None):
+        return self.b.key(kind, target, node)
+
+    def _s(self, k):
+        return self.st.setdefault(k, {"proxy": None, "check": None, "running": False, "links": None})
+
+    def status(self, k):
+        x, kind = self._s(k), self.b.kind_of(k)
+        K = self.b.KINDS[kind]
+        return {"key": k, "kind": kind, "title": K["title"], "want": K["want_text"], "installed": self.inst,
+                "install_job": None, "running": x["running"], "proxy": self.b.masked(x["proxy"]),
+                "proxy_type": (x["proxy"] or {}).get("scheme"), "check": x["check"], "links": x["links"] or K["links"],
+                "idle_min": self.b.IDLE // 60, "profile": "/var/lib/pcs/browser/%s/profile" % k, "used": x["running"],
+                "fake": not os.environ.get("PCS_FAKE_VNC")}
+
+    def _check(self, k, up):
+        _pause()
+        if up["host"].startswith("bad"):
+            raise Fail("прокси %s:%d не отвечает (Connection refused)" % (up["host"], up["port"]))
+        eu = self.b.kind_of(k) == "mp"
+        cc = "DE" if (eu and not up["host"].startswith("ru")) else "RU"
+        c = {"ip": "185.%d.%d.%d" % (up["port"] % 250, len(up["host"]) * 7 % 250, up["port"] // 250 % 250), "cc": cc,
+             "country": "Германия" if cc == "DE" else "Россия", "city": "Франкфурт-на-Майне" if cc == "DE" else "Москва",
+             "t": _now()}
+        c["region_ok"] = (cc != "RU") if eu else (cc == "RU")
+        return c
+
+    def set_proxy(self, k, text, ptype):
+        up = self.b.parse_proxy(text, ptype)
+        c = self._check(k, up)
+        x = self._s(k)
+        x.update(proxy=up, check=c)
+        return {"check": c, "proxy": self.b.masked(up), "running": x["running"]}
+
+    def recheck(self, k):
+        x = self._s(k)
+        if not x["proxy"]:
+            raise Fail("прокси не задан")
+        x["check"] = self._check(k, x["proxy"])
+        return {"check": x["check"]}
+
+    def start(self, k):
+        if not self.inst:
+            raise Fail("браузер не установлен — «Установить браузер»")
+        x = self._s(k)
+        if not x["proxy"]:
+            raise Fail("сначала прокси: без него браузер вышел бы в сеть с адреса сервера")
+        x["running"] = True
+        return {"running": True, "started": True}
+
+    def stop(self, k):
+        self._s(k)["running"] = False
+        return {"running": False}
+
+    def open_url(self, k, url):
+        if not self._s(k)["running"]:
+            raise Fail("браузер не запущен")
+        return {"opened": url}
+
+    def set_links(self, k, links):
+        x = self._s(k)
+        x["links"] = [[str(a)[:40], str(b)] for a, b in links]
+        return {"links": x["links"]}
+
+    def install_job(self):
+        def done():
+            self.inst = True
+            return {"installed": True}
+        return {"job": _job("Браузер для вкладок mp.space и ЮMoney",
+                            ["── браузер ──", "  ставлю: firefox-esr firefox-esr-l10n-ru tigervnc-standalone-server …",
+                             "  ✓ пакеты на месте", "  браузер готов: Mozilla Firefox 153.5.0esr"], done)}
+
+    def vnc_socket(self, k):
+        # для проверки окна: PCS_FAKE_VNC=host:port — настоящий VNC (например, проброшенный по ssh)
+        v = os.environ.get("PCS_FAKE_VNC")
+        if not v or not self._s(k)["running"]:
+            return None
+        h, _, p = v.rpartition(":")
+        return (h, int(p))
+
+    def seen(self, k, delta):
+        pass
 
 
 if __name__ == "__main__":       # быстрый взгляд: python3 -m pcs.web.fake_api

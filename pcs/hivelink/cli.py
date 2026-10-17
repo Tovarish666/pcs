@@ -13,7 +13,8 @@ Zero-CD → USB-конфигурация с rndis_host → DHCP → маршру
 
   hivelink install            поставить или обновить (повторять можно)
   hivelink uninstall          снять всё своё
-  hivelink status [--json]    модемы: драйвер, USB, связь, данные, сеть, внешний IP
+  hivelink status [--fast] [--json]   модемы: драйвер, USB, связь, данные, сеть, внешний IP
+                              (--fast — без внешнего IP: секунды вместо минуты)
   hivelink doctor [--json]    окружение, установка, фикс приёма
   hivelink reconnect N        переподключить модем N (HiLink)
   hivelink reset N            заново подключить USB-устройство модема N
@@ -98,8 +99,10 @@ def cmd_uninstall(args):
 
 
 def cmd_status(args):
+    if [a for a in args if a != "--fast"]:
+        raise Fail("лишние аргументы: %s — hivelink help" % " ".join(a for a in args if a != "--fast"))
     c = conf()
-    data = status.collect(c)
+    data = status.collect(c, ext="--fast" not in args)
     if not QUIET[0]:
         status.show(data, c)
     return 0, data
@@ -125,7 +128,7 @@ def cmd_reconnect(args):
         except hilink.HiFail as e:
             raise Fail("N=%d: %s" % (m["n"], e))
         st = common.load_state()
-        st["dial"].pop(str(m["n"]), None)
+        st["heal"].pop(str(m["n"]), None)         # лестница починки — с начала
         common.save_state(st)
     log("N=%d: переподключён (HiLink)" % m["n"])
     return 0, {"n": m["n"], "done": True}
@@ -223,7 +226,7 @@ def main(argv=None):
     if fn is None:
         def fn(a):
             raise Fail("нет команды «%s» — hivelink help" % cmd)
-    elif cmd in ("install", "uninstall", "status", "doctor", "run") and rest:
+    elif cmd in ("install", "uninstall", "doctor", "run") and rest:
         def fn(a, cmd=cmd):
             raise Fail("лишние аргументы: %s — hivelink help" % " ".join(a))
     return run_cli(guarded(fn), rest, as_json)

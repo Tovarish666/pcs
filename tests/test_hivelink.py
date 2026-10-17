@@ -290,7 +290,7 @@ check("сессия без префикса", hilink.parse_session("<SesInfo>xyz
 check("сессии не дали", hilink.parse_session("<error><code>125002</code></error>") == (None, None))
 STATUS = ("<response><ConnectionStatus>901</ConnectionStatus><SignalIcon>4</SignalIcon>"
           "<CurrentNetworkType>19</CurrentNetworkType><CurrentNetworkTypeEx>101</CurrentNetworkTypeEx></response>")
-check("статус: онлайн, LTE, сигнал", hilink.parse_status(STATUS) == {"conn": 901, "net": "LTE", "signal": 4, "error": None})
+check("статус: онлайн, LTE, сигнал", hilink.parse_status(STATUS) == {"conn": 901, "net": "LTE", "signal": 4, "sim": None, "error": None})
 check("статус: ошибка API", hilink.parse_status("<error><code>125002</code><message></message></error>")["error"] == 125002)
 check("3G и 2G", hilink.net_text(45) == "3G" and hilink.net_text(3) == "2G" and hilink.net_text(None) is None)
 check("тексты связи", [hilink.conn_text(c) for c in (901, 902, 113, None)] == ["онлайн", "отключён", "нет регистрации", "нет ответа"])
@@ -499,10 +499,120 @@ rc, out = run("ребут", "--json")
 check("неизвестная команда — конверт ok:false", rc == 1 and json.loads(out)["ok"] is False)
 rc, out = run("help")
 check("справка: ровно команды §6", rc == 0 and all("hivelink %s" % c in out for c in
-      ("install", "uninstall", "status [--json]", "doctor", "reconnect N", "reset N", "recfg N", "dataon N|--all")))
+      ("install", "uninstall", "status [--fast] [--json]", "doctor", "reconnect N", "reset N", "recfg N", "dataon N|--all")))
 if os.geteuid() != 0:
     rc, out = run("reconnect", "5", "--json")
     check("действие без root — одна строка ошибки", rc == 1 and json.loads(out) == {"ok": False, "error": "нужен root"})
+
+print("лестница починки (модем без связи не ждёт человека):")
+
+
+class LadderApi:
+    """Подставной модем: состояние задаёт тест, вызовы записываются."""
+    world = {}
+
+    def __init__(self, n, src=None, timeout=5):
+        self.n, self.w = n, LadderApi.world
+
+    def login(self):
+        if self.w.get("dead"):
+            raise hilink.HiFail("web-API 192.168.%d.1 не отвечает (timeout)" % self.n)
+        return self
+
+    def dataswitch(self):
+        return self.w.get("data", 1)
+
+    def set_data(self, on=True):
+        self.w["calls"].append("data%d" % on)
+
+    def status(self):
+        return {"conn": self.w["conn"], "net": "LTE", "signal": 3, "sim": self.w.get("sim", 1), "error": None}
+
+    def dial(self, on=True):
+        self.w["calls"].append("dial%d" % on)
+
+    def net_mode(self):
+        return ("00", "3FFFFFFF", "7FFFFFFFFFFFFFFF")
+
+    def set_net_mode(self, mode, band, lte):
+        self.w["calls"].append("mode" + mode)
+
+    def reboot(self):
+        self.w["calls"].append("reboot")
+
+
+real_hl = (hilink.Api, hilink.reach, driver.pause, usb.reenumerate)
+hilink.Api = LadderApi
+driver.pause = lambda s: None
+reen = []
+usb.reenumerate = lambda d: reen.append(d) or True
+conf_l = dict(common.DEFAULTS)
+M = {"n": 7, "addr": "192.168.7.100", "dev": "/sys/bus/usb/devices/1-5", "port": "1-5", "routed": True}
+
+
+def runs(world, times, st=None, m=None):
+    """Проходы воркера в моменты times (с); → (вызовы по проходам, состояние)."""
+    st = st or {"msg": {}, "heal": {}}
+    LadderApi.world = world
+    out = []
+    for t in times:
+        world["calls"] = []
+        with redirect_stdout(io.StringIO()):
+            driver.hilink_worker(dict(m or M), conf_l, st, now=1800000000 + t)
+        out.append(world["calls"])
+    return out, st
+
+
+try:
+    hilink.reach = lambda src, host="1.1.1.1", port=80, timeout=6: True
+    calls, st = runs({"conn": 902}, [0, 60, 180, 360, 540, 720, 780, 900])
+    check("«отключён»: дозвон → откл/вкл → перерегистрация → … → перезагрузка, не чаще раза в 3 мин",
+          calls == [["dial1"], [], ["dial0", "dial1"], ["data0", "mode02", "mode00", "data1"],
+                    ["data0", "mode02", "mode00", "data1"], ["reboot"], [], ["dial1"]], calls)
+    check("после перезагрузки следующая — не раньше чем через 30 мин",
+          runs({"conn": 902}, [1080, 1260, 1440, 2600], st)[0][-1] == ["reboot"])
+    calls, st = runs({"conn": 902}, [0])
+    LadderApi.world["conn"] = 901
+    runs(LadderApi.world, [60], st)
+    check("связь вернулась — лестница сначала", "lvl" not in st["heal"]["7"] and "bad" not in st["heal"]["7"], st)
+
+    calls, _ = runs({"conn": 900}, [0, 60, 120, 180, 240])
+    check("«подключается» — 3 мин ждём, потом сразу откл/вкл (дозвон тут бесполезен)",
+          calls == [[], [], [], ["dial0", "dial1"], []], calls)
+    calls, _ = runs({"conn": 907}, [0, 60, 180, 360])
+    check("нет регистрации: 3 мин модем ищет сеть сам, потом перерегистрация",
+          calls == [[], [], ["data0", "mode02", "mode00", "data1"], ["data0", "mode02", "mode00", "data1"]], calls)
+    calls, _ = runs({"conn": 907, "sim": 255}, [0, 200, 400, 900])
+    check("нет SIM — не дёргаем и не перезагружаем", calls == [[], [], [], []], calls)
+
+    fails = {"n": 0}
+    hilink.reach = lambda src, host="1.1.1.1", port=80, timeout=6: fails.__setitem__("n", fails["n"] + 1) or False
+    calls, st = runs({"conn": 901}, [0, 60, 120, 180])
+    check("«онлайн», но трафика нет: три проверки подряд, потом откл/вкл",
+          calls == [[], [], ["dial0", "dial1"], []] and fails["n"] == 4, (calls, fails))
+    fails["n"] = 0
+    calls, _ = runs({"conn": 901}, [0, 60, 120], m=dict(M, routed=False))
+    check("без своего выхода у адреса модема трафик не проверяем (проверка бы врала)", fails["n"] == 0 and calls == [[], [], []])
+    hilink.reach = lambda src, host="1.1.1.1", port=80, timeout=6: True
+    calls, _ = runs({"conn": 901}, [0, 100, 200, 400])
+    check("здоровый модем — ни одного действия", calls == [[], [], [], []])
+
+    reen.clear()
+    calls, st = runs({"conn": 901, "dead": True}, [0, 300, 600, 900, 1200, 2500])
+    check("web-API молчит 10 мин — USB заново, повтор не раньше чем через 30 мин",
+          reen == ["/sys/bus/usb/devices/1-5", "/sys/bus/usb/devices/1-5"], reen)
+    conf_l["auto_heal"] = False
+    calls, _ = runs({"conn": 902}, [0, 200, 400])
+    check("auto_heal выключен — ничего", calls == [[], [], []])
+    conf_l["auto_heal"] = True
+finally:
+    hilink.Api, hilink.reach, driver.pause, usb.reenumerate = real_hl
+
+check("свой выход у адреса: правило from + default в таблице",
+      route.routed("0:\tfrom all lookup local\n31007:\tfrom 192.168.7.100 lookup 2007\n"
+                   "31008:\tfrom 192.168.8.100 lookup 2008\n",
+                   "default via 192.168.7.1 dev eth1 table 2007\n192.168.8.0/24 dev eth2 table 2008\n")
+      == {"192.168.7.100"})
 
 shutil.rmtree(TMP, ignore_errors=True)
 print("\nитого: ok %d, fail %d" % (passed, failed))

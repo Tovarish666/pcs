@@ -323,6 +323,55 @@ def bridge(sock, term, ping_every=25.0, dead_after=90.0, max_pending=1 << 20):
         term.close()
 
 
+def bridge_socket(sock, peer, ping_every=25.0, dead_after=90.0):
+    """WebSocket (sock) ↔ поток байт (peer, например unix-сокет VNC): кадры BIN туда и обратно.
+    Кончается, когда закрылась одна из сторон или клиент молчит dead_after секунд после пинга."""
+    parser = Parser(need_mask=True)
+    last_rx, pinged = time.monotonic(), None
+    try:
+        while True:
+            r, _, _ = select.select([sock, peer], [], [], min(5.0, ping_every))
+            # TLS: расшифрованное может лежать в буфере сокета — select его не видит
+            if not r and getattr(sock, "pending", None) and sock.pending():
+                r = [sock]
+            now = time.monotonic()
+            if sock in r:
+                data = sock.recv(65536)
+                if not data:
+                    return "клиент ушёл"
+                while getattr(sock, "pending", None) and sock.pending():
+                    data += sock.recv(sock.pending())
+                last_rx, pinged = now, None
+                for op, payload in parser.feed(data):
+                    if op == BIN:
+                        peer.sendall(payload)
+                    elif op == PING:
+                        sock.sendall(frame(PONG, payload))
+                    elif op == CLOSE:
+                        sock.sendall(frame(CLOSE, payload[:2]))
+                        return "вкладка закрыта"
+            if peer in r:
+                out = peer.recv(262144)
+                if not out:
+                    sock.sendall(close_frame(1000, "сеанс закончился"))
+                    _drain_close(sock, parser)
+                    return "сеанс закончился"
+                sock.sendall(frame(BIN, out))
+            if pinged is None and now - last_rx > ping_every:
+                sock.sendall(frame(PING, b"pcs"))
+                pinged = now
+            elif pinged is not None and now - last_rx > dead_after:
+                return "клиент не отвечает"
+    except WSError as e:
+        try:
+            sock.sendall(close_frame(e.code, str(e)))
+        except OSError:
+            pass
+        return "протокол: %s" % e
+    except OSError:
+        return "соединение оборвалось"
+
+
 def _control(term, text):
     try:
         m = json.loads(text)

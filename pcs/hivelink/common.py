@@ -29,12 +29,23 @@ DEFAULTS = {
     "cfg_max_tries": 8,             # перебор USB-конфигураций
     "zerocd_max_tries": 3,          # usb_modeswitch до пере-enumerate
     "nodrv_grace": 3,               # проходов ждать привязки драйвера
-    "dhcp_max_tries": 10,
+    "dhcp_max_tries": 10,           # подряд; потом — раз в dhcp_retry_every (не бросаем навсегда)
+    "dhcp_retry_every": 300,
     "hilink_every": 4,              # web-API — раз в столько проходов
     "hilink_concurrency": 8,
     "auto_dataswitch": True,
     "auto_reconnect": True,
-    "reconnect_cooldown": 180,      # с между дозвонами одного модема
+    "reconnect_cooldown": 180,      # с между попытками починки одного модема
+    # лестница починки: дозвон → откл/вкл → перерегистрация в сети → перезагрузка модема
+    "auto_heal": True,
+    "stuck_grace": 180,             # с: «подключается»/«отключается» дольше — завис
+    "heal_reboot_after": 600,       # с без связи — перезагрузить модем
+    "heal_reboot_every": 1800,      # с: перезагрузка одного модема не чаще
+    "netcheck_every": 300,          # с: у «онлайн» — ходит ли трафик (TCP к netcheck_host); 0 — нет
+    "netcheck_fails": 3,            # подряд неудач — «онлайн, но трафика нет»
+    "netcheck_host": "1.1.1.1",
+    "api_dead_after": 600,          # с: web-API молчит дольше — заново подключить USB
+    "api_reenum_every": 1800,
     "usb_autosuspend_off": True,
     "quiet_repeat": 300,            # с: одинаковое сообщение не чаще
     "rx_urb_size": 16384,           # фикс приёма rndis_host; 0 — выключен
@@ -74,7 +85,7 @@ def load_state():
     st = jload(STATE, {})
     if not isinstance(st, dict):
         st = {}
-    for k in ("cnt", "probe", "msg", "dial"):
+    for k in ("cnt", "probe", "msg", "heal"):
         if not isinstance(st.get(k), dict):
             st[k] = {}
     if not isinstance(st.get("cycle"), int):

@@ -48,6 +48,18 @@ def ours(p):
     return PRIO_MIN <= p <= PRIO_MAX
 
 
+def routed(rules_text, routes_text):
+    """Адреса, у которых есть свой выход: правило «from адрес lookup T» и в таблице T маршрут
+    по умолчанию — неважно, чьё (наше, mp.space). Только с них проверка трафика честна:
+    без такого правила пакет с 192.168.N.100 ушёл бы в основной канал машины и не вернулся."""
+    tbl = tables(routes_text)
+    out = set()
+    for _p, sel, t in rules(rules_text):
+        if len(sel) >= 2 and sel[0] == "from" and t.isdigit() and any(ln.startswith("default") for ln in tbl.get(int(t), [])):
+            out.add(sel[1].split("/")[0])
+    return out
+
+
 def plan(want, rules_text, routes_text):
     """Команды, чтобы маршрутизация модемов стала ровно want = {N: (iface, адрес)}.
 

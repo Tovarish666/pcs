@@ -97,8 +97,9 @@ def to_csv(rows):
 class Panel:
     OV_FRESH = 8.0           # с: обзор моложе — как есть; старше — сразу прежний, свежий собирается в фоне
 
-    def __init__(self, api, cache_ttl=4.0, audit=None, ov_path=None):
+    def __init__(self, api, cache_ttl=4.0, audit=None, ov_path=None, browser=None):
         self.api = api
+        self.browser = browser     # браузер вкладок mp.space и ЮMoney (pcs.web.browser.Manager или фейк)
         self.cache_ttl = cache_ttl
         self.audit = audit or (lambda *a: None)
         self.ov_path = ov_path     # последний обзор на диске: после перезапуска панели — сразу он
@@ -144,6 +145,9 @@ class Panel:
             ("GET", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_get),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_post),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
+            ("GET", r"/api/browser/(mp|ym)/(host|\d+)", self.br_status),
+            ("POST", r"/api/browser/(mp|ym)/(host|\d+)/(proxy|check|start|stop|open|links)", self.br_act),
+            ("POST", r"/api/browser/install", self.br_install),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
 
@@ -458,6 +462,38 @@ class Panel:
             bad = [s for s in steps if not s["ok"]]
             return {"ok": False, "error": "%s: %s" % (bad[0]["what"], bad[0]["error"]), "data": res}
         return ok(res)
+
+    # ── браузер на одно окно через прокси (вкладки mp.space и ЮMoney) ──────────
+    # Браузер всегда на этой машине (хабе), профиль — свой на хост/ВМ (node — присоединённый хост).
+
+    def _br(self, kind, t, query):
+        if self.browser is None:
+            raise Bad("браузер здесь недоступен", 501)
+        node = (query.get("node") or "").strip() or None
+        return self.browser, self.browser.key(kind, t, node)
+
+    def br_status(self, kind, t, query, body):
+        b, k = self._br(kind, t, query)
+        return ok(b.status(k))
+
+    def br_act(self, kind, t, what, query, body):
+        b, k = self._br(kind, t, query)
+        if what == "proxy":
+            return ok(b.set_proxy(k, _s(body.get("proxy"), "прокси", 500), body.get("type") or "http"))
+        if what == "check":
+            return ok(b.recheck(k))
+        if what == "start":
+            return ok(b.start(k))
+        if what == "stop":
+            return ok(b.stop(k))
+        if what == "open":
+            return ok(b.open_url(k, _s(body.get("url"), "адрес", 2000)))
+        return ok(b.set_links(k, body.get("links")))
+
+    def br_install(self, query, body):
+        if self.browser is None:
+            raise Bad("браузер здесь недоступен", 501)
+        return ok(self.browser.install_job())
 
     # ── общее: команда части на сервере или хосте ──────────────────────────
 

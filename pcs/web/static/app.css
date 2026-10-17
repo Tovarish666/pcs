@@ -312,6 +312,47 @@ main#main { flex: 1; overflow: auto; padding: 28px 28px 64px; min-width: 0; scro
 .srcline { column-gap: 16px; }
 .srcline a { max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: bottom; }
 
+/* вкладка «Сетевые интерфейсы»: физические и виртуальные модемы */
+.net-sum { display: flex; flex-wrap: wrap; gap: 6px 20px; font-size: 13px; color: var(--fg2); margin: 0 0 18px; }
+.net-sum b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.net-sec + .net-sec { margin-top: 32px; }
+.net-sec > .sec-head { margin-top: 0; }
+.net-sec.empty > .sec-head h2 { color: var(--fg2); }
+.net-sec .row-tools { display: inline-flex; gap: 8px; align-items: center; }
+.net-empty { padding: 14px 16px; background: var(--s1); border: 1px dashed var(--line2); border-radius: var(--r2); color: var(--fg2); font-size: 13px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+table.t td .sub { font-size: 11.5px; color: var(--fg3); }
+.net-cell { display: inline-flex; align-items: center; gap: 8px; }
+.sig { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.sig i { width: 3px; border-radius: 1px; background: var(--line2); }
+.sig i:nth-child(1) { height: 4px; } .sig i:nth-child(2) { height: 6px; } .sig i:nth-child(3) { height: 8px; }
+.sig i:nth-child(4) { height: 10px; } .sig i:nth-child(5) { height: 12px; }
+.sig i.on { background: var(--fg2); }
+
+/* вкладки mp.space и ЮMoney: прокси сверху, кнопки-помогаторы, окно браузера */
+.br-hint { margin: -4px 0 14px; font-size: 13px; }
+.br-card { background: var(--s1); border: 1px solid var(--line); border-radius: var(--r2); padding: 12px 14px; margin: 0 0 12px; display: grid; gap: 10px; }
+.br-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.br-row2 { justify-content: space-between; }
+.br-lbl { font-size: 12.5px; font-weight: 600; color: var(--fg2); min-width: 64px; }
+.br-proxy-in { flex: 1; min-width: 260px; font-family: var(--mono); font-size: 12.5px; }
+.br-ip { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 13px; color: var(--fg2); min-width: 0; }
+.br-ip b { color: var(--fg); }
+.br-links { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; }
+.br-links button .ic { width: 14px; height: 14px; color: var(--fg3); }
+.br-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; background: var(--s1); border: 1px solid var(--line);
+  border-bottom: 0; border-radius: var(--r2) var(--r2) 0 0; }
+.br-screen { position: relative; height: max(480px, calc(100vh - 330px)); background: #0b0d11; border: 1px solid var(--line);
+  border-radius: 0 0 var(--r2) var(--r2); overflow: hidden; }
+.br-screen:fullscreen { height: 100vh; border-radius: 0; }
+.br-screen > div:not(.br-empty):not(.br-fake):not(.banner) { width: 100%; height: 100%; }
+.br-empty { background: var(--s1); border: 1px dashed var(--line2); border-radius: var(--r2); padding: 28px; display: grid; gap: 6px; justify-items: start; }
+.br-screen .br-empty { border: 0; border-radius: 0; height: 100%; align-content: center; justify-items: center; text-align: center; background: var(--s1); }
+.br-empty-t { font-weight: 600; font-size: 15px; }
+.br-empty p { margin: 0 0 6px; max-width: 64ch; }
+.br-fake { height: 100%; display: grid; place-items: center; color: #8a92a2; font-size: 14px; padding: 20px; text-align: center; }
+.br-skel { display: grid; place-items: center; border-radius: var(--r2); }
+@media (max-width: 900px) { .br-proxy-in { min-width: 0; width: 100%; } .br-screen { height: 70vh; } }
+
 /* фильтры-счётчики */
 .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 12px; }
 .chips button { border-radius: 999px; padding: 3px 12px; font-size: 12.5px; background: var(--s1); color: var(--fg2); border-color: var(--line); gap: 7px; }
