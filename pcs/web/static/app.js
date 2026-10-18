@@ -1172,7 +1172,8 @@
     const bApply = btn("Применить", async (e) => {
       if (!pin.value.trim()) { pin.focus(); setRes(pres, "err", "впиши прокси"); return; }
       const r = await act(e.currentTarget, pres, () => POSTb("proxy", {proxy: pin.value.trim(), type: ptype.value}),
-        (d) => d.running ? "применён — браузер уже ходит через него (открытые страницы обнови F5)" : "применён");
+        (d) => d.running ? "применён — браузер уже ходит через него (открытые страницы обнови F5)"
+          + (d.tz_changed ? "; часовой пояс сменится при следующем открытии браузера" : "") : "применён");
       if (r && r.ok) { pin.value = ""; await load(); }
     }, "primary", "проверить прокси и сохранить: браузер пойдёт через него");
     const bCheck = btn("Проверить", async (e) => {
@@ -1250,6 +1251,7 @@
       if (c) {
         parts.push(el("span", {}, "внешний адрес ", el("b", {class: "mono", text: c.ip})));
         if (c.country) parts.push(el("span", {text: [c.cc, c.country, c.city].filter(Boolean).join(" · ")}));
+        if (c.tz) parts.push(el("span", {class: "muted", title: "часовой пояс браузера — страны адреса", text: "время " + c.tz}));
         if (c.region_ok === true) parts.push(el("span", {class: "tag ok"}, el("span", {class: "dot ok"}), st.want + " ✓"));
         else if (c.region_ok === false) parts.push(el("span", {class: "tag bad"}, el("span", {class: "dot bad"}), "нужен " + st.want));
         parts.push(el("span", {class: "muted", text: "проверено " + ago(c.t)}));
@@ -1262,7 +1264,7 @@
         const jobs = el("div");
         body.replaceChildren(el("div", {class: "br-empty"},
           el("div", {class: "br-empty-t", text: "Браузер ещё не установлен на этом хосте"}),
-          el("p", {class: "muted", text: "Firefox ESR и виртуальный экран — около 300 МБ, пара минут. Ставится один раз на хост с панелью и служит всем вкладкам mp.space и ЮMoney."}),
+          el("p", {class: "muted", text: "Яндекс Браузер для Linux (из репозитория Яндекса), экран и шрифты — около 500 МБ, несколько минут. Ставится один раз на хост с панелью и служит всем вкладкам mp.space и ЮMoney."}),
           el("div", {class: "bar"}, btn("Установить браузер", async (e) => {
             const r = await act(e.currentTarget, sres, () => POST("/api/browser/install", {}), "ставлю…");
             if (r && r.ok && r.data && r.data.job) jobs.replaceChildren(jobView(r.data.job, {title: "Установка браузера", onDone: () => load()}));
@@ -1282,7 +1284,7 @@
       }
       sState.replaceChildren(el("span", {class: "dot ok"}), "работает · без зрителя закроется сам через " + st.idle_min + " мин");
       if (body.firstChild !== screenBar) body.replaceChildren(screenBar, screenBox);
-      if (st.fake) { screenBox.replaceChildren(el("div", {class: "br-fake", text: "Фейковая панель: окна браузера нет. На настоящем хосте здесь Firefox через прокси."})); return; }
+      if (st.fake) { screenBox.replaceChildren(el("div", {class: "br-fake", text: "Фейковая панель: окна браузера нет. На настоящем хосте здесь Яндекс Браузер."})); return; }
       if (shown && !rfb) connect();
     }
     async function connect() {
@@ -1294,8 +1296,8 @@
       const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/browser?" + qs;
       screenBox.replaceChildren();
       rfb = new RFB(screenBox, url, {shared: true});
-      rfb.resizeSession = true;
-      rfb.scaleViewport = false;
+      rfb.resizeSession = false;          // экран — обычный 1920×1080, во вкладке — масштаб
+      rfb.scaleViewport = true;
       rfb.focusOnClick = true;
       rfb.background = "transparent";
       rfb.addEventListener("connect", () => { setRes(sres, "", ""); rfb.focus(); });
@@ -1319,8 +1321,9 @@
       drawIp(); drawLinks(); drawScreen();
     }
     const pl = poller(10000, load);
-    const K = kind === "mp" ? "mp.space: нужен европейский адрес — сайт открывается через прокси с ЕС-адресом" : "ЮMoney: нужен российский адрес; IP лучше не менять посреди работы";
-    const root = el("div", {class: "br"}, el("p", {class: "muted br-hint", text: K + ". Окно — обычный Firefox на хосте панели; вход и куки сохраняются."}),
+    const K = kind === "mp" ? "mp.space: нужен европейский адрес" : "ЮMoney: нужен российский адрес; IP лучше не менять посреди работы";
+    const root = el("div", {class: "br"}, el("p", {class: "muted br-hint", text: K + ". Окно — обычный Яндекс Браузер на хосте панели: "
+      + "о прокси он не знает, весь его интернет идёт через прокси, как у компьютера за роутером. Вход и куки сохраняются."}),
       proxyCard, links, body);
     return {
       el: root,

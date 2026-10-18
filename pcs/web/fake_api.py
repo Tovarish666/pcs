@@ -1052,6 +1052,7 @@ class FakeBrowser:
                 "install_job": None, "running": x["running"], "proxy": self.b.masked(x["proxy"]),
                 "proxy_type": (x["proxy"] or {}).get("scheme"), "check": x["check"], "links": x["links"] or K["links"],
                 "idle_min": self.b.IDLE // 60, "profile": "/var/lib/pcs/browser/%s/profile" % k, "used": x["running"],
+                "browser": "Яндекс Браузер", "tz": (x["check"] or {}).get("tz") or self.b.TZ_DEFAULT,
                 "fake": not os.environ.get("PCS_FAKE_VNC")}
 
     def _check(self, k, up):
@@ -1062,7 +1063,7 @@ class FakeBrowser:
         cc = "DE" if (eu and not up["host"].startswith("ru")) else "RU"
         c = {"ip": "185.%d.%d.%d" % (up["port"] % 250, len(up["host"]) * 7 % 250, up["port"] // 250 % 250), "cc": cc,
              "country": "Германия" if cc == "DE" else "Россия", "city": "Франкфурт-на-Майне" if cc == "DE" else "Москва",
-             "t": _now()}
+             "tz": "Europe/Berlin" if cc == "DE" else "Europe/Moscow", "t": _now()}
         c["region_ok"] = (cc != "RU") if eu else (cc == "RU")
         return c
 
@@ -1070,8 +1071,10 @@ class FakeBrowser:
         up = self.b.parse_proxy(text, ptype)
         c = self._check(k, up)
         x = self._s(k)
+        old_tz = (x["check"] or {}).get("tz")
         x.update(proxy=up, check=c)
-        return {"check": c, "proxy": self.b.masked(up), "running": x["running"]}
+        return {"check": c, "proxy": self.b.masked(up), "running": x["running"],
+                "tz_changed": bool(x["running"] and c["tz"] != old_tz)}
 
     def recheck(self, k):
         x = self._s(k)
@@ -1085,7 +1088,7 @@ class FakeBrowser:
             raise Fail("браузер не установлен — «Установить браузер»")
         x = self._s(k)
         if not x["proxy"]:
-            raise Fail("сначала прокси: без него браузер вышел бы в сеть с адреса сервера")
+            raise Fail("сначала прокси: без него браузеру некуда ходить")
         x["running"] = True
         return {"running": True, "started": True}
 
@@ -1108,8 +1111,9 @@ class FakeBrowser:
             self.inst = True
             return {"installed": True}
         return {"job": _job("Браузер для вкладок mp.space и ЮMoney",
-                            ["── браузер ──", "  ставлю: firefox-esr firefox-esr-l10n-ru tigervnc-standalone-server …",
-                             "  ✓ пакеты на месте", "  браузер готов: Mozilla Firefox 153.5.0esr"], done)}
+                            ["── браузер ──", "  репозиторий Яндекс Браузера: https://repo.yandex.ru/yandex-browser/deb",
+                             "  ставлю: yandex-browser-stable tigervnc-standalone-server …",
+                             "  ✓ пакеты на месте", "  браузер готов: Yandex Browser 26.8.1.1111"], done)}
 
     def vnc_socket(self, k):
         # для проверки окна: PCS_FAKE_VNC=host:port — настоящий VNC (например, проброшенный по ssh)
