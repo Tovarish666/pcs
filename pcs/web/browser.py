@@ -453,7 +453,10 @@ def singbox_config(port=FWD_PORT):
         "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": "tun0", "address": [TUN_ADDR],
                       "mtu": 1420, "auto_route": False, "strict_route": False, "stack": "system"}],
         "outbounds": [{"type": "socks", "tag": "proxy", "version": "5", "server": "127.0.0.1", "server_port": port}],
-        "route": {"rules": [{"port": 53, "action": "hijack-dns"}], "final": "proxy", "auto_detect_interface": False},
+        # UDP прокси не возит: отклоняем сразу (ICMP «порт недоступен»), как в сети с закрытым UDP —
+        # браузер тут же переходит с QUIC на TCP, а не ждёт таймаутов на каждой странице.
+        "route": {"rules": [{"port": 53, "action": "hijack-dns"}, {"network": "udp", "action": "reject"}],
+                  "final": "proxy", "auto_detect_interface": False},
     }
 
 

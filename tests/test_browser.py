@@ -222,6 +222,8 @@ tun = sb["inbounds"][0]
 check("«роутер» sing-box: tun — без auto_route (маршрут ставим сами в своей сети), всё — в пересыльщик 127.0.0.1",
       tun["type"] == "tun" and tun["auto_route"] is False and sb["outbounds"][0]["server"] == "127.0.0.1"
       and sb["outbounds"][0]["server_port"] == 1080 and sb["route"]["final"] == "proxy")
+check("UDP (кроме DNS) отклоняется сразу — браузер без задержек переходит с QUIC на TCP",
+      sb["route"]["rules"][1] == {"network": "udp", "action": "reject"})
 check("DNS браузера перехватывается и идёт через прокси по TCP, только IPv4",
       {"port": 53, "action": "hijack-dns"} in sb["route"]["rules"] and sb["dns"]["servers"][0]["type"] == "tcp"
       and sb["dns"]["servers"][0]["detour"] == "proxy" and sb["dns"]["strategy"] == "ipv4_only")
