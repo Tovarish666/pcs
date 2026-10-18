@@ -761,8 +761,11 @@ def session(k, display):
     spawn([WM, "-use_titlebar", "no"])
     profile = os.path.join(h, "profile")
     first = not os.path.exists(os.path.join(profile, "Local State"))
+    # Флаги — только то, чего сайты не видят: профиль, без мастера первого запуска, хранилище паролей
+    # без связки ключей. --enable-unsafe-swiftshader — штатный программный WebGL Chromium, как у
+    # любого Chrome без видеокарты (ВМ, удалённый стол): без него WebGL нет вовсе — это заметнее.
     base = [browser_bin() or BROWSER, "--user-data-dir=" + profile, "--no-first-run", "--no-default-browser-check",
-            "--password-store=basic"]
+            "--password-store=basic", "--enable-unsafe-swiftshader"]
     br = spawn(base + ([KINDS[kind_of(k)]["links"][0][1]] if first else []))
     done = threading.Event()
 
