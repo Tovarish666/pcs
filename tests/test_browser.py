@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверки браузера вкладок mp.space и ЮMoney (pcs.web.browser) без Firefox, без root и без сети:
+"""Проверки браузера вкладок mp.space и ЮMoney (pcs.web.browser) без браузера, без root и без сети:
 разбор прокси, соединение через HTTP CONNECT и SOCKS5 с паролем, пересыльщик на unix-сокете,
 смена прокси на ходу, настройки профиля.
 
@@ -160,13 +160,13 @@ check("прокси не отвечает — понятная ошибка",
       "не отвечает" in (fails(B.dial, {"scheme": "http", "host": "127.0.0.1", "port": 1, "user": None, "pw": None},
                               "x", 1, timeout=2) or ""))
 
-print("пересыльщик: Firefox → unix-сокет (SOCKS5) → прокси пользователя:")
+print("пересыльщик: sing-box → SOCKS5 → прокси пользователя (здесь — на unix-сокете):")
 TMP = tempfile.mkdtemp(prefix="pcs-br-")
 conf = os.path.join(TMP, "session.json")
 json.dump({"proxy": {"scheme": "http", "host": "127.0.0.1", "port": HTTP, "user": "user", "pw": "secret"}},
           open(conf, "w"))
 sock = os.path.join(TMP, "p.sock")
-fw = B.Forward(sock, conf)
+fw = B.Forward(conf, unix=sock)
 threading.Thread(target=fw.serve, daemon=True).start()
 for _ in range(50):
     if os.path.exists(sock):
@@ -217,19 +217,42 @@ print("профиль и ключи:")
 check("ключи: ВМ, хост, присоединённый хост", B.key("mp", 2000) == "2000-mp" and B.key("ym", "host") == "host-ym"
       and B.key("ym", "host", "vps1") == "n-vps1-host-ym" and B.kind_of("n-vps1-host-ym") == "ym")
 check("чужое в ключе — отказ", all(fails(B.key, *a) for a in (("xx", 1), ("mp", "../x"), ("mp", 1, "Bad Name"))))
-p = B.prefs("2000-ym")
-check("Firefox: прокси — unix-сокет сеанса, DNS через прокси, WebRTC только через прокси, без DoH",
-      '"file:///run/pcs-browser-2000-ym/proxy.sock"' in p and '"network.proxy.socks_remote_dns", true' in p
-      and '"media.peerconnection.ice.proxy_only", true' in p and '"network.trr.mode", 5' in p)
-check("Firefox: вкладки после перезапуска — как были, язык русский",
-      '"browser.startup.page", 3' in p and '"intl.accept_languages", "ru-RU, ru, en-US, en"' in p)
-check("никакой автоматизации в настройках (webdriver, marionette)", "marionette" not in p and "webdriver" not in p)
+sb = B.singbox_config(1080)
+tun = sb["inbounds"][0]
+check("«роутер» sing-box: tun — без auto_route (маршрут ставим сами в своей сети), всё — в пересыльщик 127.0.0.1",
+      tun["type"] == "tun" and tun["auto_route"] is False and sb["outbounds"][0]["server"] == "127.0.0.1"
+      and sb["outbounds"][0]["server_port"] == 1080 and sb["route"]["final"] == "proxy")
+check("UDP (кроме DNS) отклоняется сразу — браузер без задержек переходит с QUIC на TCP",
+      sb["route"]["rules"][1] == {"network": "udp", "action": "reject"})
+check("DNS браузера перехватывается и идёт через прокси по TCP, только IPv4",
+      {"port": 53, "action": "hijack-dns"} in sb["route"]["rules"] and sb["dns"]["servers"][0]["type"] == "tcp"
+      and sb["dns"]["servers"][0]["detour"] == "proxy" and sb["dns"]["strategy"] == "ipv4_only")
+json.dump({"proxy": {"scheme": "socks5", "host": "127.0.0.1", "port": SOCKS, "user": "user", "pw": "secret"}},
+          open(conf, "w"))
+c = socket.socket(socket.AF_UNIX)
+c.settimeout(5)
+c.connect(sock)
+c.sendall(b"\x05\x01\x00")
+c.recv(2)
+c.sendall(b"\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00")       # UDP ASSOCIATE
+check("пересыльщик: UDP не возит — на UDP ASSOCIATE честный отказ (браузер перейдёт на TCP)",
+      B._recv_exact(c, 10)[1] == 7)
+c.close()
+import inspect  # noqa: E402
+src = inspect.getsource(B.session)
+check("браузер без настроек прокси и без флагов, которые видят сайты (только профиль, первый запуск, хранилище паролей)",
+      "--proxy" not in src and "--disable-web-security" not in src and "--no-sandbox" not in src
+      and "--user-agent" not in src and "--disable-blink-features" not in src)
+check("экран — обычный 1920×1080, панель только масштабирует", B.SCREEN == "1920x1080"
+      and "-AcceptSetDesktopSize=0" in src)
 
 print("страна адреса:")
 real = B._https_get
 B._https_get = lambda up, host, path, timeout=15: json.dumps(
-    {"success": True, "ip": "185.1.2.3", "country": "Германия", "country_code": "DE", "city": "Франкфурт"})
+    {"success": True, "ip": "185.1.2.3", "country": "Германия", "country_code": "DE", "city": "Франкфурт",
+     "timezone": {"id": "Europe/Berlin"}})
 check("mp.space: адрес в Европе — годится", B.check({}, "mp")["region_ok"] is True)
+check("часовой пояс — страны адреса (для браузера)", B.check({}, "mp")["tz"] == "Europe/Berlin")
 check("ЮMoney: не Россия — не годится", B.check({}, "ym")["region_ok"] is False)
 B._https_get = lambda up, host, path, timeout=15: (_ for _ in ()).throw(B.BrowserFail("нет")) if host == "ipwho.is" else "185.1.2.3\n"
 c = B.check({}, "ym")

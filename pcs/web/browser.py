@@ -1,23 +1,32 @@
 """Браузер на одно окно через прокси — вкладки mp.space и ЮMoney в панели.
 
-Как устроено:
-  - Firefox ESR на машине панели, в своём виртуальном экране (Xtigervnc), от пользователя
-    pcs-browser без прав; окно видно во вкладке панели через noVNC (WebSocket панели).
-  - Один постоянный профиль на (хост или ВМ, вкладка): /var/lib/pcs/browser/<ключ>/profile —
-    куки, вход, вкладки и сохранённые пароли переживают закрытие браузера, перезапуск панели
-    и перезагрузку машины. Удаляется только вручную.
-  - Прокси: Firefox ходит в SOCKS5 на unix-сокете /run/pcs-browser-<ключ>/proxy.sock, за ним
-    пересыльщик (forward) — к прокси пользователя: HTTP CONNECT или SOCKS5, с логином. DNS — тоже
-    через прокси. Сменили прокси — открытые соединения рвутся, новые идут через новый.
-  - Ни одного TCP-порта: VNC и прокси — unix-сокеты, X — без tcp. `ss -tulpn` чистый.
-  - Браузер обычный: без автоматизации (никакого webdriver), без подмены отпечатков; WebRTC
-    не светит адрес машины (только через прокси), русский язык, московское время.
-  - Запуск — только по кнопке; никто не смотрит IDLE секунд — закрывается сам (профиль остаётся).
+Задача — самый обычный браузер, а не «невидимка»: ничего не подделывается, браузер не знает
+ни о каком прокси. Он живёт в своей сети, где весь интернет — прокси пользователя, как
+обычный компьютер за роутером провайдера.
 
-Запуск сеанса — юнит systemd pcs-browser-<ключ> (systemd-run), внутри — `python3 -m
-pcs.web.browser run КЛЮЧ ДИСПЛЕЙ` от pcs-browser: пересыльщик, dbus, Xtigervnc, matchbox, Firefox.
+  - Браузер — Яндекс Браузер для Linux (официальный пакет из репозитория Яндекса), обычный
+    профиль, обычные настройки. Экран — Xtigervnc 1920×1080, окно видно во вкладке панели
+    через noVNC (WebSocket панели); от пользователя pcs-browser без прав.
+  - Сеть — свой network namespace pcsbr<N>: в нём только lo и tun0 sing-box («роутер»),
+    маршрут по умолчанию — в tun0. sing-box отдаёт всё на 127.0.0.1:1080 этого же namespace —
+    там слушает наш пересыльщик, а соединения к прокси пользователя он открывает уже из сети
+    машины (поток переключается между namespace). DNS перехватывается на tun и идёт через
+    прокси по TCP. Сеть машины не трогается: ни NAT, ни forwarding, ни правил маршрутизации.
+  - Утечек нет по устройству: у namespace нет другого выхода, кроме прокси. WebRTC, DNS,
+    QUIC — как у любого компьютера за таким провайдером (UDP прокси не возит — браузер сам
+    переходит на TCP).
+  - Часовой пояс — страны внешнего адреса прокси, язык — русский.
+  - Профиль на (хост или ВМ, вкладка): /var/lib/pcs/browser/<ключ>/profile — куки, вход,
+    вкладки переживают закрытие браузера, перезапуск панели и машины.
+  - Ни одного TCP-порта на машине: VNC — unix-сокет, пересыльщик — внутри namespace.
+  - Запуск — только по кнопке; никто не смотрит IDLE секунд — закрывается сам.
+
+Сеанс — юнит systemd pcs-browser-<ключ> (systemd-run) с `python3 -m pcs.web.browser run …`
+(root: namespace, sing-box, пересыльщик), внутри — `… session …` от pcs-browser (dbus,
+Xtigervnc, matchbox, браузер).
 """
 import base64
+import ctypes
 import ipaddress
 import json
 import os
@@ -38,14 +47,25 @@ ROOT = "/var/lib/pcs/browser"
 USER = "pcs-browser"
 UNIT = "pcs-browser-%s"
 RUNDIR = "/run/pcs-browser-%s"
+NS = "pcsbr%d"
 IDLE = 1800                 # с без зрителя — закрыть браузер
 MAX_RUNNING = 4
-FIREFOX = "firefox-esr"
+SCREEN = "1920x1080"        # обычный экран, а не размер вкладки панели
+BROWSER = "yandex-browser-stable"
 XVNC = "Xtigervnc"
 WM = "matchbox-window-manager"
-PACKAGES = ("firefox-esr", "firefox-esr-l10n-ru", "tigervnc-standalone-server", "matchbox-window-manager",
-            "xfonts-base", "fonts-dejavu-core", "fonts-liberation", "libgl1-mesa-dri", "dbus-daemon", "wmctrl")
-TZ = "Europe/Moscow"
+SINGBOX = "/usr/local/lib/pcs/sing-box"
+FWD_PORT = 1080             # пересыльщик — внутри namespace браузера, снаружи его нет
+TUN_ADDR = "172.19.0.1/30"
+YANDEX_REPO = "https://repo.yandex.ru/yandex-browser/deb"
+YANDEX_KEY = "https://repo.yandex.ru/yandex-browser/YANDEX-BROWSER-KEY.GPG"
+YANDEX_FPR = "224974DB7FED6DECB7D855EF60B9CD3A083A7A9A"     # Yandex Browser Repository Key
+YANDEX_KEYRING = "/etc/apt/keyrings/yandex-browser.asc"
+YANDEX_LIST = "/etc/apt/sources.list.d/yandex-browser.list"
+PACKAGES = ("tigervnc-standalone-server", "matchbox-window-manager", "xfonts-base", "fonts-dejavu-core",
+            "fonts-liberation", "fonts-noto-core", "fonts-noto-color-emoji", "libgl1-mesa-dri", "dbus-daemon",
+            "wmctrl", "gnupg")
+TZ_DEFAULT = "Europe/Moscow"
 EUROPE = set("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE GB CH NO IS LI "
              "MD RS ME MK AL BA AD MC SM VA".split())
 
@@ -60,7 +80,7 @@ KINDS = {
 
 try:
     from ..core.util import Fail as _Fail
-except ImportError:                     # запуск сеанса от pcs-browser: тот же пакет, но на всякий
+except ImportError:
     _Fail = Exception
 
 
@@ -245,17 +265,19 @@ def _https_get(up, host, path, timeout=15):
 
 
 def check(up, kind=None):
-    """Внешний адрес через прокси и страна: {ip, cc, country, city, region_ok}."""
+    """Внешний адрес через прокси, страна и часовой пояс: {ip, cc, country, city, tz, region_ok}."""
     try:
-        d = json.loads(_https_get(up, "ipwho.is", "/?lang=ru&fields=success,ip,country,country_code,city"))
+        d = json.loads(_https_get(up, "ipwho.is", "/?lang=ru&fields=success,ip,country,country_code,city,timezone"))
         if not d.get("success", True) or not d.get("ip"):
             raise ValueError
-        out = {"ip": d["ip"], "cc": d.get("country_code"), "country": d.get("country"), "city": d.get("city")}
+        tz = (d.get("timezone") or {}).get("id") if isinstance(d.get("timezone"), dict) else None
+        out = {"ip": d["ip"], "cc": d.get("country_code"), "country": d.get("country"), "city": d.get("city"),
+               "tz": tz if tz and re.fullmatch(r"[A-Za-z_]+(/[A-Za-z0-9_+-]+){0,2}", tz) else None}
     except (BrowserFail, ValueError, KeyError):
         ip = _https_get(up, "api.ipify.org", "/").strip()
         if not re.fullmatch(r"[0-9a-fA-F.:]{3,45}", ip):
             raise BrowserFail("внешний адрес не узнать: ответ «%s»" % ip[:60])
-        out = {"ip": ip, "cc": None, "country": None, "city": None}
+        out = {"ip": ip, "cc": None, "country": None, "city": None, "tz": None}
     want = KINDS.get(kind, {}).get("want")
     cc = (out["cc"] or "").upper()
     out["region_ok"] = None if not cc or not want else (cc == "RU" if want == "ru" else cc in EUROPE)
@@ -263,16 +285,30 @@ def check(up, kind=None):
     return out
 
 
-# ── пересыльщик: SOCKS5 на unix-сокете → прокси пользователя ─────────────────
+# ── пересыльщик: SOCKS5 внутри namespace браузера → прокси пользователя ──────
+
+def setns(fd):
+    """Перевести ТЕКУЩИЙ поток в network namespace (fd). Сокеты, созданные потоком после этого,
+    живут там; уже открытые остаются, где были."""
+    if hasattr(os, "setns"):
+        os.setns(fd, getattr(os, "CLONE_NEWNET", 0x40000000))
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.setns(fd, 0x40000000) != 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+
 
 class Forward:
-    """Firefox → unix-сокет (SOCKS5 без пароля) → прокси пользователя. Прокси берётся из
-    session.json при каждом соединении; сменился — открытые соединения рвутся."""
+    """SOCKS5 без пароля (для sing-box) → прокси пользователя. Слушает там, куда указывает
+    listen_in (fd namespace браузера) или в своём; к прокси ходит из сети машины. Прокси —
+    из session.json при каждом соединении; сменился — открытые соединения рвутся."""
 
-    def __init__(self, path, conf_file):
-        self.path, self.conf_file = path, conf_file
+    def __init__(self, conf_file, port=FWD_PORT, listen_in=None, unix=None):
+        self.conf_file, self.port, self.listen_in, self.unix = conf_file, port, listen_in, unix
         self.conns = set()
         self.lock = threading.Lock()
+        self.ready = threading.Event()
         self._up, self._mt = None, None
 
     def upstream(self):
@@ -302,15 +338,34 @@ class Forward:
             except OSError:
                 pass
 
-    def serve(self):
+    def listener(self):
+        if self.unix:                                   # проверки: unix-сокет
+            try:
+                os.unlink(self.unix)
+            except OSError:
+                pass
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(self.unix)
+            os.chmod(self.unix, 0o600)
+            return srv
+        own = None
+        if self.listen_in is not None:
+            own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
+            setns(self.listen_in)
         try:
-            os.unlink(self.path)
-        except OSError:
-            pass
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(self.path)
-        os.chmod(self.path, 0o600)
-        srv.listen(128)
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("127.0.0.1", self.port))
+        finally:
+            if own is not None:
+                setns(own)                              # назад: к прокси — из сети машины
+                os.close(own)
+        return srv
+
+    def serve(self):
+        srv = self.listener()
+        srv.listen(256)
+        self.ready.set()
         threading.Thread(target=self._watch, daemon=True).start()
         while True:
             c, _ = srv.accept()
@@ -338,7 +393,7 @@ class Forward:
             else:
                 return
             port = struct.unpack("!H", _recv_exact(c, 2))[0]
-            if cmd != 1:                    # только CONNECT: UDP через прокси браузер не шлёт
+            if cmd != 1:                    # только TCP: UDP прокси не возит, браузер перейдёт на TCP
                 c.sendall(b"\x05\x07\x00\x01\0\0\0\0\0\0")
                 return
             up = self.upstream()
@@ -386,72 +441,77 @@ def relay(a, b, chunk=65536):
             (b if s is a else a).sendall(d)
 
 
-# ── профиль Firefox ──────────────────────────────────────────────────────────
+# ── «роутер»: sing-box в namespace браузера ──────────────────────────────────
 
-def prefs(k):
-    """Обычный Firefox: только прокси, сохранение сеанса и тишина первого запуска."""
-    sock = os.path.join(RUNDIR % k, "proxy.sock")
-    p = {
-        "network.proxy.type": 1,
-        "network.proxy.socks": "file://" + sock,
-        "network.proxy.socks_port": 0,
-        "network.proxy.socks_version": 5,
-        "network.proxy.socks_remote_dns": True,         # DNS — тоже через прокси
-        "network.proxy.no_proxies_on": "",
-        "network.proxy.allow_hijacking_localhost": True,
-        "network.trr.mode": 5,                          # без DoH мимо прокси
-        "media.peerconnection.ice.proxy_only": True,    # WebRTC не светит адрес машины
-        "media.peerconnection.ice.default_address_only": True,
-        "browser.startup.page": 3,                      # вкладки — как были
-        "browser.sessionstore.resume_from_crash": True,
-        "browser.shell.checkDefaultBrowser": False,
-        "browser.aboutwelcome.enabled": False,
-        "trailhead.firstrun.didSeeAboutWelcome": True,
-        "browser.startup.homepage_override.mstone": "ignore",
-        "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
-        "toolkit.telemetry.reportingpolicy.firstRun": False,
-        "browser.tabs.warnOnClose": False,
-        "browser.warnOnQuit": False,
-        "browser.sessionstore.max_resumed_crashes": 100,  # обрыв (свет, перезагрузка) — тоже вкладки как были
-        "intl.accept_languages": "ru-RU, ru, en-US, en",
-        "intl.locale.requested": "ru",
-        "app.update.auto": False,
+def singbox_config(port=FWD_PORT):
+    """tun0 — маршрут по умолчанию namespace; всё — в пересыльщик на 127.0.0.1:port.
+    DNS перехватывается и идёт через прокси по TCP (ipv4_only: IPv6 у прокси обычно нет)."""
+    return {
+        "log": {"level": "warn", "timestamp": False},
+        "dns": {"servers": [{"type": "tcp", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"}],
+                "final": "remote", "strategy": "ipv4_only"},
+        "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": "tun0", "address": [TUN_ADDR],
+                      "mtu": 1420, "auto_route": False, "strict_route": False, "stack": "system"}],
+        "outbounds": [{"type": "socks", "tag": "proxy", "version": "5", "server": "127.0.0.1", "server_port": port}],
+        # UDP прокси не возит: отклоняем сразу (ICMP «порт недоступен»), как в сети с закрытым UDP —
+        # браузер тут же переходит с QUIC на TCP, а не ждёт таймаутов на каждой странице.
+        "route": {"rules": [{"port": 53, "action": "hijack-dns"}, {"network": "udp", "action": "reject"}],
+                  "final": "proxy", "auto_detect_interface": False},
     }
-    lines = ["// PCS: пишется при каждом запуске браузера из панели; свои настройки — в about:config"]
-    for name, v in p.items():
-        lines.append("user_pref(%s, %s);" % (json.dumps(name), json.dumps(v)))
-    return "\n".join(lines) + "\n"
 
 
 # ── установка и сеансы (root, процесс панели) ────────────────────────────────
 
+def browser_bin():
+    return shutil.which(BROWSER)
+
+
 def installed():
-    return bool(shutil.which(FIREFOX) and shutil.which(XVNC) and shutil.which(WM))
+    return bool(browser_bin() and shutil.which(XVNC) and shutil.which(WM) and os.path.exists(SINGBOX))
+
+
+def _yandex_repo(log):
+    """Репозиторий Яндекс Браузера: ключ — только с закреплённым отпечатком."""
+    import urllib.request
+    key = urllib.request.urlopen(YANDEX_KEY, timeout=60).read()
+    r = subprocess.run(["gpg", "--show-keys", "--with-colons"], input=key, capture_output=True)
+    fprs = [ln.split(b":")[9].decode() for ln in r.stdout.splitlines() if ln.startswith(b"fpr:")]
+    if not fprs or fprs[0] != YANDEX_FPR:
+        raise BrowserFail("ключ репозитория Яндекс Браузера не тот (%s) — не ставлю" % (fprs[:1] or "не прочитан"))
+    os.makedirs(os.path.dirname(YANDEX_KEYRING), exist_ok=True)
+    with open(YANDEX_KEYRING, "wb") as f:
+        f.write(key)
+    os.chmod(YANDEX_KEYRING, 0o644)
+    line = "deb [arch=amd64 signed-by=%s] %s stable main\n" % (YANDEX_KEYRING, YANDEX_REPO)
+    with open(YANDEX_LIST, "w") as f:
+        f.write(line)
+    log("репозиторий Яндекс Браузера: %s (ключ %s…)" % (YANDEX_REPO, YANDEX_FPR[:16]))
 
 
 def install(log=print):
-    """Пакеты браузера (≈300 МБ) и пользователь pcs-browser. Повторять можно."""
+    """Яндекс Браузер, экран, шрифты, sing-box и пользователь pcs-browser. Повторять можно."""
     from ..hivelink.common import apt_install
-    osr = ""
-    try:
-        with open("/etc/os-release") as f:
-            osr = f.read()
-    except OSError:
-        pass
-    if re.search(r"^ID=\"?ubuntu", osr, re.M):
-        raise BrowserFail("на Ubuntu Firefox ESR в apt нет (только snap) — браузер ставится на хост Proxmox/Debian")
-    if not os.path.exists("/etc/debian_version"):
-        raise BrowserFail("браузер ставится на Debian/Proxmox")
-    if not shutil.which("apt-get"):
-        raise BrowserFail("нет apt-get")
-    got = apt_install(list(PACKAGES), log=log)
+    from ..core import singbox
+    if not os.path.exists("/etc/debian_version") or not shutil.which("apt-get"):
+        raise BrowserFail("браузер ставится на Debian/Proxmox/Ubuntu (apt)")
+    if os.uname().machine not in ("x86_64", "amd64"):
+        raise BrowserFail("Яндекс Браузер для Linux — только amd64")
+    got = apt_install(["gnupg", "curl"], log=log)
+    _yandex_repo(log)
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    subprocess.run(["apt-get", "-o", "DPkg::Lock::Timeout=600", "update"], env=env, capture_output=True, timeout=600)
+    got += apt_install(list(PACKAGES) + [BROWSER], log=log)
     log("пакеты на месте" + (": поставлены %s" % " ".join(got) if got else ""))
+    if not os.path.exists(SINGBOX):
+        singbox.install()
+        log("sing-box %s поставлен" % singbox.VERSION)
     ensure_user()
     if not installed():
         raise BrowserFail("после установки нет %s — см. журнал apt" % ", ".join(
-            x for x in (FIREFOX, XVNC, WM) if not shutil.which(x)))
-    log("браузер готов: %s" % subprocess.run([FIREFOX, "--version"], capture_output=True, text=True).stdout.strip())
-    return {"installed": True}
+            x for x in (BROWSER, XVNC, WM, SINGBOX) if not (shutil.which(x) or os.path.exists(x))))
+    v = subprocess.run([browser_bin(), "--version"], capture_output=True, text=True).stdout.strip()
+    log("браузер готов: %s" % (v or BROWSER))
+    return {"installed": True, "version": v}
 
 
 def ensure_user():
@@ -478,7 +538,7 @@ def save_conf(k, c):
     tmp = conf_path(k) + ".tmp"
     with open(tmp, "w") as f:
         json.dump(c, f, ensure_ascii=False, indent=1)
-    _own(tmp, 0o600)
+    os.chmod(tmp, 0o600)                    # прокси с паролем — только root (пересыльщик — root)
     os.replace(tmp, conf_path(k))
 
 
@@ -499,7 +559,7 @@ def all_running():
 
 
 def _display(k):
-    """Свой номер X-дисплея на ключ (60–259): абстрактные сокеты X общие на всю машину."""
+    """Свой номер X-дисплея и namespace на ключ (60–259)."""
     path = os.path.join(ROOT, "displays.json")
     try:
         with open(path) as f:
@@ -514,12 +574,12 @@ def _display(k):
     return d[k]
 
 
-def start(k, size=None):
+def start(k):
     if not installed():
         raise BrowserFail("браузер не установлен — «Установить браузер»")
     c = load_conf(k)
     if not c.get("proxy"):
-        raise BrowserFail("сначала прокси: без него браузер вышел бы в сеть с адреса сервера")
+        raise BrowserFail("сначала прокси: без него браузеру некуда ходить")
     if running(k):
         return {"running": True, "started": False}
     if len(all_running()) >= MAX_RUNNING:
@@ -529,37 +589,30 @@ def start(k, size=None):
     for d in (h, os.path.join(h, "profile"), os.path.join(h, "home")):
         os.makedirs(d, exist_ok=True)
         _own(d, 0o700)
-    uj = os.path.join(h, "profile", "user.js")
-    with open(uj, "w") as f:
-        f.write(prefs(k))
-    _own(uj, 0o600)
-    w, hh = size or (1600, 900)
+    tz = (c.get("check") or {}).get("tz") or TZ_DEFAULT
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     cmd = ["systemd-run", "--unit", UNIT % k, "--collect", "--quiet",
            "--description", "PCS: браузер %s (%s)" % (KINDS[kind_of(k)]["title"], k),
-           "-p", "User=" + USER, "-p", "Group=" + USER,
-           "-p", "RuntimeDirectory=" + (RUNDIR % k)[5:], "-p", "RuntimeDirectoryMode=0700",
-           "-p", "PrivateTmp=yes", "-p", "ProtectHome=yes", "-p", "ProtectSystem=strict",
-           # mixed: SIGTERM — только нашему процессу; он сам закрывает Firefox (тот сохраняет вкладки
-           # и куки), потом экран. control-group уронил бы экран одновременно с Firefox.
-           "-p", "ReadWritePaths=" + h, "-p", "TimeoutStopSec=30", "-p", "KillMode=mixed",
-           "-p", "MemoryMax=3G", "-p", "Nice=5",
-           "--setenv", "PYTHONPATH=" + root,
-           sys.executable, "-m", "pcs.web.browser", "run", k, str(_display(k)), "%dx%d" % (w, hh)]
+           # mixed: SIGTERM — только нашему процессу; он закрывает браузер по-хорошему (вкладки и
+           # куки сохраняются), потом экран, «роутер» и namespace.
+           "-p", "KillMode=mixed", "-p", "TimeoutStopSec=45", "-p", "PrivateTmp=yes",
+           "-p", "ProtectHome=yes", "-p", "MemoryMax=4G", "-p", "Nice=5",
+           "--setenv", "PYTHONPATH=" + root, "--setenv", "PCS_BROWSER_TZ=" + tz,
+           sys.executable, "-m", "pcs.web.browser", "run", k, str(_display(k))]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise BrowserFail("не запустился: %s" % (r.stderr or r.stdout).strip()[-300:])
     sock = os.path.join(RUNDIR % k, "vnc.sock")
-    for _ in range(100):
+    for _ in range(150):
         if os.path.exists(sock):
             return {"running": True, "started": True}
         if not running(k):
             break
         time.sleep(0.15)
-    why = subprocess.run(["journalctl", "-u", UNIT % k, "-n", "8", "--no-pager", "-o", "cat"],
+    why = subprocess.run(["journalctl", "-u", UNIT % k, "-n", "10", "--no-pager", "-o", "cat"],
                          capture_output=True, text=True).stdout.strip()
     stop(k)
-    raise BrowserFail("экран браузера не поднялся%s" % (": " + why.replace("\n", " | ")[-400:] if why else ""))
+    raise BrowserFail("экран браузера не поднялся%s" % (": " + why.replace("\n", " | ")[-500:] if why else ""))
 
 
 def stop(k):
@@ -579,7 +632,7 @@ def open_url(k, url):
     if not os.path.exists(p):
         raise BrowserFail("браузер не запущен")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(10)
+    s.settimeout(20)
     try:
         s.connect(p)
         s.sendall(json.dumps({"open": url}).encode() + b"\n")
@@ -593,43 +646,135 @@ def open_url(k, url):
     return {"opened": url}
 
 
-# ── сеанс (pcs-browser, внутри юнита) ────────────────────────────────────────
+# ── сеанс: root — сеть и «роутер»; pcs-browser — экран и браузер ─────────────
 
-def run(k, display, size="1600x900"):
-    """Пересыльщик, dbus, экран, оконный менеджер, Firefox. Кончается вместе с Firefox."""
+def _sh(*a, **kw):
+    return subprocess.run(a, capture_output=True, text=True, **kw)
+
+
+def run(k, display):
+    """root, юнит pcs-browser-<ключ>: namespace, пересыльщик, sing-box, потом сеанс от pcs-browser.
+    Кончается вместе с сеансом; namespace снимается всегда."""
+    d = int(display)
+    ns = NS % d
+    rd = RUNDIR % k
+    os.makedirs(rd, exist_ok=True)
+    _own(rd, 0o750)
+    pw = pwd.getpwnam(USER)
+    _sh("ip", "netns", "del", ns)
+    r = _sh("ip", "netns", "add", ns)
+    if r.returncode != 0:
+        print("✗ namespace %s: %s" % (ns, r.stderr.strip()), file=sys.stderr)
+        return 1
+    kids = []
+    try:
+        _sh("ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up")
+        _sh("ip", "netns", "exec", ns, "sysctl", "-qw", "net.ipv6.conf.all.disable_ipv6=1",
+            "net.ipv6.conf.default.disable_ipv6=1")
+        # DNS браузера: любой адрес на :53 уходит в tun и перехватывается sing-box
+        etc = "/etc/netns/" + ns
+        os.makedirs(etc, exist_ok=True)
+        with open(os.path.join(etc, "resolv.conf"), "w") as f:
+            f.write("nameserver 1.1.1.1\noptions edns0\n")
+        nsfd = os.open("/run/netns/" + ns, os.O_RDONLY)
+        fw = Forward(conf_path(k), FWD_PORT, listen_in=nsfd)
+        threading.Thread(target=fw.serve, daemon=True).start()
+        if not fw.ready.wait(10):
+            raise RuntimeError("пересыльщик не поднялся")
+        cfg = os.path.join(rd, "singbox.json")
+        with open(cfg, "w") as f:
+            json.dump(singbox_config(FWD_PORT), f)
+        os.chmod(cfg, 0o600)
+        sb = subprocess.Popen(["ip", "netns", "exec", ns, SINGBOX, "run", "-c", cfg], stdin=subprocess.DEVNULL)
+        kids.append(sb)
+        for _ in range(100):
+            if "inet 172.19.0.1/" in _sh("ip", "netns", "exec", ns, "ip", "-4", "-o", "addr", "show", "dev",
+                                         "tun0").stdout or sb.poll() is not None:
+                break
+            time.sleep(0.1)
+        r = _sh("ip", "netns", "exec", ns, "ip", "route", "replace", "default", "dev", "tun0")
+        if r.returncode != 0:
+            raise RuntimeError("маршрут через tun0: %s" % r.stderr.strip())
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+               "PCS_BROWSER_TZ": os.environ.get("PCS_BROWSER_TZ", TZ_DEFAULT)}
+        sess = subprocess.Popen(["ip", "netns", "exec", ns, "setpriv", "--reuid=%d" % pw.pw_uid,
+                                 "--regid=%d" % pw.pw_gid, "--init-groups", "--",
+                                 sys.executable, "-m", "pcs.web.browser", "session", k, str(d)],
+                                env=env, stdin=subprocess.DEVNULL)
+        kids.append(sess)
+        stopping = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+        signal.signal(signal.SIGINT, lambda *_: stopping.set())
+        while sess.poll() is None and not stopping.is_set():
+            time.sleep(0.5)
+        if sess.poll() is None:
+            sess.send_signal(signal.SIGTERM)        # сеанс сам закрывает браузер по-хорошему
+            try:
+                sess.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                sess.kill()
+        return 0
+    except (OSError, RuntimeError) as e:
+        print("✗ %s" % e, file=sys.stderr)
+        return 1
+    finally:
+        for p in kids[::-1]:
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+        _sh("ip", "netns", "del", ns)
+        shutil.rmtree("/etc/netns/" + ns, ignore_errors=True)
+
+
+def _windows(env):
+    out = subprocess.run(["wmctrl", "-l"], env=env, capture_output=True, text=True, timeout=5).stdout
+    return [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+
+
+def session(k, display):
+    """pcs-browser, внутри namespace браузера: dbus, экран, оконный менеджер, браузер, управление."""
     rd = RUNDIR % k
     h = home(k)
     disp = ":%d" % int(display)
-    # C.UTF-8 есть везде (ru_RU в системе может быть не собрана); язык Firefox — из его настроек
-    env = dict(os.environ, DISPLAY=disp, HOME=os.path.join(h, "home"), TZ=TZ, LANG="C.UTF-8",
-               LANGUAGE="ru", MOZ_CRASHREPORTER_DISABLE="1", MOZ_DBUS_REMOTE="1", MOZ_ENABLE_WAYLAND="0",
-               DBUS_SESSION_BUS_ADDRESS="unix:path=%s/bus" % rd, XDG_RUNTIME_DIR=rd)
-    fw = Forward(os.path.join(rd, "proxy.sock"), conf_path(k))
-    threading.Thread(target=fw.serve, daemon=True).start()
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "DISPLAY": disp, "HOME": os.path.join(h, "home"),
+           "TZ": os.environ.get("PCS_BROWSER_TZ") or TZ_DEFAULT, "LANG": "ru_RU.UTF-8", "LANGUAGE": "ru",
+           "LC_ALL": "C.UTF-8", "DBUS_SESSION_BUS_ADDRESS": "unix:path=%s/bus" % rd, "XDG_RUNTIME_DIR": rd,
+           "USER": USER, "LOGNAME": USER}
     kids = []
 
-    def spawn(argv, **kw):
-        p = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, **kw)
+    def spawn(argv):
+        p = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL)
         kids.append(p)
         return p
 
     spawn(["dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=unix:path=%s/bus" % rd])
-    x = spawn([XVNC, disp, "-geometry", size, "-depth", "24", "-SecurityTypes", "None", "-rfbport", "-1",
+    x = spawn([XVNC, disp, "-geometry", SCREEN, "-depth", "24", "-SecurityTypes", "None", "-rfbport", "-1",
                "-rfbunixpath", os.path.join(rd, "vnc.sock"), "-rfbunixmode", "0600", "-nolisten", "tcp",
-               "-AlwaysShared", "-desktop", "PCS " + KINDS[kind_of(k)]["title"]])
-    for _ in range(100):                # экран готов, когда VNC открыл свой сокет
+               "-AlwaysShared", "-AcceptSetDesktopSize=0", "-desktop", "PCS " + KINDS[kind_of(k)]["title"]])
+    for _ in range(100):
         if os.path.exists(os.path.join(rd, "vnc.sock")) or x.poll() is not None:
             break
         time.sleep(0.1)
     spawn([WM, "-use_titlebar", "no"])
     profile = os.path.join(h, "profile")
-    first = not os.path.exists(os.path.join(profile, "prefs.js"))      # профиль ещё не запускали
-    start_url = [KINDS[kind_of(k)]["links"][0][1]] if first else []
-    ff = spawn([FIREFOX, "--profile", profile, "--class", "pcs-browser"] + start_url)
+    first = not os.path.exists(os.path.join(profile, "Local State"))
+    # Флаги — только то, чего сайты не видят: профиль, без мастера первого запуска, хранилище паролей
+    # без связки ключей. --enable-unsafe-swiftshader — штатный программный WebGL Chromium, как у
+    # любого Chrome без видеокарты (ВМ, удалённый стол): без него WebGL нет вовсе — это заметнее.
+    base = [browser_bin() or BROWSER, "--user-data-dir=" + profile, "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic", "--enable-unsafe-swiftshader"]
+    br = spawn(base + ([KINDS[kind_of(k)]["links"][0][1]] if first else []))
     done = threading.Event()
 
     def ctl():
         p = os.path.join(rd, "ctl.sock")
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(p)
         os.chmod(p, 0o600)
@@ -637,15 +782,15 @@ def run(k, display, size="1600x900"):
         while not done.is_set():
             c, _ = srv.accept()
             try:
-                c.settimeout(10)
+                c.settimeout(20)
                 msg = json.loads(c.recv(8192).decode("utf-8"))
                 url = msg.get("open", "")
                 if not re.fullmatch(r"https?://[^\s\"'<>]{1,2000}", url):
                     c.sendall(b"bad url\n")
                     continue
-                r = subprocess.run([FIREFOX, "--profile", profile, "--new-tab", url], env=env,
-                                   capture_output=True, text=True, timeout=20)
-                c.sendall(b"ok\n" if r.returncode == 0 else ("firefox: %s\n" % r.stderr.strip()[-200:]).encode())
+                # второй запуск с тем же профилем отдаёт адрес уже открытому браузеру
+                r = subprocess.run(base + [url], env=env, capture_output=True, text=True, timeout=20)
+                c.sendall(b"ok\n" if r.returncode == 0 else ("браузер: %s\n" % r.stderr.strip()[-200:]).encode())
             except (OSError, ValueError, subprocess.TimeoutExpired) as e:
                 try:
                     c.sendall(("%s\n" % e).encode())
@@ -655,30 +800,33 @@ def run(k, display, size="1600x900"):
                 c.close()
 
     threading.Thread(target=ctl, daemon=True).start()
-
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
-    while ff.poll() is None and x.poll() is None and not stopping.is_set():
+    while br.poll() is None and x.poll() is None and not stopping.is_set():
         try:
-            ff.wait(timeout=1)
+            br.wait(timeout=1)
         except subprocess.TimeoutExpired:
             pass
-    # Закрыть по-хорошему: окно — через оконный менеджер, как крестиком. Так Firefox пишет
-    # сеанс (вкладки) и сбрасывает куки на диск; на SIGTERM он выходит наспех.
-    end = time.monotonic() + 20
-    while ff.poll() is None and x.poll() is None and time.monotonic() < end:
-        subprocess.run(["wmctrl", "-x", "-c", "pcs-browser"], env=env, capture_output=True, timeout=5)
+    # Закрыть по-хорошему: окна — как крестиком; браузер пишет вкладки и куки. Не вышел — SIGTERM
+    # (Chromium и на него закрывается чисто).
+    end = time.monotonic() + 15
+    while br.poll() is None and x.poll() is None and time.monotonic() < end:
         try:
-            ff.wait(timeout=2)
+            for w in _windows(env):
+                subprocess.run(["wmctrl", "-i", "-c", w], env=env, capture_output=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            br.wait(timeout=2)
         except subprocess.TimeoutExpired:
             pass
-    if ff.poll() is None:
-        ff.send_signal(signal.SIGTERM)
+    if br.poll() is None:
+        br.send_signal(signal.SIGTERM)
         try:
-            ff.wait(timeout=10)
+            br.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            ff.kill()
+            br.kill()
     done.set()
     for p in kids:
         if p.poll() is None:
@@ -728,18 +876,22 @@ class Manager:
         c = load_conf(k)
         kind = kind_of(k)
         return {"key": k, "kind": kind, "title": KINDS[kind]["title"], "want": KINDS[kind]["want_text"],
-                "installed": installed(), "install_job": self._install_job,
+                "installed": installed(), "install_job": self._install_job, "browser": "Яндекс Браузер",
                 "running": running(k), "proxy": masked(c.get("proxy")), "proxy_type": (c.get("proxy") or {}).get("scheme"),
                 "check": c.get("check"), "links": c.get("links") or KINDS[kind]["links"], "idle_min": IDLE // 60,
+                "tz": (c.get("check") or {}).get("tz") or TZ_DEFAULT,
                 "profile": os.path.join(home(k), "profile"), "used": os.path.isdir(os.path.join(home(k), "profile"))}
 
     def set_proxy(self, k, text, ptype):
         up = parse_proxy(text, ptype)
         res = check(up, kind_of(k))               # не работает — не сохраняем
         c = load_conf(k)
+        old_tz = (c.get("check") or {}).get("tz")
         c.update(proxy=up, check=res)
         save_conf(k, c)
-        return {"check": res, "proxy": masked(up), "running": running(k)}
+        run_ = running(k)
+        return {"check": res, "proxy": masked(up), "running": run_,
+                "tz_changed": bool(run_ and res.get("tz") and res.get("tz") != old_tz)}
 
     def recheck(self, k):
         c = load_conf(k)
@@ -783,9 +935,11 @@ class Manager:
 
 
 def main(argv):
-    if len(argv) >= 3 and argv[0] == "run":
-        return run(argv[1], argv[2], argv[3] if len(argv) > 3 else "1600x900")
-    print("python3 -m pcs.web.browser run КЛЮЧ ДИСПЛЕЙ [ШxВ] — сеанс браузера (зовёт systemd-run)", file=sys.stderr)
+    if len(argv) == 3 and argv[0] == "run":
+        return run(argv[1], argv[2])
+    if len(argv) == 3 and argv[0] == "session":
+        return session(argv[1], argv[2])
+    print("python3 -m pcs.web.browser run|session КЛЮЧ ДИСПЛЕЙ — сеанс браузера (зовёт systemd-run)", file=sys.stderr)
     return 2
 
 
