@@ -1660,7 +1660,7 @@ def reboot_cycle(n, p, send=True):
                 raise Fail("модем не принял перезагрузку: HTTP %s %s" % (code, xml("code", resp)))
         usb0_down(n)
         try:
-            udc = unbind(n)
+            udc = unbind(n) or state()["modems"].get(str(n), {}).get("slot", "")    # уже вынут — свой слот
             log("модем %d: перезагружается — USB вынут" % n)
             took = wait_real_modem(p)
             bind(n, udc)
