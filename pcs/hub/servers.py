@@ -313,7 +313,7 @@ def setup(s, mode=None, sheet="", fresh=False):
         if remote.stream(s, "proxyveth mode %s --yes" % shlex.quote(mode)) != 0:
             pv_ok = False
             w = ("proxyveth mode %s не прошёл — ВМ доделываю без него; повторить: на странице ВМ «управление» → "
-                 "«Режим proxyveth» или pcs proxyveth mode %s --server %s" % (mode, mode, s["id"]))
+                 "«Режим proxyveth» или pcs proxyveth mode %s --yes --server %s" % (mode, mode, s["id"]))
             ui.warn(w)
             warns.append(w)
         else:
