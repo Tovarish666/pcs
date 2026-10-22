@@ -11,6 +11,7 @@
     python3 tests/test_proxyveth_usb.py
 """
 import asyncio
+import inspect
 import json
 import time
 import os
@@ -515,6 +516,90 @@ def test_apply():
     check("прямые прокси — и на сохранённом модеме с кривой строкой", did["proxy"] == [1, 2, 9], did["proxy"])
 
 
+def test_hcd_build():
+    print("dummy_hcd: исходник без сети, следующий источник при неудаче:")
+    names = [w for w, _ in vm._hcd_sources("6.8")]
+    check("порядок: прошлая сборка → копия в PCS → linux-source → сеть → пакет из зеркала Ubuntu",
+          names[0] == "копия от прошлой сборки" and names[1].startswith("копия в PCS")
+          and names[-1].startswith("пакет linux-source-6.8.0") and "raw.githubusercontent.com" in names, names)
+    code = dict(vm._hcd_sources("6.8"))[names[1]]()
+    check("копия в PCS для ядер 6.8 есть и годится", code and "MAX_NUM_UDC" in code and "SPDX-License-Identifier: GPL-2.0+" in code)
+    ran = []
+    real = (vm.sh, vm.apt, vm._hcd_sources, vm.wr, vm.os.makedirs, vm.log)
+
+    def fake_sh(*a, **kw):
+        ran.append(a)
+        bad = a[:2] == ("dkms", "install") and FAIL["n"] > 0
+        if bad:
+            FAIL["n"] -= 1
+        return types.SimpleNamespace(returncode=1 if bad else 0, stdout="", stderr="make: *** ошибка" if bad else "")
+    FAIL = {"n": 1}
+    got = []
+    vm.sh, vm.apt, vm.wr = fake_sh, (lambda *p: None), (lambda path, text, *a: got.append((path, text)))
+    vm.os.makedirs, vm.log = (lambda *a, **k: None), (lambda *a: None)
+    vm._hcd_sources = lambda series: [("пусто", lambda: None), ("первый", lambda: "#define MAX_NUM_UDC\t32\nA"),
+                                      ("второй", lambda: "#define MAX_NUM_UDC\t32\nB")]
+    try:
+        where = vm.build_dummy_hcd()
+        code = [t for p, t in got if p.endswith("/dummy_hcd.c")]
+        check("первый источник не собрался — собран из следующего; MAX_NUM_UDC → 64",
+              where == "второй" and code[-1].startswith("#define MAX_NUM_UDC\t64") and code[-1].endswith("B"), (where, code))
+        FAIL["n"] = 5
+        try:
+            vm.build_dummy_hcd()
+            msg = None
+        except vm.Fail as e:
+            msg = str(e)
+        check("ни один не собрался — понятная ошибка со всеми попытками",
+              msg and "пусто — нет" in msg and "первый — не собрался" in msg and "второй — не собрался" in msg, msg)
+    finally:
+        vm.sh, vm.apt, vm._hcd_sources, vm.wr, vm.os.makedirs, vm.log = real
+
+
+def test_unplug_order():
+    print("гаджет вынимается только при опущенном usb0 (паника u_ether, ВМ 1000):")
+    ev = []
+
+    def fake_nsh(ns, *a, **k):
+        ev.append(("nsh", ns) + a)
+        return types.SimpleNamespace(stdout="", returncode=0)
+
+    def boom(n, udc):
+        ev.append(("bind", n))
+        raise OSError(16, "Device or resource busy")
+    tmp = tempfile.mkdtemp()
+    undo = patch(vm, nsh=fake_nsh, RUN=tmp, log=lambda *a: None, wait_real_modem=lambda p: 7.0,
+                 unbind=lambda n: ev.append(("unbind", n)) or "dummy_udc.3",
+                 bind=lambda n, udc: ev.append(("bind", n)), host_side=lambda n: (None, None), wr=vm.wr)
+    try:
+        def order(fn):
+            del ev[:]
+            fn()
+            return [e[0] if e[0] != "nsh" else " ".join(e[2:5]) for e in ev]
+        down, up = "link set usb0", "route replace 192.168.205.0/24"
+        got = order(lambda: vm.reboot_cycle(205, {"n": 205}, send=False))
+        check("перезагрузка: usb0 down → вынуть → вставить → usb0 up и маршрут в таблице 100",
+              got == [down, "unbind", "bind", down, up] and ev[0][-1] == "down" and ev[-2][-1] == "up"
+              and ev[-1][-2:] == ("table", "100"), ev)
+        got = order(lambda: vm.replug(205, {"modems": {}}))
+        check("переподключение гаджетом — так же", got == [down, "unbind", "bind", down, up], ev)
+        vm.host_side, vm.wr = (lambda n: ("3-1", "eth5")), (lambda path, text: ev.append(("wr", path.rsplit("/", 1)[1])))
+        got = order(lambda: vm.replug(205))
+        check("переподключение со стороны сервера — тоже при опущенном usb0",
+              got == [down, "wr", "wr", down, up] and [e[1] for e in ev if e[0] == "wr"] == ["unbind", "bind"], ev)
+        vm.host_side, vm.bind = (lambda n: (None, None)), boom
+        try:
+            vm.reboot_cycle(205, {"n": 205}, send=False)
+        except OSError:
+            pass
+        check("вставить не вышло — usb0 всё равно поднят обратно", ev[-1][-2:] == ("table", "100"), ev)
+    finally:
+        undo()
+    src = inspect.getsource(vm.destroy)
+    check("снятие модема: usb0 down раньше, чем разборка гаджета",
+          0 < src.index("usb0_down(n)") < src.index("drop_gadget(gdir(n))"))
+
+
 def test_teardown():
     print("teardown — снять всё своё:")
     tmp = tempfile.mkdtemp()
@@ -592,5 +677,7 @@ if __name__ == "__main__":
     test_row()
     test_apply()
     test_teardown()
+    test_hcd_build()
+    test_unplug_order()
     print("\nитого: ok %d, fail %d" % (passed, failed))
     sys.exit(1 if failed else 0)

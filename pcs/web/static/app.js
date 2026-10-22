@@ -514,14 +514,21 @@
       if (started) timer.textContent = (finished ? "за " : "") + clock((finished || Date.now() / 1000) - started);
     }
     function drawStages(log, state) {
-      const names = log.map((l) => (STAGE_RE.exec(l) || [])[1]).filter(Boolean);
+      // этапы и замечания (⚠) внутри каждого
+      const names = [], warned = [];
+      for (const l of log) {
+        const m = STAGE_RE.exec(l);
+        if (m) { names.push(m[1]); warned.push(false); }
+        else if (names.length && /⚠/.test(l)) warned[warned.length - 1] = true;
+      }
       stages.hidden = !names.length;
       if (!names.length || names.length === seen && state === "running") return;
       seen = names.length;
       const prev = stages.childElementCount;
       stages.replaceChildren(...names.map((n, i) => {
         const last = i === names.length - 1;
-        const cls = !last || state === "done" ? "done" : state === "running" ? "now" : "fail";
+        let cls = !last || state === "done" ? "done" : state === "running" ? "now" : "fail";
+        if (cls === "done" && warned[i]) cls = "warn";
         return el("li", {class: cls + (i >= prev ? " fresh" : "")}, el("span", {class: "mk", "aria-hidden": "true"}), el("span", {text: n}));
       }));
     }
@@ -545,9 +552,12 @@
       drawStages(j.log || [], j.state);
       if (j.state === "running" || j.state === "queued") { setTimeout(tick, 1500); return; }
       if (j.state === "done") {
-        setRes(st, "ok", "готово");
+        const W = (j.result && Array.isArray(j.result.warnings)) ? j.result.warnings : [];
+        setRes(st, W.length ? "" : "ok", W.length ? "готово, с замечаниями: " + W.length : "готово");
         const home = opts.base && opts.base.indexOf("/api/nodes/") === 0 ? "#/n/" + opts.base.slice(11) : "#";
-        if (j.result && j.result.id != null) tail.replaceChildren(el("p", {}, link("Открыть ВМ " + j.result.id, home + "/vm/" + j.result.id, "btn primary")));
+        tail.replaceChildren(
+          W.length ? el("div", {class: "banner warn"}, el("b", {text: "Замечания:"}), el("ul", {}, W.map((w) => el("li", {text: w})))) : "",
+          j.result && j.result.id != null ? el("p", {}, link("Открыть ВМ " + j.result.id, home + "/vm/" + j.result.id, "btn primary")) : "");
         refresh();
         if (opts.onDone) opts.onDone(j);
       } else {

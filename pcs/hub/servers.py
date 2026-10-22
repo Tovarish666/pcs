@@ -249,13 +249,13 @@ def create(p, select=True):
         ui.ok("ядро %s" % remote.retry(s, lambda: remote.ssh(s, "uname -r").stdout.strip(), "версия ядра"))
     if select:
         store.set_active(vmid)
-    setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
+    warns = setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
     if p["mpspace"]:
         mpspace_install(s, p["auth"], p["proxy"])
-    ui.hdr("Готово за %d мин" % ((time.time() - t0) // 60 + 1))
+    ui.hdr("Готово за %d мин%s" % ((time.time() - t0) // 60 + 1, " — с замечаниями (см. ⚠ выше)" if warns else ""))
     print_info(s, show_password=not p["password"] and ui.interactive())
-    return {"id": vmid, "name": name, "ip": s["ip"], "mode": p["mode"],
-            "password": password if not p["password"] else None}
+    return {"id": vmid, "name": name, "ip": s["ip"], "mode": s.get("mode"),
+            "password": password if not p["password"] else None, "warnings": warns}
 
 
 def wait_cloud_init(s, bridge="vmbr0", limit=3600):
@@ -289,7 +289,10 @@ def wait_cloud_init(s, bridge="vmbr0", limit=3600):
 
 def setup(s, mode=None, sheet="", fresh=False):
     """Код PCS на сервер, DNS (у новой ВМ), proxyveth setup (+ режим, таблица), modlink setup.
-    Падение любой из частей — Fail: обновление сервера не должно казаться удачным."""
+    Падение любой из частей — Fail: обновление сервера не должно казаться удачным. Исключение —
+    режим proxyveth у новой ВМ: она может жить и на настоящих модемах, поэтому её доделываем
+    (modlink, mp.space), а режим повторяется потом. → предупреждения."""
+    warns = []
     ui.hdr("Код PCS на сервер %s" % s["id"])
     had = fresh or remote.ssh(s, "for p in /usr/local/bin/proxyveth /usr/local/sbin/vmodem /etc/vmodem; do "
                                  "test -e $p && echo yes && break; done", check=False).stdout.strip() == "yes"
@@ -303,13 +306,19 @@ def setup(s, mode=None, sheet="", fresh=False):
             ui.ok("DNS сервера: %s" % " ".join(dnsfix.DEFAULT))
         except Fail as e:
             ui.warn(str(e))
+    pv_ok = True
     if had and mode and fresh:
         # Новый сервер: режим ещё не выбран, `proxyveth mode` сам его и подготовит
         ui.hdr("proxyveth mode %s" % mode)
         if remote.stream(s, "proxyveth mode %s --yes" % shlex.quote(mode)) != 0:
-            raise Fail("proxyveth mode %s на сервере %s не прошёл — см. выше" % (mode, s["id"]))
-        s["mode"] = mode
-        store.save(s)
+            pv_ok = False
+            w = ("proxyveth mode %s не прошёл — ВМ доделываю без него; повторить: на странице ВМ «управление» → "
+                 "«Режим proxyveth» или pcs proxyveth mode %s --yes --server %s" % (mode, mode, s["id"]))
+            ui.warn(w)
+            warns.append(w)
+        else:
+            s["mode"] = mode
+            store.save(s)
     elif had:
         ui.hdr("proxyveth setup")
         if remote.stream(s, "proxyveth setup") != 0:
@@ -325,13 +334,17 @@ def setup(s, mode=None, sheet="", fresh=False):
     ui.hdr("modlink setup")
     if remote.stream(s, "modlink setup") != 0:
         raise Fail("modlink setup на сервере %s не прошёл — см. выше" % s["id"])
-    if sheet and had:
+    if sheet and had and not pv_ok:
+        warns.append("таблица модемов не задана: proxyveth не готов — задай после режима: pcs proxyveth source <ссылка>")
+        ui.warn(warns[-1])
+    elif sheet and had:
         ui.hdr("Модемы по таблице")
         if remote.stream(s, "proxyveth source %s" % shlex.quote(sheet)) == 0:
             if remote.stream(s, "proxyveth sync") != 0:
                 ui.warn("proxyveth sync с ошибками — модемы досоздаст таймер (pcs proxyveth status)")
         else:
             ui.warn("таблица не принята — задай позже: pcs proxyveth source <ссылка>")
+    return warns
 
 
 # ── взять существующую ВМ ──────────────────────────────────────────────────
