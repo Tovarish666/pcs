@@ -515,6 +515,46 @@ def test_apply():
     check("прямые прокси — и на сохранённом модеме с кривой строкой", did["proxy"] == [1, 2, 9], did["proxy"])
 
 
+def test_hcd_build():
+    print("dummy_hcd: исходник без сети, следующий источник при неудаче:")
+    names = [w for w, _ in vm._hcd_sources("6.8")]
+    check("порядок: прошлая сборка → копия в PCS → linux-source → сеть → пакет из зеркала Ubuntu",
+          names[0] == "копия от прошлой сборки" and names[1].startswith("копия в PCS")
+          and names[-1].startswith("пакет linux-source-6.8.0") and "raw.githubusercontent.com" in names, names)
+    code = dict(vm._hcd_sources("6.8"))[names[1]]()
+    check("копия в PCS для ядер 6.8 есть и годится", code and "MAX_NUM_UDC" in code and "SPDX-License-Identifier: GPL-2.0+" in code)
+    ran = []
+    real = (vm.sh, vm.apt, vm._hcd_sources, vm.wr, vm.os.makedirs, vm.log)
+
+    def fake_sh(*a, **kw):
+        ran.append(a)
+        bad = a[:2] == ("dkms", "install") and FAIL["n"] > 0
+        if bad:
+            FAIL["n"] -= 1
+        return types.SimpleNamespace(returncode=1 if bad else 0, stdout="", stderr="make: *** ошибка" if bad else "")
+    FAIL = {"n": 1}
+    got = []
+    vm.sh, vm.apt, vm.wr = fake_sh, (lambda *p: None), (lambda path, text, *a: got.append((path, text)))
+    vm.os.makedirs, vm.log = (lambda *a, **k: None), (lambda *a: None)
+    vm._hcd_sources = lambda series: [("пусто", lambda: None), ("первый", lambda: "#define MAX_NUM_UDC\t32\nA"),
+                                      ("второй", lambda: "#define MAX_NUM_UDC\t32\nB")]
+    try:
+        where = vm.build_dummy_hcd()
+        code = [t for p, t in got if p.endswith("/dummy_hcd.c")]
+        check("первый источник не собрался — собран из следующего; MAX_NUM_UDC → 64",
+              where == "второй" and code[-1].startswith("#define MAX_NUM_UDC\t64") and code[-1].endswith("B"), (where, code))
+        FAIL["n"] = 5
+        try:
+            vm.build_dummy_hcd()
+            msg = None
+        except vm.Fail as e:
+            msg = str(e)
+        check("ни один не собрался — понятная ошибка со всеми попытками",
+              msg and "пусто — нет" in msg and "первый — не собрался" in msg and "второй — не собрался" in msg, msg)
+    finally:
+        vm.sh, vm.apt, vm._hcd_sources, vm.wr, vm.os.makedirs, vm.log = real
+
+
 def test_teardown():
     print("teardown — снять всё своё:")
     tmp = tempfile.mkdtemp()
@@ -592,5 +632,6 @@ if __name__ == "__main__":
     test_row()
     test_apply()
     test_teardown()
+    test_hcd_build()
     print("\nитого: ok %d, fail %d" % (passed, failed))
     sys.exit(1 if failed else 0)

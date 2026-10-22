@@ -490,6 +490,8 @@ tr.flash td { animation: flash 1.4s var(--ease-out); }
 .stages li.done .mk::before { content: ""; width: 7px; height: 4px; border: 2px solid var(--ok); border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
 .stages li.now { color: var(--fg); font-weight: 500; }
 .stages li.now .mk { background: none; border: 2px solid var(--line2); border-top-color: var(--accent); animation: spin .9s linear infinite; }
+.stages li.warn .mk { background: var(--warn-bg); }
+.stages li.warn .mk::before { content: "!"; color: var(--warn); font-weight: 700; font-size: 12px; line-height: 1; }
 .stages li.fail { color: var(--bad); }
 .stages li.fail .mk { background: var(--bad-bg); }
 .stages li.fail .mk::before { content: "×"; color: var(--bad); font-weight: 700; font-size: 13px; line-height: 1; }

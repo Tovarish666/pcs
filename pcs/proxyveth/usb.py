@@ -1214,60 +1214,89 @@ def ensure_module(cfg):
         sh("modprobe", "usbip-vudc")
 
 
+HCD_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
+HCD_URLS = ("https://raw.githubusercontent.com/torvalds/linux/v%s/drivers/usb/gadget/udc/dummy_hcd.c",
+            "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/usb/gadget/udc/dummy_hcd.c?h=v%s")
+
+
+def _hcd_sources(series):
+    """Исходники dummy_hcd по очереди, от надёжного к дальнему: (откуда, функция → текст | None).
+    Сеть — в конце: GitHub и git.kernel.org из России доступны не всегда, а ВМ только что
+    поднялась (DNS бывает медленным)."""
+    def local_copy():
+        for f in sorted(glob.glob("/usr/src/*-dummy-hcd-%s/dummy_hcd.c" % series)):
+            try:
+                return rd(f) + "\n"
+            except OSError:
+                pass
+
+    def bundled():
+        f = os.path.join(HCD_SRC_DIR, "dummy_hcd-%s.c" % series)
+        return (rd(f) + "\n") if os.path.exists(f) else None
+
+    def linux_source(install=False):
+        def go():
+            if install:                    # пакет исходников ядра — из того же зеркала Ubuntu, ~150 МБ
+                if sh("apt-cache", "show", "linux-source-%s.0" % series, check=False).returncode != 0:
+                    return None
+                apt("linux-source-%s.0" % series)
+            for tar in sorted(glob.glob("/usr/src/linux-source-%s*.tar.*" % series)):
+                r = sh("tar", "-xOf", tar, "--wildcards", "*/drivers/usb/gadget/udc/dummy_hcd.c",
+                       check=False, timeout=600)
+                if r.returncode == 0 and "MAX_NUM_UDC" in r.stdout:
+                    return r.stdout
+        return go
+
+    def net_(url):
+        def go():
+            try:
+                return urllib.request.urlopen(url % series, timeout=30).read().decode()
+            except Exception:
+                return None
+        return go
+
+    return ([("копия от прошлой сборки", local_copy), ("копия в PCS (ядро v%s)" % series, bundled),
+             ("linux-source в системе", linux_source())] +
+            [(u.split("/")[2], net_(u)) for u in HCD_URLS] +
+            [("пакет linux-source-%s.0 из зеркала Ubuntu" % series, linux_source(install=True))])
+
+
 def build_dummy_hcd():
-    """dummy_hcd в Ubuntu не собран. Исходник — уже поправленный от прошлой сборки
-    (свой или vmodem), иначе linux-source того же ядра, иначе апстрим той же серии;
-    собираем через dkms — переживёт обновления ядра."""
+    """dummy_hcd в Ubuntu не собран. Собираем через dkms — переживёт обновления ядра. Исходник —
+    по очереди из _hcd_sources(); не собрался из одного — пробуем следующий."""
     kver = os.uname().release
     series = ".".join(kver.split("-")[0].split(".")[:2])
-    code = None
-    for f in sorted(glob.glob("/usr/src/*-dummy-hcd-%s/dummy_hcd.c" % series)):
-        try:
-            with open(f) as fh:
-                code = fh.read()
-            break
-        except OSError:
-            pass
-    for tar in glob.glob("/usr/src/linux-source-%s*.tar.*" % series):
-        if code:
-            break
-        try:
-            with tarfile.open(tar) as t:
-                m = next(x for x in t.getmembers() if x.name.endswith("drivers/usb/gadget/udc/dummy_hcd.c"))
-                code = t.extractfile(m).read().decode()
-        except (StopIteration, OSError, tarfile.TarError):
-            pass
-    for url in ("https://raw.githubusercontent.com/torvalds/linux/v%s/drivers/usb/gadget/udc/dummy_hcd.c" % series,
-                "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/drivers/usb/gadget/udc/dummy_hcd.c?h=v%s" % series):
-        if code:
-            break
-        try:
-            code = urllib.request.urlopen(url, timeout=60).read().decode()
-        except Exception:
-            pass
-    if not code or "MAX_NUM_UDC" not in code:
-        raise Fail("не нашёл исходник dummy_hcd для ядра %s" % kver)
-    # Шин USB в ядре не больше 63, так что 64 экземпляров хватает с запасом.
-    code = re.sub(r"#define MAX_NUM_UDC\s+\d+", "#define MAX_NUM_UDC\t64", code)
     apt("dkms", "linux-headers-" + kver)
     old = [(p, os.path.basename(p).rsplit("-", 1)) for p in
            glob.glob("/usr/src/vmns-dummy-hcd-*") + glob.glob("/usr/src/vmodem-dummy-hcd-*")]   # прототип v2, vmodem 4.x
     for _, (name, ver) in old:
         sh("dkms", "remove", "--all", "%s/%s" % (name, ver), check=False)
     src = "/usr/src/%s-%s" % (DKMS, series)
-    os.makedirs(src, exist_ok=True)
-    wr(src + "/dummy_hcd.c", code)
-    wr(src + "/Makefile", "obj-m := dummy_hcd.o")
-    wr(src + "/dkms.conf", 'PACKAGE_NAME="%s"\nPACKAGE_VERSION="%s"\nBUILT_MODULE_NAME[0]="dummy_hcd"\n'
-                           'DEST_MODULE_LOCATION[0]="/updates"\nAUTOINSTALL="yes"' % (DKMS, series))
-    try:
-        sh("dkms", "install", "--force", "%s/%s" % (DKMS, series), "-k", kver, timeout=900)
-    except Fail:
-        for _, (name, ver) in old:            # не собралось — вернуть, что было
-            sh("dkms", "install", "%s/%s" % (name, ver), "-k", kver, check=False, timeout=900)
-        raise
-    for path, _ in old:
-        shutil.rmtree(path, ignore_errors=True)
+    tried = []
+    for where, get in _hcd_sources(series):
+        code = get()
+        if not code or "MAX_NUM_UDC" not in code:
+            tried.append("%s — нет" % where)
+            continue
+        # Шин USB в ядре не больше 63, так что 64 экземпляров хватает с запасом.
+        code = re.sub(r"#define MAX_NUM_UDC\s+\d+", "#define MAX_NUM_UDC\t64", code)
+        sh("dkms", "remove", "--all", "%s/%s" % (DKMS, series), check=False)
+        os.makedirs(src, exist_ok=True)
+        wr(src + "/dummy_hcd.c", code)
+        wr(src + "/Makefile", "obj-m := dummy_hcd.o")
+        wr(src + "/dkms.conf", 'PACKAGE_NAME="%s"\nPACKAGE_VERSION="%s"\nBUILT_MODULE_NAME[0]="dummy_hcd"\n'
+                               'DEST_MODULE_LOCATION[0]="/updates"\nAUTOINSTALL="yes"' % (DKMS, series))
+        r = sh("dkms", "install", "--force", "%s/%s" % (DKMS, series), "-k", kver, check=False, timeout=900)
+        if r.returncode == 0:
+            log("dummy_hcd собран под ядро %s (исходник: %s)" % (kver, where))
+            for path, _ in old:
+                shutil.rmtree(path, ignore_errors=True)
+            return where
+        tried.append("%s — не собрался: %s" % (where, (r.stderr or r.stdout).strip().splitlines()[-1:] or "?"))
+        log("⚠ dummy_hcd из «%s» не собрался — пробую следующий источник" % where)
+    for _, (name, ver) in old:            # не собралось — вернуть, что было
+        sh("dkms", "install", "%s/%s" % (name, ver), "-k", kver, check=False, timeout=900)
+    raise Fail("не собрал dummy_hcd для ядра %s: %s" % (kver, "; ".join(tried)))
 
 
 def gadgets_bound():
