@@ -317,6 +317,23 @@ def unbind(n):
     return unbind_dir(gdir(n))
 
 
+# Гаджет вынимается (перезагрузка модема, переподключение, снятие) — сначала usb0 down.
+# Иначе пакет (UDP sing-box и dnsmasq, ARP ядра) может войти в eth_start_xmit u_ether
+# одновременно с отключением функции — гонка в ядре: list_del по LIST_POISON1 и паника
+# (ВМ 1000, ядро 6.8.0-142, октябрь 2026; при proxyveth гаджет вынимается в ~50 раз чаще,
+# чем при vmodem). Опущенный интерфейс ядро драйверу не передаёт: dev_close дожидается,
+# пока закончатся передачи, — вынимать после этого безопасно.
+def usb0_down(n):
+    nsh("pv%d" % n, "link", "set", "usb0", "down", check=False)
+
+
+def usb0_up(n):
+    """Назад: поднять и вернуть маршрут в таблице 100 (ядро снимает его вместе с down)."""
+    ns = "pv%d" % n
+    nsh(ns, "link", "set", "usb0", "up", check=False)
+    nsh(ns, "route", "replace", "192.168.%d.0/24" % n, "dev", "usb0", "table", "100", check=False)
+
+
 def drop_gadget(g):
     """Гаджет configfs — вынуть из слота и разобрать в обратном порядке."""
     if not os.path.isdir(g):
@@ -452,6 +469,8 @@ def destroy(n, quiet=False):
         part = ["proxyveth-%s@%d.service" % (u, n)] + (["proxyveth-px@%d.socket" % n] if u == "px" else [])
         sh("systemctl", "stop", *part, check=False)
         sh("systemctl", "reset-failed", *part, check=False)
+    if os.path.exists("/run/netns/pv%d" % n):
+        usb0_down(n)                       # ядро ещё шлёт своё (ARP) — сначала down
     drop_gadget(gdir(n))
     sh("ip", "netns", "del", "pv%d" % n, check=False)
     try:
@@ -570,18 +589,22 @@ def replug(n, st=None):
     """Как вынуть модем и вставить обратно. Если сервер его видит — со стороны
     сервера (так же делает USB reset mp.space), иначе — перепривязка гаджета."""
     busid, _ = host_side(n)
-    if busid:
-        try:
-            wr("/sys/bus/usb/drivers/usb/unbind", busid)
-        except OSError:
-            pass
-        time.sleep(2)
-        wr("/sys/bus/usb/drivers/usb/bind", busid)
-        return "USB переподключён со стороны сервера"
-    udc = unbind(n) or (st or state())["modems"].get(str(n), {}).get("slot", "")
-    time.sleep(1)
-    bind(n, udc)
-    return "гаджет перепривязан к %s" % udc
+    usb0_down(n)
+    try:
+        if busid:
+            try:
+                wr("/sys/bus/usb/drivers/usb/unbind", busid)
+            except OSError:
+                pass
+            time.sleep(2)
+            wr("/sys/bus/usb/drivers/usb/bind", busid)
+            return "USB переподключён со стороны сервера"
+        udc = unbind(n) or (st or state())["modems"].get(str(n), {}).get("slot", "")
+        time.sleep(1)
+        bind(n, udc)
+        return "гаджет перепривязан к %s" % udc
+    finally:
+        usb0_up(n)
 
 
 # ── прокси и настоящий модем ───────────────────────────────────────────────
@@ -1635,10 +1658,14 @@ def reboot_cycle(n, p, send=True):
             code, _, resp = hilink(p, "/api/device/control", "<Control>1</Control>")
             if code != 200 or "<error>" in resp:
                 raise Fail("модем не принял перезагрузку: HTTP %s %s" % (code, xml("code", resp)))
-        udc = unbind(n)
-        log("модем %d: перезагружается — USB вынут" % n)
-        took = wait_real_modem(p)
-        bind(n, udc)
+        usb0_down(n)
+        try:
+            udc = unbind(n)
+            log("модем %d: перезагружается — USB вынут" % n)
+            took = wait_real_modem(p)
+            bind(n, udc)
+        finally:
+            usb0_up(n)
         log("модем %d: %s — USB вставлен" % (
             n, ("настоящий модем вернулся за %.0f с" % took) if took else "настоящий модем за 3 минуты не ответил"))
         return took
