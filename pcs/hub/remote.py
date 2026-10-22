@@ -52,22 +52,33 @@ def base(s, tty=False, key=None):
 
 
 def call(s, cmd, input=None, timeout=None, key=None):
-    """Выполнить cmd на сервере. → CompletedProcess (text). Сеть/ключ — Fail."""
+    """Выполнить cmd на сервере. → CompletedProcess (text). Сеть/ключ — Fail.
+    Ключ сервера сменился, а ВМ — на этом хосте Proxmox: новый сверяется через guest agent и
+    принимается (rekey), команда — ещё раз."""
     if not s.get("ip"):
         raise Fail("у сервера %s нет адреса: pcs server adopt %s --ip IP" % (s.get("id"), s.get("id")))
     argv = base(s, key=key) + [cmd]
-    try:
-        r = subprocess.run(argv, capture_output=True, text=True, input=input, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise Fail("сервер %s (%s): «%s» не уложилось в %s с" % (s["id"], s["ip"], cmd[:60], timeout))
-    except FileNotFoundError:
-        raise Fail("нет программы ssh")
-    if r.returncode == 255 and not r.stdout:
+    for attempt in (1, 2):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, input=input, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise Fail("сервер %s (%s): «%s» не уложилось в %s с" % (s["id"], s["ip"], cmd[:60], timeout))
+        except FileNotFoundError:
+            raise Fail("нет программы ssh")
+        if r.returncode != 255 or r.stdout:
+            return r
         if not key:
             close_master(s)              # общий канал мог остаться от сервера до перезагрузки — следующий заход заново
+        if key_changed(r.stderr) and attempt == 1:
+            try:
+                d = rekey(s)
+            except Fail as e:
+                raise Fail("нет SSH до сервера %s (%s): ключ сервера сменился — %s" % (s["id"], s["ip"], e))
+            ui.warn("сервер %s: ключ SSH сменился (%s → %s), новый подтверждён через guest agent Proxmox — принят"
+                    % (s["id"], ", ".join(d["old"]) or "—", ", ".join(d["new"])))
+            continue
         why = (r.stderr.strip().splitlines() or [""])[-1] or "соединение оборвалось (сервер перезагружается или сеть моргнула)"
         raise Fail("нет SSH до сервера %s (%s): %s" % (s["id"], s["ip"], why))
-    return r
 
 
 def close_master(s):
@@ -104,6 +115,10 @@ def stream(s, cmd, tty=False):
     """С живым выводом (человеку или в журнал задания). → код возврата."""
     if not s.get("ip"):
         raise Fail("у сервера %s нет адреса" % s.get("id"))
+    try:
+        call(s, "true", timeout=30)      # сменившийся ключ — принять здесь (rekey), а не уронить задание
+    except Fail:
+        pass                             # нет связи — пусть скажет сама команда, как раньше
     return subprocess.call(base(s, tty=tty) + [cmd])
 
 
@@ -112,6 +127,116 @@ def alive(s, timeout=30, key=None):
         return call(s, "true", timeout=timeout, key=key).returncode == 0
     except Fail:
         return False
+
+
+# ── ключ сервера (known_hosts хаба) ────────────────────────────────────────
+# Ключ ВМ меняется, когда cloud-init считает её новой машиной (Proxmox пересчитал instance-id,
+# например после смены DNS хоста) — ВМ та же, а SSH отвечает «Host key verification failed».
+KEY_CHANGED = ("Host key verification failed", "REMOTE HOST IDENTIFICATION HAS CHANGED")
+
+
+def key_changed(text):
+    return any(m in (text or "") for m in KEY_CHANGED)
+
+
+def _host(s):
+    port = int(s.get("port") or 22)
+    return s["ip"] if port == 22 else "[%s]:%d" % (s["ip"], port)
+
+
+def _keys(text):
+    """Строки «тип тело …» (known_hosts, .pub, ssh-keyscan) → {(тип, тело)}."""
+    out = set()
+    for ln in (text or "").splitlines():
+        f = ln.split()
+        if ln.startswith("#") or len(f) < 2:
+            continue
+        for i, tok in enumerate(f[:-1]):
+            if tok.startswith(("ssh-", "ecdsa-", "sk-")):
+                out.add((tok, f[i + 1]))
+                break
+    return out
+
+
+def fp(k):
+    from .node import fingerprint
+    return fingerprint(k[1])
+
+
+def known_keys(s):
+    if not os.path.exists(store.known_hosts()):
+        return set()
+    r = subprocess.run(["ssh-keygen", "-F", _host(s), "-f", store.known_hosts()], capture_output=True, text=True)
+    return _keys(r.stdout)
+
+
+def scan_keys(s):
+    """Что сервер показывает сейчас (ssh-keyscan)."""
+    try:
+        r = subprocess.run(["ssh-keyscan", "-T", "8", "-p", str(int(s.get("port") or 22)), s["ip"]],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return _keys(r.stdout)
+
+
+def agent_keys(s):
+    """Ключи SSH ВМ, прочитанные через guest agent Proxmox — мимо сети, их не подменить по дороге.
+    None — сверить так нельзя (не ВМ этого хоста, агента нет)."""
+    from . import pve
+    if not str(s.get("id", "")).isdigit() or not pve.is_pve():
+        return None
+    try:
+        r = subprocess.run(["qm", "guest", "exec", str(s["id"]), "--timeout", "15", "--",
+                            "sh", "-c", "cat /etc/ssh/ssh_host_*_key.pub"], capture_output=True, text=True, timeout=30)
+        out = json.loads(r.stdout).get("out-data", "") if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+    return _keys(out) if out else None
+
+
+def rekey(s, accept=None):
+    """Ключ сервера в known_hosts хаба — заново. accept=None: только ключи, которые ВМ показывает
+    и по SSH, и через guest agent; accept="SHA256:…" — тот, что человек сверил сам.
+    → {"old": [отпечатки], "new": [отпечатки], "via": "agent"|"человек"}."""
+    shown = scan_keys(s)
+    if not shown:
+        raise Fail("сервер %s не отдал ключ SSH (ssh-keyscan) — он включён?" % s.get("id"))
+    if accept:
+        good = {k for k in shown if fp(k) == accept}
+        if not good:
+            raise Fail("сервер показывает другой ключ (%s), а не %s — не принимаю" % (", ".join(sorted(map(fp, shown))), accept))
+        via = "человек"
+    else:
+        agent = agent_keys(s)
+        if agent is None:
+            raise Fail("сверить новый ключ нечем (не ВМ этого хоста или нет guest agent); если сервер "
+                       "переустанавливали — принять: pcs server trust-key %s --accept ОТПЕЧАТОК (или в панели: "
+                       "«управление» → «Ключ SSH сервера»)" % s.get("id"))
+        good = shown & agent
+        if not good:
+            raise Fail("ключ, который сервер показывает по сети (%s), не совпал с ключом из guest agent (%s) — "
+                       "не принимаю: возможна подмена адреса" % (", ".join(sorted(map(fp, shown))),
+                                                                ", ".join(sorted(map(fp, agent))) or "—"))
+        via = "agent"
+    old = sorted(map(fp, known_keys(s)))
+    kh = store.known_hosts()
+    os.makedirs(os.path.dirname(kh), mode=0o700, exist_ok=True)
+    if os.path.exists(kh):
+        sh("ssh-keygen", "-f", kh, "-R", _host(s), check=False)
+    with open(kh, "a") as f:
+        for t, b in sorted(good):
+            f.write("%s %s %s\n" % (_host(s), t, b))
+    close_master(s)
+    return {"old": old, "new": sorted(map(fp, good)), "via": via}
+
+
+def host_key(s):
+    """Ключ сервера: что знает хаб, что показывает сервер, что видит guest agent."""
+    known, shown, agent = known_keys(s), scan_keys(s), agent_keys(s)
+    return {"known": sorted(map(fp, known)), "shown": sorted(map(fp, shown)),
+            "agent": sorted(map(fp, agent)) if agent is not None else None,
+            "same": bool(shown) and bool(known & shown), "agent_ok": bool(agent and shown & agent)}
 
 
 def forget(ip):

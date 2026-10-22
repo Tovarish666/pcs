@@ -574,6 +574,46 @@ r, d = P("/api/browser/mp/2000/stop", {})
 check("закрыть", d["ok"] and G("/api/browser/mp/2000")[1]["data"]["running"] is False, d)
 r, d = G("/api/browser/xx/2000")
 check("чужая вкладка — 404", r.status == 404, (r.status, d))
+print("веб модемов в отдельном окне (фейк):")
+r, d = P("/api/browser/md/2000/modem", {"ip": "192.168.201.1"})
+check("веб модема ВМ: браузер модемов этой ВМ запущен, адрес открыт; путь — SSH хаба",
+      d["ok"] and d["data"] == {"opened": "http://192.168.201.1/", "started": True}
+      and fake_api.FakeBrowser and G("/api/browser/md/2000")[1]["data"]["running"] is True, d)
+r, d = P("/api/browser/md/2000/modem", {"ip": "192.168.202.1"})
+check("второй модем той же ВМ — новая вкладка в том же браузере", d["ok"] and d["data"]["started"] is False, d)
+for bad in ("8.8.8.8", "localhost", "192.168.1.1:22", ""):
+    r, d = P("/api/browser/md/2000/modem", {"ip": bad})
+    check("веб модема: «%s» — отказ (только частные адреса модемов)" % bad, r.status == 400 and not d["ok"], d)
+r, d = P("/api/browser/md/2000/modem", {"ip": "192.168.1.1", "port": 22})
+check("веб модема: порт не веба — отказ", r.status == 400, d)
+r, d = P("/api/browser/md/host/modem", {"ip": "192.168.31.1"})
+check("веб модема хоста — отсюда (без SSH)", d["ok"], d)
+r, d = P("/api/browser/md/2000/stop", {})
+check("закрыть браузер модемов", d["ok"] and G("/api/browser/md/2000")[1]["data"]["running"] is False, d)
+r, d = P("/api/browser/md/2000/open", {"url": "https://example.com/"})
+check("браузер модемов не открывает произвольные адреса", r.status == 404, (r.status, d))
+print("конфиг modlink по таблице (фейк):")
+SHEET = ("\tIp:port:log:pass\tReBoot\tReConnect\n"
+         "Клиент\t203.0.113.13:16000:modem201:aaa1\thttp://203.0.113.13:16001/reboot\thttp://203.0.113.13:16002/reconnect\n"
+         "Клиент\t203.0.113.13:16003:modem77:bbb2\thttp://203.0.113.13:16004/reboot\thttp://203.0.113.13:16005/reconnect\n")
+r, d = P("/api/targets/2000/modlink/import", {"text": SHEET})
+check("по умолчанию — только план (dry): что поправить, что добавить",
+      d["ok"] and d["data"]["dry_run"] and [x["action"] for x in d["data"]["rows"]] == ["change", "add"], d)
+r, d = P("/api/targets/2000/modlink/import", {"text": SHEET, "dry": False})
+rows = {x["login"]: x for x in G("/api/targets/2000/modlink")[1]["data"]["list"]["data"]["rows"]}
+check("применить: строки как в таблице", d["ok"] and d["data"]["applied"] and rows["modem201"]["port"] == 16000
+      and rows["modem77"]["reconnect_port"] == 16005, (d, sorted(rows)))
+for body, what in (({}, "пусто"), ({"text": "a\0b"}, "мусор"), ({"url": "ftp://x"}, "не http"), ({"text": SHEET, "map": "x"}, "map")):
+    r, d = P("/api/targets/2000/modlink/import", body)
+    check("конфиг по таблице: %s — отказ 400" % what, r.status == 400, (r.status, d))
+print("ключ SSH сервера (фейк):")
+r, d = P("/api/servers/2000/hostkey", {})
+check("сверить: хаб знает старый, сервер показывает новый, агент подтверждает", d["ok"] and d["data"]["same"] is False
+      and d["data"]["agent_ok"] is True, d)
+r, d = P("/api/servers/2000/hostkey", {"accept": "agent"})
+check("принять подтверждённый агентом", d["ok"] and d["data"]["accepted"] and P("/api/servers/2000/hostkey", {})[1]["data"]["same"], d)
+r, d = P("/api/servers/2000/hostkey", {"accept": "что-угодно"})
+check("принять: только agent или отпечаток SHA256:…", r.status == 400, d)
 
 r, d = P("/api/servers/3000/delete", {"confirm": "300"})
 check("удалить ВМ: неверный номер — 403", r.status == 403 and 3000 in fake_api.S)

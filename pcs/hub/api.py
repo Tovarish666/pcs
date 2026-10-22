@@ -228,6 +228,24 @@ def server_color(id, color):
     return srv.set_color(_server(id)["id"], color)
 
 
+def tunnel_argv(id):
+    """argv ssh хаба до сервера (последний — root@IP): по нему браузер веба модемов ходит к модемам ВМ."""
+    s = _server(id)
+    remote.call(s, "true", timeout=30)        # заодно: ключ сменился — сверить и принять сейчас
+    return remote.base(s)
+
+
+def host_key(id, accept=None):
+    """Ключ SSH сервера: что знает хаб, что показывает сервер, что видит guest agent (known, shown,
+    agent, same, agent_ok). accept="SHA256:…" — принять этот; accept="agent" — принять подтверждённый агентом."""
+    s = _server(id)
+    if accept == "agent":
+        return dict(remote.rekey(s), accepted=True)
+    if accept:
+        return dict(remote.rekey(s, accept=str(accept).strip()), accepted=True)
+    return remote.host_key(s)
+
+
 def vms_other():
     """ВМ этого Proxmox, которых нет в PCS."""
     return srv.other_vms()

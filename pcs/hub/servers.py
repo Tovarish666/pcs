@@ -334,6 +334,11 @@ def setup(s, mode=None, sheet="", fresh=False):
     ui.hdr("modlink setup")
     if remote.stream(s, "modlink setup") != 0:
         raise Fail("modlink setup на сервере %s не прошёл — см. выше" % s["id"])
+    try:
+        if cloud_init_off(s) == "off":
+            ui.ok("cloud-init выключен: своё сделал, ВМ больше не перенастраивается при перезагрузке хоста")
+    except Fail as e:
+        ui.warn("cloud-init не выключил: %s" % e)
     if sheet and had and not pv_ok:
         warns.append("таблица модемов не задана: proxyveth не готов — задай после режима: pcs proxyveth source <ссылка>")
         ui.warn(warns[-1])
@@ -345,6 +350,22 @@ def setup(s, mode=None, sheet="", fresh=False):
         else:
             ui.warn("таблица не принята — задай позже: pcs proxyveth source <ссылка>")
     return warns
+
+
+CI_OFF = "/etc/cloud/cloud-init.disabled"
+CI_OFF_TEXT = ("# PCS: cloud-init своё сделал при создании ВМ. Пока он включён, Proxmox может пересчитать\n"
+               "# instance-id (сменился DNS хоста и т. п.), и cloud-init сочтёт ВМ новой машиной: новые ключи SSH,\n"
+               "# пароль root из создания, apt upgrade. Включить снова — удалить этот файл.\n")
+
+
+def cloud_init_off(s):
+    """ВМ, созданная PCS (cloud-init из сниппета pcs-<id>.yaml): выключить cloud-init.
+    → "off" (выключил), "was" (уже), "none" (не наша или cloud-init нет)."""
+    if not pve.is_pve() or ("snippets/pcs-%s.yaml" % s["id"]) not in sh("qm", "config", str(s["id"]), check=False).stdout:
+        return "none"
+    return remote.ssh(s, "test -d /etc/cloud || { echo none; exit; }; test -e %s && { echo was; exit; }; "
+                         "printf %%s %s > %s && echo off" % (CI_OFF, shlex.quote(CI_OFF_TEXT), CI_OFF),
+                      timeout=30).stdout.strip()
 
 
 # ── взять существующую ВМ ──────────────────────────────────────────────────

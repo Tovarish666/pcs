@@ -119,6 +119,7 @@ class Net:
 
 
 net = Net()
+REAL_CALL = remote.call
 remote.call = net.call
 VM = {"1000": "running", "2000": "running", "200": "stopped", "20000": "running"}
 pve.is_pve = lambda: True
@@ -557,6 +558,93 @@ else:                                        # панель есть — serve �
               and _seen == [["--port", "6660"]], _seen)
     finally:
         _panel.main = _real
+
+print("ключ SSH сервера сменился (cloud-init счёл ВМ новой машиной):")
+import base64  # noqa: E402
+
+
+def mk(t="ssh-ed25519"):
+    name = t.encode()
+    return (t, base64.b64encode(len(name).to_bytes(4, "big") + name + b"\0\0\0 " + os.urandom(32)).decode())
+
+
+OLD, NEW, NEW_RSA, EVIL, OTHER = mk(), mk(), mk("ssh-rsa"), mk(), mk()
+KH = store.known_hosts()
+with open(KH, "w") as f:
+    f.write("192.168.88.7 %s %s\n192.168.88.9 %s %s\n" % (OLD + OTHER))
+s2000 = store.load(2000)
+real_scan, real_agent = remote.scan_keys, remote.agent_keys
+remote.scan_keys = lambda s: {NEW, NEW_RSA}
+remote.agent_keys = lambda s: {NEW, NEW_RSA}
+check("знает хаб — старый, сервер показывает новый, агент подтверждает",
+      remote.host_key(s2000) == {"known": [remote.fp(OLD)], "shown": sorted([remote.fp(NEW), remote.fp(NEW_RSA)]),
+                                 "agent": sorted([remote.fp(NEW), remote.fp(NEW_RSA)]), "same": False, "agent_ok": True})
+d = remote.rekey(s2000)
+kh = open(KH).read()
+check("rekey: новый ключ принят (подтверждён агентом), старый снят, чужие строки целы",
+      d["via"] == "agent" and d["old"] == [remote.fp(OLD)] and NEW[1] in kh and NEW_RSA[1] in kh
+      and OLD[1] not in kh and OTHER[1] in kh, (d, kh))
+check("после rekey ключ «не менялся»", remote.host_key(s2000)["same"] is True)
+remote.scan_keys = lambda s: {EVIL}
+for agent, want in (({NEW}, "не совпал"), (None, "trust-key")):
+    remote.agent_keys = lambda s, a=agent: a
+    try:
+        remote.rekey(s2000)
+        msg = None
+    except Fail as e:
+        msg = str(e)
+    check("сеть показывает не тот ключ, что агент (%s) — не принимаю" % ("агент есть" if agent else "агента нет"),
+          msg and want in msg and EVIL[1] not in open(KH).read(), msg)
+try:
+    remote.rekey(s2000, accept=remote.fp(NEW))
+    msg = None
+except Fail as e:
+    msg = str(e)
+check("человек принимает отпечаток, а сервер показывает другой — отказ", msg and "другой ключ" in msg, msg)
+d = remote.rekey(s2000, accept=remote.fp(EVIL))
+check("человек сверил и принял ровно этот отпечаток", d["via"] == "человек" and d["new"] == [remote.fp(EVIL)]
+      and EVIL[1] in open(KH).read() and NEW[1] not in open(KH).read(), d)
+# call(): «Host key verification failed» → rekey (агент подтвердил) → та же команда ещё раз
+with open(KH, "w") as f:
+    f.write("192.168.88.7 %s %s\n" % OLD)
+remote.scan_keys = remote.agent_keys = lambda s: {NEW}
+real_run, ssh_calls = subprocess.run, []
+
+
+def fake_run(argv, *a, **kw):
+    if argv and argv[0] == "ssh":
+        if "-O" in argv:
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        ssh_calls.append(argv[-1])
+        known = NEW[1] in open(KH).read()
+        return types.SimpleNamespace(returncode=0 if known else 255, stdout="ok\n" if known else "",
+                                     stderr="" if known else "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n"
+                                     "Host key verification failed.\n")
+    return real_run(argv, *a, **kw)
+
+
+subprocess.run = fake_run
+try:
+    with redirect_stdout(io.StringIO()) as out:
+        r = REAL_CALL(s2000, "uname -r")
+    check("команда при сменившемся ключе: ключ сверен агентом, принят, команда повторена",
+          r.stdout == "ok\n" and ssh_calls == ["uname -r", "uname -r"] and "ключ SSH сменился" in out.getvalue(),
+          (ssh_calls, out.getvalue()))
+    with open(KH, "w") as f:
+        f.write("192.168.88.7 %s %s\n" % OLD)
+    remote.agent_keys = lambda s: {EVIL}
+    try:
+        REAL_CALL(s2000, "true")
+        msg = None
+    except Fail as e:
+        msg = str(e)
+    check("агент ключ не подтвердил — понятная ошибка, а не молчаливое «нет SSH»",
+          msg and "ключ сервера сменился" in msg and "не совпал" in msg, msg)
+finally:
+    subprocess.run = real_run
+    remote.scan_keys, remote.agent_keys = real_scan, real_agent
+check("ВМ, созданная PCS: cloud-init выключается при setup (сниппет pcs-<id>.yaml), чужая — нет",
+      "cloud_init_off(s)" in open(servers.__file__).read() and servers.CI_OFF == "/etc/cloud/cloud-init.disabled")
 
 # ── меню ───────────────────────────────────────────────────────────────────
 print("меню:")
