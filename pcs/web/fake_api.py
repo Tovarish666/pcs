@@ -457,6 +457,24 @@ def server_color(id, color):
         return {"id": srv["id"], "color": srv["color"]}
 
 
+def tunnel_argv(id):
+    srv = _srv(id)
+    return ["ssh", "-i", "/etc/pcs/ssh/id_ed25519", "-p", "22", "root@" + srv.get("ip", "192.168.88.%d" % (srv["id"] % 250))]
+
+
+def host_key(id, accept=None):
+    with _lock:
+        srv = _srv(id)
+        shown = ["SHA256:aJ+7snR7rNsiF1VFMV3DJqWKnS8Y2bsE/DTf6Ftf+oo"]
+        known = srv.setdefault("known_fp", ["SHA256:QPZ/CN5A95JotnYMp+rKFHG52X5cMsvUDLol2XjZqPo"])
+        if accept:
+            if accept not in ("agent",) + tuple(shown):
+                raise Fail("сервер показывает другой ключ")
+            old, srv["known_fp"] = list(known), list(shown)
+            return {"old": old, "new": shown, "via": "agent" if accept == "agent" else "человек", "accepted": True}
+        return {"known": known, "shown": shown, "agent": shown, "same": known == shown, "agent_ok": True}
+
+
 def vms_other():
     with _lock:
         return [{"id": i, "name": n, "state": "running"} for i, n in sorted(OTHER.items()) if i not in S]
@@ -997,6 +1015,27 @@ def _ml(srv, a, inp):
     if cmd == "export":
         what = a[a.index("--what") + 1] if "--what" in a else "all"
         return _ml_export(srv, st_["wan_ip"] or srv["ip"], what)
+    if cmd == "import":
+        from ..modlink import store as mls
+        if a[1:2] != ["-"]:
+            raise Fail("фейк читает таблицу только из stdin")
+        specs, warn = mls.parse_sheet(inp or "")
+        addrs = [(m["iface"], "192.168.%d.100" % m["n"], 24) for m in srv["modems"]]
+        how = a[a.index("--map") + 1] if "--map" in a else "number"
+        pl = mls.import_plan({"next_id": 1001, "proxies": [mls.norm(r) for r in srv["modlink"]]}, specs, addrs,
+                             replace="--replace" in a, how=how)
+        sets = {k: v for k, v in pl["settings"].items() if st_.get(k) != v}
+        res = {"rows": pl["rows"], "removed": pl["removed"], "settings": sets, "warnings": warn + pl["warnings"],
+               "on": on, "dry_run": "--dry-run" in a, "applied": False}
+        if "--dry-run" not in a:
+            srv["modlink"] = [dict(r) for r in pl["doc"]["proxies"]]
+            srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
+            srv["ml_pending"] = False
+            st_.update(sets)
+            res["applied"] = True
+            if "--on" in a:
+                srv["ml_on"] = res["on"] = True
+        return res
     if cmd == "from-ifaces":
         have = {r["lan_ip"] for r in srv["modlink"]}
         sug = [{"lan_ip": "192.168.%d.100" % m["n"], "modem_ip": "192.168.%d.1" % m["n"], "name": "modem %d" % m["n"],
@@ -1100,6 +1139,15 @@ class FakeBrowser:
         if not self._s(k)["running"]:
             raise Fail("браузер не запущен")
         return {"opened": url}
+
+    def open_modem(self, k, via, url):
+        if not self.inst:
+            raise Fail("браузер не установлен — «Установить браузер»")
+        x = self._s(k)
+        x["via"], started = via, not x["running"]
+        x["running"] = True
+        x.setdefault("tabs", []).append(url)
+        return {"opened": url, "started": started}
 
     def set_links(self, k, links):
         x = self._s(k)

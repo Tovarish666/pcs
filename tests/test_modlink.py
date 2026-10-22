@@ -815,6 +815,105 @@ check("modlink.service: демон этой же копии кода", " daemon\
       and os.path.join(system.ROOT, "bin", "modlink") in system.unit_daemon())
 
 # ── команда ────────────────────────────────────────────────────────────────
+print("конфиг по таблице (обратное «Копировать»):")
+SHEET = ("\tIp:port:log:pass\tReBoot\tReConnect\n"
+         "\t\t\t\n"
+         "Иванова Анна Александровна\t203.0.113.13:16000:modem201:6av42s3nyg\thttp://203.0.113.13:16001/reboot\t"
+         "http://203.0.113.13:16002/reconnect\n"
+         "Иванова Анна Александровна\t203.0.113.13:16003:modem202:aecjeptr7e\thttp://203.0.113.13:16004/reboot\t"
+         "http://203.0.113.13:16005/reconnect\n"
+         "Петров Владимир\t203.0.113.13:16006:modem7:egw3vd2qgb\thttp://203.0.113.13:16007/reboot\t"
+         "http://203.0.113.13:16008/reconnect\n")
+specs, w = store.parse_sheet(SHEET)
+check("лист как у клиента: шапка, пустые, имена — мимо; прокси, ребут, реконнект — из ячеек",
+      [(x["login"], x["port"], x["reboot_port"], x["reconnect_port"]) for x in specs]
+      == [("modem201", 16000, 16001, 16002), ("modem202", 16003, 16004, 16005), ("modem7", 16006, 16007, 16008)]
+      and specs[0]["password"] == "6av42s3nyg" and specs[0]["ip"] == "203.0.113.13" and not w, (specs, w))
+two = store.parse_sheet("203.0.113.13:16000:modem1:pw1\thttp://203.0.113.13:16001/reconnect\n")[0][0]
+check("вариант без ReBoot: ребута нет, реконнект есть", two["reboot_port"] == 0 and two["reconnect_port"] == 16001, two)
+csvx = store.parse_sheet('"203.0.113.13:16000:modem1:p,w1",http://203.0.113.13:16001/reboot/p%2Cw1\n'
+                         "203.0.113.13:16000:modem2:pw2 http://203.0.113.13:16001/reconnect/pw2\n")
+check("CSV из ссылки (пароль с запятой — в кавычках) и строка через пробелы; общий порт с паролем в ссылке",
+      [(x["password"], x["reboot_port"], x["reconnect_port"]) for x in csvx[0]] == [("p,w1", 16001, 0), ("pw2", 0, 16001)]
+      and not csvx[1], csvx)
+check("ссылка без прокси — предупреждение, не молча",
+      any("строка 2" in m for m in store.parse_sheet("203.0.113.13:1:a:b\nhttp://203.0.113.13:2/reboot\n")[1]))
+check("пусто, кривой порт, повтор логина — понятный отказ",
+      "ни одной строки" in fails(store.parse_sheet, "Ip:port:log:pass\n")
+      and "строка 1" in fails(store.parse_sheet, "203.0.113.13:99999:m:p\n")
+      and "логин m" in fails(store.parse_sheet, "1.2.3.4:1:m:p\n1.2.3.4:4:m:q\n"))
+cur = {"next_id": 1001, "proxies": [
+    store.norm({"id": 201, "name": "modem 201", "login": "modem201", "password": "old", "port": 10000, "lan_ip": "192.168.201.100",
+                "modem_ip": "192.168.201.1", "reconnect_port": 10002, "reboot_port": 10001, "interval_min": 30}),
+    store.norm({"id": 202, "name": "modem 202", "login": "modem202", "password": "aecjeptr7e", "port": 16003,
+                "lan_ip": "192.168.202.100", "modem_ip": "192.168.202.1", "reconnect_port": 16005, "reboot_port": 16004}),
+    store.norm({"id": 204, "name": "modem 204", "login": "modem204", "password": "x", "port": 10009, "lan_ip": "192.168.204.100",
+                "modem_ip": "192.168.204.1", "reconnect_port": 10011, "reboot_port": 10010})]}
+pl = store.import_plan(cur, specs, addrs)
+got = {x["login"]: (x["action"], x["id"], x["lan_ip"], x["dev"]) for x in pl["rows"]}
+check("модем — по логину modemN: 201 поправить (порты, пароль), 202 как есть, 7 — добавить (модема 7 нет)",
+      got == {"modem201": ("change", 201, "192.168.201.100", "eth201"), "modem202": ("same", 202, "192.168.202.100", "eth202"),
+              "modem7": ("add", 7, "192.168.7.100", None)}
+      and set(pl["rows"][0]["changed"]) == {"password", "port", "reboot_port", "reconnect_port"}, pl["rows"])
+r201 = store.find(pl["doc"], 201)
+check("правка строки не трогает её интервал, имя и защиту", r201["interval_min"] == 30 and r201["protect"]
+      and r201["port"] == 16000 and r201["password"] == "6av42s3nyg")
+check("строка вне таблицы (204) остаётся; модема 7 нет — предупреждение",
+      store.find(pl["doc"], 204) and not pl["removed"] and any("модема 7" in m for m in pl["warnings"]), pl["warnings"])
+check("настройки: внешний адрес из таблицы, режим тройками, базовый порт — первый порт таблицы",
+      pl["settings"] == {"wan_ip": "203.0.113.13", "mode": "triples", "base_port": 16000}, pl["settings"])
+exp = store.export_lines([r for r in pl["doc"]["proxies"] if r["login"] in ("modem201", "modem202", "modem7")], "203.0.113.13")
+check("главное: «Копировать» после импорта даёт ровно строки таблицы",
+      sorted(exp) == sorted(ln.split("\t", 1)[1] for ln in SHEET.splitlines()[2:]), exp)
+pl = store.import_plan(cur, specs, addrs, replace=True)
+check("--replace: строки вне таблицы убираются", [r["id"] for r in pl["removed"]] == [204]
+      and sorted(r["id"] for r in pl["doc"]["proxies"]) == [7, 201, 202], pl["removed"])
+clash = [dict(specs[0], login="client1", port=10010, reboot_port=0, reconnect_port=0)]
+msg = fails(store.import_plan, cur, clash, addrs, how="order", skip_devs=("eth0",))
+check("порт строки вне таблицы занят — отказ с подсказкой «заменить всё»", msg and "--replace" in msg, msg)
+odd = store.import_plan({"next_id": 1001, "proxies": []}, [dict(specs[0], login="alice"), dict(specs[1], login="bob")], addrs,
+                        skip_devs=("eth0",))
+check("логин не modemN — на свободные модемы машины по порядку (основной канал машины — не модем)",
+      [x["lan_ip"] for x in odd["rows"]] == ["192.168.201.100", "192.168.202.100"], odd["rows"])
+check("модемов не хватило — понятный отказ", "не хватило модема" in fails(
+    store.import_plan, {"next_id": 1001, "proxies": []}, [dict(specs[0], login=c) for c in "abcd"], addrs[:3]))
+sh_specs = store.parse_sheet("203.0.113.13:16000:modem201:a\thttp://203.0.113.13:16001/reconnect/a\n"
+                             "203.0.113.13:16000:modem202:b\thttp://203.0.113.13:16001/reconnect/b\n")[0]
+shp = store.import_plan({"next_id": 1001, "proxies": []}, sh_specs, addrs)
+check("общий порт на всех — режим shared, ссылки с паролем строки",
+      shp["settings"]["mode"] == "shared" and sorted(store.export_lines(shp["doc"]["proxies"], "203.0.113.13"))
+      == ["203.0.113.13:16000:modem201:a\t\thttp://203.0.113.13:16001/reconnect/a",
+          "203.0.113.13:16000:modem202:b\t\thttp://203.0.113.13:16001/reconnect/b"], shp)
+fresh_root()
+real_sh = util.sh
+util.sh = lambda *c, **k: types.SimpleNamespace(stdout=ipout, stderr="", returncode=0) if c[:2] == ("ip", "-4") \
+    else real_sh(*c, **k)
+try:
+    src = os.path.join(store.P.root, "sheet.tsv")
+    with open(src, "w") as f:
+        f.write(SHEET)
+    rc, out, err = run_cli("import", src, "--dry-run", "--json")
+    d = json.loads(out)["data"] if rc == 0 else {}
+    check("modlink import --dry-run: план, ничего не записано", rc == 0 and len(d.get("rows", [])) == 3
+          and d["dry_run"] and not os.path.exists(store.P.proxies), out + err)
+    applied = []
+    real_apply, real_on = system.apply, system.turn_on
+    system.apply = lambda log, binary=None: applied.append("apply") or {"on": store.is_on()}
+    system.turn_on = lambda log, binary=None: applied.append("on") or store.set_on(True) or {"on": True}
+    try:
+        rc, out, err = run_cli("import", src, "--on")
+    finally:
+        system.apply, system.turn_on = real_apply, real_on
+    check("modlink import --on: записал, применил, включил; внешний адрес сохранён",
+          rc == 0 and applied == ["apply", "on"] and len(store.load()["proxies"]) == 3
+          and store.settings()["wan_ip"] == "203.0.113.13" and "добавить 3" in out, out + err)
+    store.PROBE[0] = lambda p: p != 16006
+    rc, out, err = run_cli("import", src)
+    check("порт занят другой программой — отказ до записи", rc == 1 and "16006" in err, err)
+finally:
+    util.sh = real_sh
+    store.PROBE[0] = lambda p: True
+
 print("команда modlink:")
 fresh_root()
 rc, out, err = run_cli("add", "--lan-ip", "192.168.201.100", "--json")

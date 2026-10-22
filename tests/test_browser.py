@@ -213,6 +213,45 @@ c, code = via_forward("localhost", ECHO)
 check("прокси нет — никуда напрямую (отказ SOCKS)", code != 0, code)
 c.close()
 
+print("веб модемов: пересыльщик ходит только к модемам машины:")
+check("адреса модемов: частные IPv4 и порты веба; остальное — нет",
+      B.modem_addr("192.168.101.1", 80) and B.modem_addr("10.5.0.1", 443) and not B.modem_addr("192.168.101.1", 22)
+      and not B.modem_addr("8.8.8.8", 80) and not B.modem_addr("1.1.1.1", 53) and not B.modem_addr("modem.local", 80))
+hub = ["ssh", "-i", "/etc/pcs/ssh/id_ed25519", "-p", "22", "-o", "BatchMode=yes", "-tt", "root@192.168.88.20"]
+tun = B.ssh_tunnel_argv(hub, "192.168.101.1", 80, "/run/pcs-browser-2000-md")
+check("ssh хаба → туннель: -W модем, свой мастер в каталоге сеанса, без -tt, адрес ВМ — последним",
+      tun[0] == "ssh" and tun[-1] == "root@192.168.88.20" and tun[-3:-1] == ["-W", "192.168.101.1:80"] and "-tt" not in tun
+      and "ControlPath=/run/pcs-browser-2000-md/cm-%C" in tun and "-F" in tun, tun)
+FAKE_SSH = os.path.join(TMP, "fake-ssh")
+with open(FAKE_SSH, "w") as f:
+    f.write("#!%s\nimport os, socket, sys, threading\n"
+            "hp = sys.argv[sys.argv.index('-W') + 1]\n"
+            "s = socket.create_connection(('127.0.0.1', int(hp.rsplit(':', 1)[1])))\n"
+            "def up():\n    while True:\n        d = os.read(0, 4096)\n        if not d:\n            break\n        s.sendall(d)\n"
+            "threading.Thread(target=up, daemon=True).start()\n"
+            "while True:\n    d = s.recv(4096)\n    if not d:\n        break\n    os.write(1, d)\n" % sys.executable)
+os.chmod(FAKE_SSH, 0o755)
+real_nets, real_ports = B.MODEM_NETS, B.MODEM_PORTS
+B.MODEM_NETS, B.MODEM_PORTS = B.MODEM_NETS + (B.ipaddress.ip_network("127.0.0.0/8"),), B.MODEM_PORTS + (ECHO,)
+try:
+    for via, what in (({"kind": "local"}, "на хабе — прямо"), ({"kind": "ssh", "argv": [FAKE_SSH, "root@vm"]}, "на ВМ — через ssh -W")):
+        json.dump({"via": via}, open(conf, "w"))
+        time.sleep(1.1)
+        os.utime(conf)
+        c, code = via_forward("127.0.0.1", ECHO)
+        c.sendall(b"md")
+        got = c.recv(100) if code == 0 else b""
+        c.close()
+        check("веб модема %s: соединение доходит до модема" % what, code == 0 and got == b"echo:md", (code, got))
+    c, code = via_forward("1.1.1.1", 53)
+    check("веб модемов: DNS и интернет — отказ (браузеру модемов больше никуда)", code != 0, code)
+    c.close()
+    c, code = via_forward("127.0.0.1", 22)
+    check("веб модемов: не порт веба — отказ", code != 0, code)
+    c.close()
+finally:
+    B.MODEM_NETS, B.MODEM_PORTS = real_nets, real_ports
+
 print("профиль и ключи:")
 check("ключи: ВМ, хост, присоединённый хост", B.key("mp", 2000) == "2000-mp" and B.key("ym", "host") == "host-ym"
       and B.key("ym", "host", "vps1") == "n-vps1-host-ym" and B.kind_of("n-vps1-host-ym") == "ym")

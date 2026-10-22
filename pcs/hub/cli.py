@@ -30,6 +30,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs server start|shutdown|reboot|stop ID           питание ВМ (shutdown — штатно, stop — жёстко)
   pcs server forget ID [--yes]          убрать из PCS (ВМ не трогается) — так чистят удалённые мимо PCS
   pcs server color ID [красный|оранжевый|жёлтый|зелёный|голубой|синий|фиолетовый]   цвет в дереве
+  pcs server trust-key ID [--accept SHA256:…]   ключ SSH сервера: сверить; сменился — принять
   pcs proxyveth …  [--server ID|--host] команда proxyveth на сервере или самом хосте (как есть)
   pcs modlink …    [--server ID|--host]   без выбранного сервера — на хосте
   pcs hivelink …   [--server ID|--host]
@@ -103,6 +104,9 @@ def parser():
     c = srv.add_parser("color")
     c.add_argument("id")
     c.add_argument("color", nargs="?", default="")
+    c = srv.add_parser("trust-key")
+    c.add_argument("id")
+    c.add_argument("--accept", metavar="SHA256:…")
     for name in ("dns", "passwd", "key", "doctor"):
         c = sub.add_parser(name)
         c.add_argument("--server")
@@ -392,6 +396,31 @@ def c_server_color(a):
     d = servers.set_color(store.load(a.id)["id"], a.color)
     ui.ok("цвет ВМ %s: %s" % (d["id"], servers.COLOR_RU.get(d.get("color"), "по номеру")))
     return 0, d
+
+
+def c_server_trust_key(a):
+    """Ключ SSH сервера. Без --accept: сверить и, если сменился, а guest agent его подтвердил, — принять."""
+    s = store.load(a.id)
+    if a.accept:
+        d = remote.rekey(s, accept=a.accept.strip())
+        ui.ok("сервер %s: принят ключ %s (был: %s)" % (s["id"], ", ".join(d["new"]), ", ".join(d["old"]) or "—"))
+        return 0, d
+    d = remote.host_key(s)
+    ui.info("знает хаб:    %s" % (", ".join(d["known"]) or "—"))
+    ui.info("показывает:   %s" % (", ".join(d["shown"]) or "— (сервер не ответил)"))
+    ui.info("guest agent:  %s" % (", ".join(d["agent"]) if d["agent"] is not None else "сверить нечем"))
+    if d["same"]:
+        ui.ok("ключ сервера %s не менялся" % s["id"])
+        return 0, d
+    if not d["shown"]:
+        raise Fail("сервер %s не отдал ключ — он включён?" % s["id"])
+    if d["agent_ok"]:
+        d.update(remote.rekey(s), accepted=True)
+        ui.ok("ключ сменился, guest agent его подтвердил — принят: %s" % ", ".join(d["new"]))
+        return 0, d
+    ui.warn("ключ сменился, подтвердить нечем; если сервер переустанавливали — сверь отпечаток в консоли ВМ "
+            "(ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub) и прими: pcs server trust-key %s --accept ОТПЕЧАТОК" % s["id"])
+    return 1, d
 
 
 def c_dns(a):
@@ -831,7 +860,7 @@ HANDLERS = {
     ("server", "use"): c_server_use, ("server", "create"): c_server_create, ("server", "adopt"): c_server_adopt,
     ("server", "delete"): c_server_delete, ("server", "start"): c_server_power, ("server", "shutdown"): c_server_power,
     ("server", "reboot"): c_server_power, ("server", "stop"): c_server_power, ("server", "forget"): c_server_forget,
-    ("server", "color"): c_server_color, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
+    ("server", "color"): c_server_color, ("server", "trust-key"): c_server_trust_key, ("dns", None): c_dns, ("passwd", None): c_passwd, ("key", None): c_key,
     ("ssh-port", None): c_ssh_port, ("mpspace", None): c_mpspace, ("update", None): c_update, ("web", None): c_web,
     ("host-setup", None): c_host_setup,
     ("job", None): c_job, ("log", None): c_log, ("doctor", None): c_doctor, ("token", None): c_token,

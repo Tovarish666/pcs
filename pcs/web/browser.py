@@ -24,6 +24,11 @@
 Сеанс — юнит systemd pcs-browser-<ключ> (systemd-run) с `python3 -m pcs.web.browser run …`
 (root: namespace, sing-box, пересыльщик), внутри — `… session …` от pcs-browser (dbus,
 Xtigervnc, matchbox, браузер).
+
+Веб модемов (вид md) — тот же браузер, но вместо прокси пользователя пересыльщик ходит к модемам
+машины, где они воткнуты: на хабе — прямо, на ВМ — через SSH хаба (`ssh -W`, свой мастер в
+каталоге сеанса). Пускает только к частным адресам на портах веба (MODEM_NETS, MODEM_PORTS):
+больше этому браузеру ходить некуда — ни в интернет, ни к самой машине.
 """
 import base64
 import ctypes
@@ -75,7 +80,10 @@ KINDS = {
            "links": [["mobileproxy.space", "https://mobileproxy.space/"]]},
     "ym": {"title": "ЮMoney", "want": "ru", "want_text": "российский адрес",
            "links": [["Кошелёк", "https://yoomoney.ru/"]]},
+    "md": {"title": "веб модемов", "want": None, "want_text": "", "links": []},
 }
+MODEM_NETS = tuple(ipaddress.ip_network(n) for n in ("192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"))
+MODEM_PORTS = (80, 443, 8080, 8443)
 
 
 try:
@@ -93,7 +101,7 @@ class BrowserFail(_Fail):
 def key(kind, target, node=None):
     """mp|ym + host|номер ВМ (+ присоединённый хост) → имя профиля и юнита: 2000-mp, n-vps1-host-ym."""
     if kind not in KINDS:
-        raise BrowserFail("вкладка: mp или ym")
+        raise BrowserFail("вкладка: mp, ym или md")
     t = str(target)
     if t != "host" and not re.fullmatch(r"\d{1,9}", t):
         raise BrowserFail("цель: host или номер ВМ")
@@ -231,6 +239,50 @@ def dial(up, host, port, timeout=15):
         raise BrowserFail("прокси: %s" % (e.strerror or e))
 
 
+def modem_addr(host, port):
+    """Пускать ли браузер веба модемов: частный IPv4 и порт веба."""
+    try:
+        a = ipaddress.IPv4Address(host)
+    except ValueError:
+        return False
+    return port in MODEM_PORTS and any(a in n for n in MODEM_NETS)
+
+
+def ssh_tunnel_argv(argv, host, port, ctl_dir):
+    """argv ssh хаба до ВМ (последний — root@IP) → тот же, но `-W host:port` и свой мастер в ctl_dir."""
+    if not argv or not str(argv[-1]).startswith("root@"):
+        raise BrowserFail("путь до ВМ: argv ssh хаба")
+    head = [a for a in argv[:-1] if a != "-tt"]
+    opts = ["-F", "/dev/null", "-o", "ControlMaster=auto", "-o", "ControlPath=%s/cm-%%C" % ctl_dir,
+            "-o", "ControlPersist=300"]
+    return [head[0]] + opts + head[1:] + ["-W", "%s:%d" % (host, port), argv[-1]]
+
+
+def dial_via(via, host, port, ctl_dir="/run", timeout=10):
+    """Соединение к веб модема с машины, где он воткнут. via: {"kind": "local"} — отсюда;
+    {"kind": "ssh", "argv": [...]} — с ВМ через SSH хаба (поток ssh -W)."""
+    if not modem_addr(host, port):
+        raise BrowserFail("к %s:%s браузеру модемов нельзя" % (host, port))
+    if via.get("kind") == "local":
+        try:
+            return socket.create_connection((host, port), timeout=timeout)
+        except OSError as e:
+            raise BrowserFail("модем %s не отвечает: %s" % (host, e.strerror or e))
+    if via.get("kind") == "ssh":
+        a, b = socket.socketpair()
+        try:
+            p = subprocess.Popen(ssh_tunnel_argv(via.get("argv") or [], host, port, ctl_dir), stdin=b, stdout=b,
+                                 stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError as e:
+            a.close()
+            raise BrowserFail("ssh: %s" % e)
+        finally:
+            b.close()
+        threading.Thread(target=p.wait, daemon=True).start()        # без зомби: ssh кончится с потоком
+        return a
+    raise BrowserFail("путь к модемам: local или ssh")
+
+
 def _https_get(up, host, path, timeout=15):
     s = dial(up, host, 443, timeout)
     try:
@@ -304,8 +356,9 @@ class Forward:
     listen_in (fd namespace браузера) или в своём; к прокси ходит из сети машины. Прокси —
     из session.json при каждом соединении; сменился — открытые соединения рвутся."""
 
-    def __init__(self, conf_file, port=FWD_PORT, listen_in=None, unix=None):
+    def __init__(self, conf_file, port=FWD_PORT, listen_in=None, unix=None, ctl_dir="/run"):
         self.conf_file, self.port, self.listen_in, self.unix = conf_file, port, listen_in, unix
+        self.ctl_dir = ctl_dir
         self.conns = set()
         self.lock = threading.Lock()
         self.ready = threading.Event()
@@ -324,6 +377,8 @@ class Forward:
             except (OSError, ValueError):
                 pass
             new = c.get("proxy") if isinstance(c.get("proxy"), dict) else None
+            if new is None and isinstance(c.get("via"), dict):
+                new = dict(c["via"], via=True)          # веб модемов: не прокси, а машина с модемами
             if self._mt is not None and new != self._up:
                 self.drop_all()
             self._up, self._mt = new, mt
@@ -400,8 +455,11 @@ class Forward:
             if not up:
                 c.sendall(b"\x05\x02\x00\x01\0\0\0\0\0\0")      # прокси не задан — никуда напрямую
                 return
+            if up.get("via") and not modem_addr(host, port):
+                c.sendall(b"\x05\x02\x00\x01\0\0\0\0\0\0")      # веб модемов: никуда, кроме модемов
+                return
             try:
-                far = dial(up, host, port)
+                far = dial_via(up, host, port, self.ctl_dir) if up.get("via") else dial(up, host, port)
             except BrowserFail:
                 c.sendall(b"\x05\x05\x00\x01\0\0\0\0\0\0")
                 return
@@ -574,11 +632,15 @@ def _display(k):
     return d[k]
 
 
-def start(k):
+def start(k, url=None):
+    """Запустить сеанс; url — открыть сразу (первый запуск браузера сам открывает адрес: второй
+    запуск, пока первый ещё поднимается, мог бы стать отдельным браузером)."""
+    if url is not None and not re.fullmatch(r"https?://[^\s\"'<>]{1,2000}", url):
+        raise BrowserFail("адрес: http(s)://…")
     if not installed():
         raise BrowserFail("браузер не установлен — «Установить браузер»")
     c = load_conf(k)
-    if not c.get("proxy"):
+    if not c.get("proxy") and not c.get("via"):
         raise BrowserFail("сначала прокси: без него браузеру некуда ходить")
     if running(k):
         return {"running": True, "started": False}
@@ -597,8 +659,9 @@ def start(k):
            # куки сохраняются), потом экран, «роутер» и namespace.
            "-p", "KillMode=mixed", "-p", "TimeoutStopSec=45", "-p", "PrivateTmp=yes",
            "-p", "ProtectHome=yes", "-p", "MemoryMax=4G", "-p", "Nice=5",
-           "--setenv", "PYTHONPATH=" + root, "--setenv", "PCS_BROWSER_TZ=" + tz,
-           sys.executable, "-m", "pcs.web.browser", "run", k, str(_display(k))]
+           "--setenv", "PYTHONPATH=" + root, "--setenv", "PCS_BROWSER_TZ=" + tz] + \
+        (["--setenv", "PCS_BROWSER_URL=" + url] if url else []) + \
+        [sys.executable, "-m", "pcs.web.browser", "run", k, str(_display(k))]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise BrowserFail("не запустился: %s" % (r.stderr or r.stdout).strip()[-300:])
@@ -677,7 +740,7 @@ def run(k, display):
         with open(os.path.join(etc, "resolv.conf"), "w") as f:
             f.write("nameserver 1.1.1.1\noptions edns0\n")
         nsfd = os.open("/run/netns/" + ns, os.O_RDONLY)
-        fw = Forward(conf_path(k), FWD_PORT, listen_in=nsfd)
+        fw = Forward(conf_path(k), FWD_PORT, listen_in=nsfd, ctl_dir=rd)
         threading.Thread(target=fw.serve, daemon=True).start()
         if not fw.ready.wait(10):
             raise RuntimeError("пересыльщик не поднялся")
@@ -696,7 +759,8 @@ def run(k, display):
         if r.returncode != 0:
             raise RuntimeError("маршрут через tun0: %s" % r.stderr.strip())
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
-               "PCS_BROWSER_TZ": os.environ.get("PCS_BROWSER_TZ", TZ_DEFAULT)}
+               "PCS_BROWSER_TZ": os.environ.get("PCS_BROWSER_TZ", TZ_DEFAULT),
+               "PCS_BROWSER_URL": os.environ.get("PCS_BROWSER_URL", "")}
         sess = subprocess.Popen(["ip", "netns", "exec", ns, "setpriv", "--reuid=%d" % pw.pw_uid,
                                  "--regid=%d" % pw.pw_gid, "--init-groups", "--",
                                  sys.executable, "-m", "pcs.web.browser", "session", k, str(d)],
@@ -766,7 +830,8 @@ def session(k, display):
     # любого Chrome без видеокарты (ВМ, удалённый стол): без него WebGL нет вовсе — это заметнее.
     base = [browser_bin() or BROWSER, "--user-data-dir=" + profile, "--no-first-run", "--no-default-browser-check",
             "--password-store=basic", "--enable-unsafe-swiftshader"]
-    br = spawn(base + ([KINDS[kind_of(k)]["links"][0][1]] if first else []))
+    links, url = KINDS[kind_of(k)]["links"], os.environ.get("PCS_BROWSER_URL") or ""
+    br = spawn(base + ([url] if url else [links[0][1]] if first and links else []))
     done = threading.Event()
 
     def ctl():
@@ -901,6 +966,19 @@ class Manager:
         c["check"] = res
         save_conf(k, c)
         return {"check": res}
+
+    def open_modem(self, k, via, url):
+        """Веб модема: сеанс вида md этой машины (путь к модемам — via), в нём — вкладка url."""
+        if kind_of(k) != "md":
+            raise BrowserFail("веб модема — в браузере модемов (md)")
+        c = load_conf(k)
+        if c.get("via") != via:
+            c["via"] = via
+            save_conf(k, c)
+        if running(k):
+            return dict(open_url(k, url), started=False)
+        start(k, url=url)
+        return {"opened": url, "started": True}
 
     def set_links(self, k, links):
         if not isinstance(links, list) or len(links) > 20:

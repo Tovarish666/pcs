@@ -34,6 +34,13 @@
   modlink export --table [--ip IP]        таблица proxyveth: виртуальные модемы из этих настоящих
                                           (IP по умолчанию — свой основной адрес: ВМ этого хоста)
   modlink from-ifaces [--add]             строки по интерфейсам 192.168.N.100 сервера
+  modlink import [ФАЙЛ|ССЫЛКА|-] [--replace] [--map number|order] [--dry-run] [--on]
+                                          конфиг по таблице: строки «Ip:port:log:pass  ReBoot
+                                          ReConnect» (как «Копировать»; колонки — любые, ReBoot
+                                          может не быть) → таблица modlink, где каждая работает
+                                          ровно так; модем — по логину modemN (--map order — по
+                                          порядку); --replace — убрать строки, которых нет в
+                                          таблице; --dry-run — только план; --on — и включить
   modlink migrate [--from DIR] [--dry-run] [--force] [--stop-panel]   из modlink-linux
   modlink setup | uninstall --yes [--purge] | daemon | version
 
@@ -119,6 +126,12 @@ def parser():
     c.add_argument("--table", action="store_true")
     c = sub.add_parser("from-ifaces")
     c.add_argument("--add", action="store_true")
+    c = sub.add_parser("import")
+    c.add_argument("src", nargs="?", default="-")
+    c.add_argument("--replace", action="store_true")
+    c.add_argument("--map", choices=store.MAP, default="number")
+    c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--on", action="store_true")
     c = sub.add_parser("migrate")
     c.add_argument("--from", dest="src")
     c.add_argument("--dry-run", action="store_true")
@@ -496,6 +509,84 @@ def cmd_from_ifaces(a):
     return 0, {"suggest": sug, "added": [store.masked(r) for r in added]}
 
 
+def read_source(src):
+    """- — stdin; http(s) — ссылка (Google-таблица — её лист в CSV); иначе файл."""
+    if src == "-":
+        return sys.stdin.read()
+    if re.match(r"https?://", src):
+        import urllib.request
+        from ..core.table import normalize_url
+        try:
+            req = urllib.request.Request(normalize_url(src), headers={"User-Agent": "pcs"})
+            text = urllib.request.urlopen(req, timeout=30).read().decode("utf-8-sig")
+        except Exception as e:
+            raise Fail("таблица по ссылке не открылась: %s" % e)
+        if text.lstrip().startswith("<"):
+            raise Fail("вместо таблицы пришла страница — у листа нет доступа по ссылке?")
+        return text
+    try:
+        with open(src, encoding="utf-8-sig") as f:
+            return f.read()
+    except OSError as e:
+        raise Fail("%s: %s" % (src, e.strerror))
+
+
+IMPORT_ACT = {"add": "+", "change": "~", "same": "="}
+
+
+def cmd_import(a):
+    specs, warn = store.parse_sheet(read_source(a.src))
+    addrs = store.parse_addrs(util.sh("ip", "-4", "-o", "addr", check=False).stdout)
+    from ..core import net
+    try:
+        up = net.uplink_route()
+    except Fail:
+        up = None
+    with edit():
+        doc = store.load()
+        pl = store.import_plan(doc, specs, addrs, replace=a.replace, how=a.map, skip_devs=(up[1],) if up else ())
+        mine = {p for r in system.applied_rows() for p in system.ports_of(r)}
+        busy = sorted({p for x in specs for p in (x["port"], x["reboot_port"], x["reconnect_port"])
+                       if p and p not in mine and not store.PROBE[0](p)})
+        if busy and not a.dry_run:
+            raise Fail("порт %s слушает другая программа (ss -ltnp) — сначала освободи его: ничего не менял"
+                       % ", ".join(map(str, busy[:10])))
+        if busy:
+            warn.append("порт %s слушает другая программа (ss -ltnp) — там прокси не заработает"
+                        % ", ".join(map(str, busy[:10])))
+        warn += pl["warnings"]
+        cur = store.settings()
+        sets = {k: v for k, v in pl["settings"].items() if cur.get(k) != v}
+        res = {"rows": pl["rows"], "removed": pl["removed"], "settings": sets, "warnings": warn,
+               "on": store.is_on(), "dry_run": a.dry_run, "applied": False}
+        for x in pl["rows"]:
+            say("  %s строка %-5s %-12s порт %-5d ребут %-5s реконнект %-5s модем %-15s %s" % (
+                IMPORT_ACT[x["action"]], x["id"], x["login"][:12], x["port"], x["reboot_port"] or "—",
+                x["reconnect_port"] or "—", x["lan_ip"], x["dev"] or "(нет на машине)"))
+        for r in pl["removed"]:
+            say("  − строка %-5d %-12s порт %d (нет в таблице)" % (r["id"], r["login"][:12], r["port"]))
+        for k, v in sets.items():
+            say("  настройка %s: %s → %s" % (k, cur.get(k) or "авто", v))
+        for w in warn:
+            say("  ⚠ " + w)
+        n = {k: len([x for x in pl["rows"] if x["action"] == k]) for k in IMPORT_ACT}
+        say("  итого: добавить %d, поправить %d, как есть %d, убрать %d" % (n["add"], n["change"], n["same"], len(pl["removed"])))
+        if a.dry_run:
+            say("  это план; применить: modlink import … без --dry-run%s" % ("" if res["on"] or a.on else " (и --on, чтобы включить)"))
+            return 0, res
+        store.save(pl["doc"])
+        if sets:
+            store.save_settings(**sets)
+        res["apply"] = system.apply(log)
+        res["applied"] = True
+        if a.on and not store.is_on():
+            res["turned_on"] = system.turn_on(log)
+            res["on"] = True
+    if not res["on"]:
+        say("  modlink выключен — строки записаны и применятся при включении: modlink on")
+    return 0, res
+
+
 def cmd_migrate(a):
     with edit():
         res = system.migrate(log, src=a.src, stop_panel=a.stop_panel, force=a.force, dry_run=a.dry_run)
@@ -539,7 +630,7 @@ CMDS = {"list": cmd_list, "add": cmd_add, "set": cmd_set, "del": cmd_del, "enabl
         "settings": cmd_settings,
         "disable": lambda a: cmd_enable(a, False), "apply": cmd_apply, "status": cmd_status,
         "test": cmd_test, "reconnect": cmd_reconnect, "reboot": cmd_reboot, "log": cmd_log, "speedtest": cmd_speedtest, "logs": cmd_logs,
-        "export": cmd_export, "from-ifaces": cmd_from_ifaces, "migrate": cmd_migrate,
+        "export": cmd_export, "from-ifaces": cmd_from_ifaces, "import": cmd_import, "migrate": cmd_migrate,
         "setup": cmd_setup, "uninstall": cmd_uninstall, "daemon": cmd_daemon, "on": cmd_on, "off": cmd_off}
 
 

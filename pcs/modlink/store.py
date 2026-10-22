@@ -727,6 +727,177 @@ def table_lines(rows, ip):
     return buf.getvalue().splitlines(), warn
 
 
+# ── конфиг по таблице: обратное «Копировать» ───────────────────────────────
+# Клиентам уже розданы строки «Ip:port:log:pass | ReBoot | ReConnect» (или без ReBoot). Таблицу
+# modlink собираем так, чтобы каждая из этих строк работала ровно как написано: тот же порт,
+# логин, пароль, те же ссылки. Модем строки — по логину modemN (модем 192.168.N.1, как
+# называет строки modlink и для Windows, и здесь), остальные — на свободные модемы по порядку.
+PROXY_CELL = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5}):([^:\s]+):(\S+)")
+LINK_CELL = re.compile(r"https?://(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})/(reboot|reconnect)(?:/([^\s/]*))?/?", re.I)
+MAP = ("number", "order")         # модем строки: по номеру в логине modemN | по порядку
+
+
+def _cells(line):
+    """Варианты разбивки строки на ячейки: табуляция (вставка из Google-таблицы), CSV, пробелы."""
+    out = []
+    if "\t" in line:
+        out.append(line.split("\t"))
+    try:
+        out.append(next(csv.reader([line])))
+    except (csv.Error, StopIteration):
+        pass
+    out.append(line.split())
+    return [[c.strip() for c in cells] for cells in out]
+
+
+def parse_sheet(text):
+    """Текст таблицы → (записи, предупреждения). Колонки и их порядок — любые: прокси
+    `ip:порт:логин:пароль`, ссылки `http://ip:порт/reboot` и `/reconnect`; всё прочее (шапка,
+    имена клиентов, пустые строки) пропускается. Запись: {line, ip, port, login, password,
+    reboot_port, reconnect_port} (0 — ссылки нет)."""
+    specs, warn, bad = [], [], []
+    for i, line in enumerate((text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1):
+        if not line.strip():
+            continue
+        cells = prox = None
+        for cand in _cells(line):
+            hits = [m for m in (PROXY_CELL.fullmatch(c) for c in cand) if m]
+            if hits:
+                cells, prox = cand, hits
+                break
+        if not prox:
+            if LINK_CELL.search(line):
+                warn.append("строка %d: ссылка есть, а «ip:порт:логин:пароль» нет — пропустил" % i)
+            continue
+        if len(prox) > 1:
+            warn.append("строка %d: два прокси в одной строке — беру первый" % i)
+        m = prox[0]
+        x = {"line": i, "ip": m.group(1), "port": m.group(2), "login": m.group(3), "password": m.group(4),
+             "reboot_port": 0, "reconnect_port": 0}
+        try:
+            x["ip"] = as_ipv4(x["ip"], "адрес")
+            x["port"] = as_port(x["port"])
+            x["login"] = as_secret(x["login"], "логин", colon_ok=False)
+            x["password"] = as_secret(x["password"], "пароль", colon_ok=True)
+            for c in cells:
+                lm = LINK_CELL.fullmatch(c)
+                if not lm:
+                    continue
+                what = lm.group(3).lower()
+                x[what + "_port"] = as_port(lm.group(2), "порт ссылки %s" % what)
+                if lm.group(1) != x["ip"]:
+                    warn.append("строка %d: ссылка %s ведёт на %s, а прокси — на %s" % (i, what, lm.group(1), x["ip"]))
+                tail = urllib.parse.unquote(lm.group(4) or "")
+                if tail and tail != x["password"]:
+                    warn.append("строка %d: в ссылке %s не пароль этой строки — на общем порту она не сработает" % (i, what))
+        except Fail as e:
+            bad.append("строка %d: %s" % (i, e))
+            continue
+        specs.append(x)
+    if bad:
+        raise Fail("в таблице ошибки — " + "; ".join(bad[:5]) + (" и ещё %d" % (len(bad) - 5) if len(bad) > 5 else ""))
+    if not specs:
+        raise Fail("в тексте нет ни одной строки «ip:порт:логин:пароль» — вставь колонки как они есть в таблице")
+    seen = {}
+    for x in specs:
+        if x["login"] in seen:
+            raise Fail("логин %s — в строках %d и %d: у modlink логины не повторяются" % (x["login"], seen[x["login"]], x["line"]))
+        seen[x["login"]] = x["line"]
+    return specs, warn
+
+
+def import_plan(doc, specs, addrs, replace=False, how="number", skip_devs=()):
+    """Таблица modlink, в которой строки specs работают ровно как написаны.
+    addrs — интерфейсы машины (parse_addrs), skip_devs — не модемы (основной канал);
+    replace — остальные строки убрать.
+    → {"doc", "rows": [что с каждой строкой], "removed", "settings", "warnings"}."""
+    if how not in MAP:
+        raise Fail("модемы строк: number (по логину modemN) или order (по порядку)")
+    ips = sorted({x["ip"] for x in specs})
+    if len(ips) > 1:
+        raise Fail("в таблице разные адреса сервера (%s) — у modlink один внешний адрес" % ", ".join(ips))
+    warn = []
+    modems = {}                                   # N → интерфейс с 192.168.N.100
+    for dev, ip, _ in addrs:
+        n = modem_n(ip)
+        if n and ip.endswith(".100") and dev not in skip_devs:
+            modems.setdefault(n, dev)
+    old = [dict(r) for r in doc["proxies"]]
+    by_login = {r["login"]: r for r in old}
+
+    def num(login):
+        m = re.fullmatch(r"modem(\d{1,3})", login)
+        return int(m.group(1)) if m and 1 <= int(m.group(1)) <= 254 else None
+
+    lan = {}
+    for x in specs:
+        n = num(x["login"]) if how == "number" else None
+        if n:
+            lan[x["login"]] = "192.168.%d.100" % n
+        elif x["login"] in by_login and how == "number":
+            lan[x["login"]] = by_login[x["login"]]["lan_ip"]
+    free = [n for n in sorted(modems) if "192.168.%d.100" % n not in lan.values()]
+    for x in specs:
+        if x["login"] not in lan:
+            if not free:
+                raise Fail("строке %d (логин %s) не хватило модема: на машине нет свободных интерфейсов 192.168.N.100"
+                           % (x["line"], x["login"]))
+            lan[x["login"]] = "192.168.%d.100" % free.pop(0)
+    taken = {}
+    for x in specs:
+        if lan[x["login"]] in taken:
+            raise Fail("строки %d и %d — на один модем %s" % (taken[lan[x["login"]]], x["line"], lan[x["login"]]))
+        taken[lan[x["login"]]] = x["line"]
+
+    by_lan = {r["lan_ip"]: r for r in old}
+    used, rows, plan = set(), [], []
+    for x in specs:
+        ip = lan[x["login"]]
+        cur = by_lan.get(ip) or by_login.get(x["login"])
+        if cur and cur["id"] in used:
+            cur = None
+        want = {"login": x["login"], "password": x["password"], "port": x["port"], "reboot_port": x["reboot_port"],
+                "reconnect_port": x["reconnect_port"], "lan_ip": ip, "enabled": True}
+        if cur:
+            used.add(cur["id"])
+            row = dict(cur)
+            if cur["lan_ip"] != ip:
+                row["modem_ip"] = default_modem_ip(ip)
+            changed = [k for k, v in want.items() if cur.get(k) != v]
+            row.update(want)
+            act = "change" if changed else "same"
+        else:
+            row = dict(want, id=0, name="modem %d" % modem_n(ip), modem_ip=default_modem_ip(ip), interval_min=0, protect=True)
+            changed, act = [], "add"
+        rows.append(row)
+        n = modem_n(ip)
+        plan.append({"line": x["line"], "login": x["login"], "port": x["port"], "reboot_port": x["reboot_port"],
+                     "reconnect_port": x["reconnect_port"], "lan_ip": ip, "n": n, "dev": modems.get(n),
+                     "action": act, "changed": changed, "id": row["id"]})
+        if n not in modems:
+            warn.append("строка %d: модема %d (192.168.%d.100) на машине сейчас нет — строка заработает, когда он появится"
+                        % (x["line"], n, n))
+    rest = [r for r in old if r["id"] not in used]
+    removed = rest if replace else []
+    keep = [] if replace else rest
+    tmp = {"proxies": keep + [r for r in rows if r["id"]], "next_id": doc.get("next_id", FIRST_FREE_ID)}
+    for r, p in zip(rows, plan):
+        if not r["id"]:
+            r["id"] = p["id"] = new_id(tmp, r["lan_ip"])
+            tmp["proxies"].append(r)
+    try:
+        final = check_all([norm(r) for r in keep + rows])
+    except Fail as e:
+        raise Fail("%s — с остальными строками modlink не сходится; убрать строки, которых нет в таблице: "
+                   "«заменить всё» (--replace)" % e if keep else str(e))
+    ports = sorted({x["port"] for x in specs})
+    mode = "shared" if len(ports) == 1 and len(specs) > 1 else "triples"
+    return {"doc": {"next_id": tmp["next_id"], "proxies": sorted(final, key=lambda r: r["id"])},
+            "rows": plan, "removed": [{"id": r["id"], "login": r["login"], "port": r["port"], "lan_ip": r["lan_ip"]}
+                                      for r in removed],
+            "settings": {"wan_ip": ips[0], "mode": mode, "base_port": min(min(ports), 65533)}, "warnings": warn}
+
+
 # ── интерфейсы сервера ─────────────────────────────────────────────────────
 def parse_addrs(text):
     """Вывод `ip -4 -o addr` → [(dev, ip, prefix)]."""

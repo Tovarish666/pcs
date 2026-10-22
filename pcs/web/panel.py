@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from pcs.core.util import Fail, jload, jsave
+from pcs.web import browser as br_mod
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 DANGER = ("--yes", "--force")            # только с подтверждением номером сервера
@@ -121,11 +122,13 @@ class Panel:
             ("POST", r"/api/targets/(host|\d+)/modlink/reveal", self.ml_reveal),
             ("POST", r"/api/targets/(host|\d+)/modlink/export", self.ml_export),
             ("POST", r"/api/targets/(host|\d+)/modlink/settings", self.ml_settings),
+            ("POST", r"/api/targets/(host|\d+)/modlink/import", self.ml_import),
             ("POST", r"/api/servers", self.create),
             ("POST", r"/api/servers/(\d+)/delete", self.delete),
             ("POST", r"/api/servers/(\d+)/power", self.power),
             ("POST", r"/api/servers/(\d+)/forget", self.forget_server),
             ("POST", r"/api/servers/(\d+)/color", self.color),
+            ("POST", r"/api/servers/(\d+)/hostkey", self.hostkey),
             ("GET", r"/api/vms", self.vms_other),
             ("POST", r"/api/vms/(\d+)/adopt", self.adopt),
             ("GET", r"/api/colors", self.colors),
@@ -145,8 +148,10 @@ class Panel:
             ("GET", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_get),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_post),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
-            ("GET", r"/api/browser/(mp|ym)/(host|\d+)", self.br_status),
+            ("GET", r"/api/browser/(mp|ym|md)/(host|\d+)", self.br_status),
             ("POST", r"/api/browser/(mp|ym)/(host|\d+)/(proxy|check|start|stop|open|links)", self.br_act),
+            ("POST", r"/api/browser/md/(host|\d+)/stop", self.br_md_stop),
+            ("POST", r"/api/browser/md/(host|\d+)/modem", self.br_modem),
             ("POST", r"/api/browser/install", self.br_install),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
@@ -418,6 +423,30 @@ class Panel:
         return ok({"text": "\n".join(lines), "warnings": d.get("warnings") or [], "columns": cols, "rows": rows,
                    "what": what})
 
+    def ml_import(self, sid, query, body):
+        """Конфиг по таблице: строки «Ip:port:log:pass | ReBoot | ReConnect» (text — вставка, или url —
+        лист Google-таблицы) → таблица modlink, где каждая работает ровно так. dry — только план."""
+        url = str(body.get("url") or "").strip()
+        text = body.get("text")
+        if url:
+            if not re.fullmatch(r"https?://[^\s\"'<>]{1,2000}", url):
+                raise Bad("ссылка: https://…")
+            args, inp = ["import", url], None
+        else:
+            if not isinstance(text, str) or not text.strip():
+                raise Bad("вставьте строки таблицы или ссылку на лист")
+            if len(text) > 512 * 1024 or "\0" in text:
+                raise Bad("таблица: слишком большая или с мусором")
+            args, inp = ["import", "-"], text
+        how = body.get("map") or "number"
+        if how not in ("number", "order"):
+            raise Bad("модемы строк: number или order")
+        args += ["--map", how]
+        args += ["--replace"] if body.get("replace") is True else []
+        args += ["--dry-run"] if body.get("dry", True) is not False else []
+        args += ["--on"] if body.get("on") is True else []
+        return self._run(target(sid), "modlink", args, inp)
+
     def ml_save(self, sid, query, body):
         """Правки таблицы modlink разом: удалить, поменять, добавить, затем apply."""
         sid = target(sid)
@@ -489,6 +518,30 @@ class Panel:
         if what == "open":
             return ok(b.open_url(k, _s(body.get("url"), "адрес", 2000)))
         return ok(b.set_links(k, body.get("links")))
+
+    def br_modem(self, t, query, body):
+        """Веб модема в отдельном окне: браузер модемов этой машины (md) открывает http://IP/.
+        Модем — там, где воткнут: хост — отсюда, ВМ — через SSH хаба."""
+        b, k = self._br("md", t, query)
+        if query.get("node"):
+            raise Bad("веб модема присоединённого хоста — в панели того хоста")
+        ip = _s(body.get("ip"), "адрес модема", 40).strip()
+        port = body.get("port") or 80
+        if not isinstance(port, int) or not br_mod.modem_addr(ip, port):
+            raise Bad("адрес модема: частный IPv4 (192.168.N.1), порт веба")
+        if t == "host":
+            via = {"kind": "local"}
+        else:
+            fn = getattr(self.api, "tunnel_argv", None)
+            if fn is None:
+                raise Bad("этот хаб не умеет веб модемов ВМ", 501)
+            via = {"kind": "ssh", "argv": fn(int(t))}
+        url = "http://%s/" % ip if port == 80 else "%s://%s:%d/" % ("https" if port in (443, 8443) else "http", ip, port)
+        return ok(b.open_modem(k, via, url))
+
+    def br_md_stop(self, t, query, body):
+        b, k = self._br("md", t, query)
+        return ok(b.stop(k))
 
     def br_install(self, query, body):
         if self.browser is None:
@@ -607,6 +660,19 @@ class Panel:
     def color(self, sid, query, body):
         r = self.api.server_color(int(sid), _s(body.get("color"), "цвет", 20).strip())
         self.forget()
+        return ok(r)
+
+    def hostkey(self, sid, query, body):
+        """Ключ SSH сервера: сверить; accept — принять ("agent" или отпечаток SHA256:…)."""
+        acc = body.get("accept")
+        if acc is not None and (not isinstance(acc, str) or not re.fullmatch(r"agent|SHA256:[A-Za-z0-9+/]{43}", acc)):
+            raise Bad("accept: agent или отпечаток SHA256:…")
+        fn = getattr(self.api, "host_key", None)
+        if fn is None:
+            raise Bad("этот хаб не умеет сверять ключ", 501)
+        r = fn(int(sid), acc)
+        if acc:
+            self.forget()
         return ok(r)
 
     def node_color(self, name, query, body):

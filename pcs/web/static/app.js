@@ -1135,6 +1135,7 @@
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             r.dataswitch === 0 && can ? ibtn("bolt", "включить мобильные данные (hivelink dataon " + r.n + ")", (e) => act1(e.currentTarget, "dataon", r.n, "данные включены"), "", "данные") : null,
             can ? ibtn("redo", "переподключить: откл → вкл (hivelink reconnect " + r.n + ")", (e) => act1(e.currentTarget, "reconnect", r.n, "переподключён")) : null,
+            can ? ibtn("link", "веб модема " + r.n + " (192.168." + r.n + ".1) — в отдельном окне", () => openModem(X, id, "192.168." + r.n + ".1")) : null,
             ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
               (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }))));
       }));
@@ -1167,6 +1168,64 @@
   async function loadRFB() {
     if (!RFBmod) RFBmod = (await import("/static/vendor/novnc/core/rfb.js")).default;
     return RFBmod;
+  }
+
+  // Веб модема — в отдельном окне: браузер модемов машины, где модем воткнут (хост — сам хаб,
+  // ВМ — через SSH хаба). Одно окно на машину, каждый модем — новая вкладка в нём.
+  function openModem(X, id, ip) {
+    if (X.node) { toast("веб модема присоединённого хоста — в панели того хоста", "warn"); return; }
+    const name = "pcs-md-" + id;
+    const w = window.open("", name, "popup=yes,width=1320,height=860");   // сразу, в нажатии: иначе окно заблокируют
+    const view = location.origin + location.pathname + "#/md/" + id;
+    toast("открываю веб модема " + ip + "…", "info");
+    X.POST("/browser/md/" + id + "/modem", {ip}).then((r) => {
+      if (!r.ok) { if (w && w.location.href === "about:blank") w.close(); toast("Веб модема: " + r.error, "bad"); return; }
+      if (!w) { toast("браузер не дал открыть окно — разрешите всплывающие окна для панели", "warn"); return; }
+      try { if (!w.location.hash.startsWith("#/md/" + id)) w.location.href = view; } catch (e) { w.location.href = view; }
+      w.focus();
+    });
+  }
+  function pageMd(X, id) {
+    const where = id === "host" ? "хост " + X.title() : "ВМ " + id;
+    document.title = "Модемы · " + where;
+    const res = el("span", {class: "res"});
+    const screen = el("div", {class: "md-screen"});
+    let rfb = null, alive = true, tries = 0;
+    const msg = (t, ...b) => screen.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: t}), b.length ? el("div", {class: "bar"}, b) : null));
+    async function connect() {
+      if (rfb || !alive) return;
+      let RFB;
+      try { RFB = await loadRFB(); } catch (e) { msg("noVNC не загрузился: " + e); return; }
+      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/browser?" + new URLSearchParams({kind: "md", target: id});
+      screen.replaceChildren();
+      rfb = new RFB(screen, url, {shared: true});
+      rfb.resizeSession = false;
+      rfb.scaleViewport = true;
+      rfb.focusOnClick = true;
+      rfb.background = "transparent";
+      rfb.addEventListener("connect", () => { tries = 0; rfb.focus(); });
+      rfb.addEventListener("disconnect", () => {
+        rfb = null;
+        if (!alive) return;
+        if (++tries <= 5) { setTimeout(connect, 1500); return; }           // браузер ещё поднимается
+        msg("Браузер модемов закрыт", btn("Подключиться снова", () => { tries = 0; connect(); }, "primary"));
+      });
+    }
+    const bFull = btn("На весь экран", () => { if (screen.requestFullscreen) screen.requestFullscreen(); }, "ghost");
+    const bStop = btn("Закрыть браузер", async (e) => {
+      if (!window.confirm("Закрыть браузер модемов (" + where + ")? Вход в веб модемов сохранится.")) return;
+      alive = false;
+      if (rfb) { try { rfb.disconnect(); } catch (x) { /* уже закрыт */ } }
+      await act(e.currentTarget, res, () => X.POST("/browser/md/" + id + "/stop", {}), "Закрыт");
+      window.close();
+    }, "ghost");
+    const bar = el("div", {class: "md-bar"}, el("b", {text: "Веб модемов · " + where}),
+      el("span", {class: "muted", text: "каждая кнопка «веб модема» в панели — новая вкладка здесь; вход в модемы сохраняется"}),
+      el("span", {class: "spacer"}), res, bFull, bStop);
+    msg("Подключаюсь к браузеру модемов…");
+    connect();
+    return {kind: "md", id, node: X.node, el: el("div", {class: "md-page"}, bar, screen), show() {},
+      dispose() { alive = false; if (rfb) { try { rfb.disconnect(); } catch (x) { /* уже закрыт */ } } }};
   }
   function browserTab(X, id, kind) {
     const q = X.node ? "?node=" + encodeURIComponent(X.node) : "";
@@ -1463,7 +1522,9 @@
               ? ibtn("play", "поднять модем " + r.n + " (proxyveth up " + r.n + ")", (e) => updown(e.currentTarget, "up", r.n), "", "поднять")
               : ibtn("stop", "остановить модем " + r.n + ": таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")", (e) => updown(e.currentTarget, "down", r.n), "", "остановить"),
             ibtn("redo", "пересоздать модем " + r.n + ": интерфейс снимется и поднимется заново (proxyveth restart " + r.n + ")", (e) => updown(e.currentTarget, "restart", r.n)),
-            ibtn("pulse", "диагностика модема " + r.n + ": прокси → логин → модем → SIM → интернет", () => diag(r.n)))));
+            ibtn("pulse", "диагностика модема " + r.n + ": прокси → логин → модем → SIM → интернет", () => diag(r.n)),
+            ibtn("link", "веб модема " + r.n + ": настоящий модем за прокси (через 192.168." + r.n + ".1 этого сервера) — в отдельном окне",
+              () => openModem(X, id, "192.168." + r.n + ".1")))));
       });
       const tb = el("tbody", {}, body);
       tbl.replaceChildren(el("table", {class: "t"}, el("thead", {}, head), tb));
@@ -1926,6 +1987,7 @@
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             ibtn("bolt", "Test: внешний IP через этот прокси + HiLink", () => test(r), "", "test"),
             ibtn("redo", "реконнект: сменить IP", () => rowAct(r, "реконнект", ["reconnect", String(r.id)])),
+            val(r, "modem_ip") ? ibtn("link", "веб модема (" + val(r, "modem_ip") + ") — в отдельном окне", () => openModem(X, id, val(r, "modem_ip"))) : null,
             ibtn("copy", "копировать строку: прокси и ссылки", () => copyRow(r)),
             ibtn("chev", open ? "свернуть" : "ещё: порты, автореконнект, защита, ребут, скорость", () => { open ? opened.delete(r.id) : opened.add(r.id); draw(); }, open ? "on" : ""),
             ibtn("trash", gone ? "не удалять" : "удалить строку (при «Применить»)", () => { if (gone) deleted.delete(r.id); else deleted.add(r.id); draw(); markDirty(); }, "danger")))));
@@ -2091,6 +2153,72 @@
           el("div", {class: "muted", text: "Колонки n, real, proxy — как в таблице proxyveth ВМ этого хоста. n (номер виртуального модема)" +
             " можно поменять. У строк-поставщиков защита снята: proxyveth ходит через прокси к 192.168.N.1 за DNS и HiLink."})));
     }, "", "виртуальные модемы из этих настоящих: строки n,real,proxy,enabled для proxyveth");
+    // Конфиг по таблице: строки, которые уже у клиентов, — как есть; modlink подстраивается под них.
+    const bImp = btn("Конфиг по таблице", () => importDlg(), "", "строки клиентов «Ip:port:log:pass · ReBoot · ReConnect» → таблица modlink, где каждая работает ровно так");
+    bImp.prepend(ic("wand"));
+    const IMP_ACT = {add: ["добавить", "ok"], change: ["поправить", "warn"], same: ["как есть", ""]};
+    const IMP_SET = {wan_ip: "внешний адрес", mode: "режим портов", base_port: "базовый порт"};
+    const IMP_F = {login: "логин", password: "пароль", port: "порт", reboot_port: "ребут", reconnect_port: "реконнект", lan_ip: "модем", enabled: "включена"};
+    function importDlg() {
+      const ta = el("textarea", {rows: 7, spellcheck: "false", style: "width:100%;font:12.5px/1.5 var(--mono)",
+        placeholder: "Вставьте из таблицы колонки Ip:port:log:pass, ReBoot, ReConnect — как есть (ReBoot может не быть; соседние колонки не мешают)"});
+      const url = el("input", {placeholder: "или ссылка на лист Google-таблицы (доступ «всем, у кого есть ссылка»)", style: "width:100%"});
+      const how = el("select", {}, el("option", {value: "number", text: "модем строки — по логину modemN (модем 192.168.N.1)"}),
+        el("option", {value: "order", text: "модем строки — по порядку: первая строка — первому свободному модему"}));
+      const repl = el("input", {type: "checkbox"});
+      const turnOn = el("input", {type: "checkbox", checked: isOn === false});
+      const planBox = el("div", {style: "margin-top:12px"});
+      let applyBtn = null, checked = null;
+      const body = () => url.value.trim() ? {url: url.value.trim(), map: how.value, replace: repl.checked, on: turnOn.checked}
+        : {text: ta.value, map: how.value, replace: repl.checked, on: turnOn.checked};
+      const sig = () => JSON.stringify(body());
+      const stale = () => { checked = null; if (applyBtn) applyBtn.disabled = true; };
+      for (const x of [ta, url, how, repl, turnOn]) { x.addEventListener("input", stale); x.addEventListener("change", stale); }
+      const td = (text, cls) => el("td", {class: cls || "", text: String(text)});
+      function showPlan(d) {
+        const n = (k) => (d.rows || []).filter((x) => x.action === k).length;
+        const rows = (d.rows || []).map((x) => el("tr", {}, el("td", {}, el("span", {class: "tag " + IMP_ACT[x.action][1], text: IMP_ACT[x.action][0]})),
+          td(x.id, "num"), td(x.login, "mono"), td(x.port, "mono num"), td(x.reboot_port || "—", "mono num"), td(x.reconnect_port || "—", "mono num"),
+          td(x.lan_ip.replace(/\.100$/, ".1"), "mono"), td(x.dev || "нет на машине", x.dev ? "" : "muted"), td((x.changed || []).map((f) => IMP_F[f] || f).join(", "), "muted")))
+          .concat((d.removed || []).map((x) => el("tr", {}, el("td", {}, el("span", {class: "tag bad", text: "убрать"})), td(x.id, "num"), td(x.login, "mono"),
+            td(x.port, "mono num"), td(""), td(""), td(x.lan_ip.replace(/\.100$/, ".1"), "mono"), td("нет в таблице", "muted"), td(""))));
+        planBox.replaceChildren(
+          el("div", {style: "margin-bottom:8px"}, el("b", {text: "План: "}), "добавить " + n("add") + ", поправить " + n("change") + ", как есть " + n("same")
+            + ", убрать " + (d.removed || []).length + (d.on ? "" : turnOn.checked ? " · modlink включится" : " · modlink выключен — заработает после включения")),
+          el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, el("tr", {}, ["", "строка", "логин", "порт", "ребут", "реконнект", "модем", "интерфейс", "что меняется"]
+            .map((h) => el("th", {text: h})))), el("tbody", {}, rows))),
+          ...Object.entries(d.settings || {}).map(([k, v]) => el("div", {class: "muted", text: (IMP_SET[k] || k) + " → " + (k === "mode" ? (v === "shared" ? "один порт на всех" : "тройками") : v)})),
+          ...(d.warnings || []).map((w) => el("div", {class: "warn-line", text: "⚠ " + w})));
+      }
+      async function check() {
+        planBox.replaceChildren(el("div", {class: "muted", text: "проверяю…"}));
+        const r = await X.POST("/targets/" + id + "/modlink/import", Object.assign(body(), {dry: true}));
+        if (!r.ok) { planBox.replaceChildren(el("div", {class: "warn-line", text: "Ошибка: " + r.error})); return; }
+        showPlan(r.data || {});
+        checked = sig();
+        if (applyBtn) applyBtn.disabled = false;
+      }
+      modal("Конфиг по таблице · " + where, el("div", {},
+        el("p", {class: "muted", style: "margin-top:0", text: "Строки, которые уже у клиентов, остаются как есть: modlink подстроится, чтобы каждая заработала ровно так —" +
+          " тот же порт, логин, пароль, ссылки ребута и реконнекта, внешний адрес. Сначала «Проверить» — покажу, что изменится."}),
+        ta, el("div", {style: "margin-top:8px"}, url), el("div", {style: "margin-top:8px"}, how),
+        el("div", {style: "margin-top:8px;display:flex;gap:18px;flex-wrap:wrap"},
+          el("label", {}, repl, " убрать строки modlink, которых нет в таблице"), isOn ? null : el("label", {}, turnOn, " включить modlink")),
+        planBox), [
+        {text: "Закрыть"},
+        {text: "Проверить", onclick: () => check()},
+        {text: "Применить", cls: "primary", ref: (b) => { applyBtn = b; b.disabled = true; }, onclick: async (close) => {
+          if (checked !== sig()) { toast("сначала «Проверить»", "warn"); return; }
+          applyBtn.disabled = true;
+          const r = await X.POST("/targets/" + id + "/modlink/import", Object.assign(body(), {dry: false}));
+          if (!r.ok) { planBox.prepend(el("div", {class: "warn-line", text: "Ошибка: " + r.error})); applyBtn.disabled = false; return; }
+          close();
+          toast("modlink: конфиг по таблице применён · " + where, "ok");
+          tests = {};
+          await load();
+        }}]);
+      ta.closest(".modal").classList.add("wide");
+    }
     const logsMenu = menuBtn("Логи", [["3proxy", "Логи 3proxy", "list"], ["modlink", "Логи modlink (демон)", "list"]], async (which) => {
       const x = await X.run(id, "modlink", ["logs", which]);
       if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
@@ -2102,7 +2230,7 @@
       el("div", {class: "toolbar"}, powerBar, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
       netCard,
       el("div", {class: "sec-head"}, el("h2", {text: "Модемы"}), cnt, el("span", {class: "spacer"}), res),
-      el("div", {class: "toolbar"}, bAdd, bRange, bIf, copyMenu, bTbl, logsMenu, el("span", {class: "spacer"}),
+      el("div", {class: "toolbar"}, bAdd, bRange, bIf, bImp, copyMenu, bTbl, logsMenu, el("span", {class: "spacer"}),
         btn("Обновить", () => load(), "ghost", "перечитать (несохранённое пропадёт)")),
       tbl, out);
     let loaded = false;
@@ -2257,6 +2385,27 @@
         if (!window.confirm("Сменить ключ, которым хаб ходит на ВМ " + id + "?")) return;
         act(e.target, rKey.res, () => POST(T + "/key", {rotate: true}), (d) => "Применено" + (d && d.fingerprint ? ": " + d.fingerprint : ""));
       }));
+    // Ключ, по которому хаб узнаёт ВМ. Меняется, когда cloud-init считает ВМ новой машиной: тогда
+    // «Host key verification failed». Новый сверяется через guest agent Proxmox (мимо сети).
+    const hkText = el("span", {class: "mono muted"});
+    const hkAccept = el("span");
+    const rHk = H ? null : actRow("Ключ SSH сервера", "по нему хаб узнаёт ВМ; сменился (переустановка, cloud-init) — сверить через guest agent Proxmox и принять",
+      hkText, btn("Проверить", (e) => checkHk(e.target)), hkAccept);
+    async function checkHk(b) {
+      hkAccept.replaceChildren();
+      const r = await act(b, rHk.res, () => X.POST("/servers/" + id + "/hostkey", {}),
+        (d) => d.same ? "не менялся" : !(d.shown || []).length ? "сервер не ответил" : d.agent_ok ? "сменился — guest agent подтверждает новый" : "сменился — подтвердить нечем");
+      if (!r || !r.ok) return;
+      const d = r.data || {};
+      hkText.textContent = (d.shown || []).join(", ") || "—";
+      if (d.same || !(d.shown || []).length) return;
+      const fp = d.shown[0];
+      hkAccept.replaceChildren(btn(d.agent_ok ? "Принять новый" : "Принять " + fp.slice(0, 18) + "…", async (e) => {
+        if (!d.agent_ok && !window.confirm("Принять ключ " + fp + "?\nСверь его в консоли ВМ: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")) return;
+        const a = await act(e.currentTarget, rHk.res, () => X.POST("/servers/" + id + "/hostkey", {accept: d.agent_ok ? "agent" : fp}), "Принят");
+        if (a && a.ok) { hkAccept.replaceChildren(); (X.node ? refreshNodes() : refresh()); }
+      }, d.agent_ok ? "" : "danger"));
+    }
     const mpState = el("span", {class: "muted"});
     const auth = el("textarea", {rows: 2, placeholder: "содержимое auth.mp из ЛК mobileproxy.space (или выберите файл)", style: "max-width:420px"});
     const file = el("input", {type: "file", onchange: async (e) => { const f = e.target.files[0]; if (f) auth.value = (await f.text()).trim(); }});
@@ -2348,7 +2497,7 @@
     };
     const root = el("div", {class: "stagger-sec"}, facts,
       sec(H ? "Хост" : "Машина", H ? null : rPower.el, H ? null : rColor.el, rUp.el),
-      sec("Доступ", rPw.el, rKey.el, H && !X.node ? rLink.el : null),
+      sec("Доступ", rPw.el, rKey.el, rHk && rHk.el, H && !X.node ? rLink.el : null),
       sec("Сеть и софт", rDns.el, rMp.el, rHl.el),
       sec("Осторожно", rMode.el, H ? null : rForget.el));
     let loaded = false;
@@ -2507,6 +2656,7 @@
     if (p[0] === "n" && p[1]) { node = p[1]; p = p.slice(2); }
     const tabOf = (t) => t === "proxyveth" ? "net" : t;      // старые ссылки на вкладку proxyveth
     if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {node, kind: "vm", id: p[1], tab: tabOf(p[2] || "net")};
+    if (p[0] === "md" && /^(host|\d+)$/.test(p[1] || "")) return {node, kind: "md", id: p[1]};
     if (p[0] === "create") return {node, kind: "create"};
     if (p[0] === "job" && p[1]) return {node, kind: "job", id: p[1]};
     if (!node && p[0] === "join") return {kind: "join"};
@@ -2522,8 +2672,9 @@
     if (same) { S.page.show(r.tab); renderTree(); renderHeader(); return; }
     if (S.page && S.page.dispose) S.page.dispose();
     const X = ctx(r.node);
-    const page = r.kind === "vm" ? pageVm(X, r.id) : r.kind === "create" ? pageCreate(X) : r.kind === "job" ? pageJob(X, r.id)
-      : r.kind === "join" ? pageJoin() : pageHost(X);
+    document.body.classList.toggle("viewer", r.kind === "md");
+    const page = r.kind === "md" ? pageMd(X, r.id) : r.kind === "vm" ? pageVm(X, r.id) : r.kind === "create" ? pageCreate(X)
+      : r.kind === "job" ? pageJob(X, r.id) : r.kind === "join" ? pageJoin() : pageHost(X);
     S.page = page;
     $("#main").replaceChildren(el("div", {class: "page page-in"}, page.el));
     if (page.update) page.update();
@@ -2585,6 +2736,7 @@
     $("#logout").addEventListener("click", async () => { await POST("/api/logout", {}); location.href = "/login"; });
     window.addEventListener("hashchange", route);
     route();                                 // страница — сразу, данные дотянутся
+    if (S.route.kind === "md") return;       // окно веба модемов: обзор и дерево ему не нужны
     refresh();
     poller(10000, refresh).start();
     refreshNodes();
