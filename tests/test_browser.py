@@ -252,6 +252,18 @@ try:
 finally:
     B.MODEM_NETS, B.MODEM_PORTS = real_nets, real_ports
 
+md = B.singbox_config(1080, modems=True)
+check("«роутер» браузера модемов: в пересыльщик — только TCP к модемам на портах веба, остальное (DNS тоже) — отказ сразу",
+      md["route"]["rules"][0]["outbound"] == "proxy" and "192.168.0.0/16" in md["route"]["rules"][0]["ip_cidr"]
+      and md["route"]["rules"][0]["port"] == [80, 443, 8080, 8443] and md["route"]["rules"][-1]["action"] == "reject"
+      and "dns" not in md and not any(r.get("action") == "hijack-dns" for r in md["route"]["rules"]), md)
+sys.path.insert(0, HERE)
+from singbox_check import sb_check  # noqa: E402
+for name, conf_ in (("браузера вкладок", B.singbox_config(1080)), ("браузера модемов", md)):
+    ok_, why = sb_check(conf_)
+    if ok_ is not None:
+        check("«роутер» %s: конфиг принимает настоящий sing-box" % name, ok_, why)
+
 print("профиль и ключи:")
 check("ключи: ВМ, хост, присоединённый хост", B.key("mp", 2000) == "2000-mp" and B.key("ym", "host") == "host-ym"
       and B.key("ym", "host", "vps1") == "n-vps1-host-ym" and B.kind_of("n-vps1-host-ym") == "ym")

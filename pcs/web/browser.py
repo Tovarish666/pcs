@@ -501,9 +501,22 @@ def relay(a, b, chunk=65536):
 
 # ── «роутер»: sing-box в namespace браузера ──────────────────────────────────
 
-def singbox_config(port=FWD_PORT):
+def singbox_config(port=FWD_PORT, modems=False):
     """tun0 — маршрут по умолчанию namespace; всё — в пересыльщик на 127.0.0.1:port.
-    DNS перехватывается и идёт через прокси по TCP (ipv4_only: IPv6 у прокси обычно нет)."""
+    DNS перехватывается и идёт через прокси по TCP (ipv4_only: IPv6 у прокси обычно нет).
+    modems — браузер веба модемов: в пересыльщик только адреса и порты модемов, остальное (DNS,
+    службы браузера) отклоняется прямо здесь — сразу и без строки в журнале на каждый запрос."""
+    if modems:
+        return {
+            "log": {"level": "warn", "timestamp": False},
+            "inbounds": [{"type": "tun", "tag": "tun-in", "interface_name": "tun0", "address": [TUN_ADDR],
+                          "mtu": 1420, "auto_route": False, "strict_route": False, "stack": "system"}],
+            "outbounds": [{"type": "socks", "tag": "proxy", "version": "5", "server": "127.0.0.1", "server_port": port}],
+            "route": {"rules": [{"network": "tcp", "ip_cidr": [str(n) for n in MODEM_NETS], "port": list(MODEM_PORTS),
+                                 "action": "route", "outbound": "proxy"},
+                                {"ip_cidr": ["0.0.0.0/0", "::/0"], "action": "reject"}],
+                      "final": "proxy", "auto_detect_interface": False},
+        }
     return {
         "log": {"level": "warn", "timestamp": False},
         "dns": {"servers": [{"type": "tcp", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"}],
@@ -746,7 +759,7 @@ def run(k, display):
             raise RuntimeError("пересыльщик не поднялся")
         cfg = os.path.join(rd, "singbox.json")
         with open(cfg, "w") as f:
-            json.dump(singbox_config(FWD_PORT), f)
+            json.dump(singbox_config(FWD_PORT, modems=kind_of(k) == "md"), f)
         os.chmod(cfg, 0o600)
         sb = subprocess.Popen(["ip", "netns", "exec", ns, SINGBOX, "run", "-c", cfg], stdin=subprocess.DEVNULL)
         kids.append(sb)
