@@ -418,6 +418,9 @@ def test_onoff():
             check("выключен: %s — понятный отказ" % " ".join(args), rc == 1 and "proxyveth выключен" in d["error"], d)
         rc, d = ok_json("status")
         check("выключен: status — пусто, без опроса режима", d["ok"] and d["data"] == [] and not fu.calls, d)
+        rc, d = ok_json("mode", "usb")
+        check("выключен: mode — только запомнить режим, без подтверждения и без модемов", d["ok"] and d["data"]["on"] is False
+              and not fu.calls, (d, fu.names()))
         rc, d = ok_json("setup")
         check("выключен: setup (pcs update) не поднимает модемы и таймер", d["ok"] and d["data"]["on"] is False
               and "setup" not in fu.names(), (d, fu.names()))

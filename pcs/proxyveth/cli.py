@@ -408,16 +408,14 @@ def cmd_mode(a):
     old_vm = usb.vmodem_found()
     if not cur:
         cur = "usb" if old_vm else ("gw" if os.path.exists(OLD_GW) else None)
-    if cur and cur != new:
+    if cur and cur != new and is_on(cfg):
         confirm(a, "режим %s → %s: все модемы сервера будут сняты и подняты заново" % (cur, new), new)
-    if not is_on(cfg):
-        need_root()
-        with held():
-            save_cfg(mode=new)
-        say("  режим: %s — %s (тогда и поднимется)" % (new, OFF_HINT))
-        return 0, {"mode": new, "previous": cur, "on": False}
     to_bg(a, "mode")
     with held():
+        if not is_on(cfg):                # выключен: модемов нет — только запомнить режим
+            save_cfg(mode=new)
+            say("  режим: %s — %s (тогда и поднимется)" % (new, OFF_HINT))
+            return 0, {"mode": new, "previous": cur, "on": False}
         migrated = migrate_vmodem() if old_vm else False
         if cur and cur != new:
             mode_mod(cur).teardown()
