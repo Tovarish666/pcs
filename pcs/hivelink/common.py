@@ -28,6 +28,7 @@ DEFAULTS = {
     "bad_drivers": ["huawei_cdc_ncm", "cdc_mbim", "cdc_ncm", "qmi_wwan"],   # raw-IP: без DHCP и web-API
     "cfg_max_tries": 8,             # перебор USB-конфигураций
     "zerocd_max_tries": 3,          # usb_modeswitch до пере-enumerate
+    "zerocd_parallel": 8,           # usb_modeswitch разом (на разные модемы)
     "nodrv_grace": 3,               # проходов ждать привязки драйвера
     "dhcp_max_tries": 10,           # подряд; потом — раз в dhcp_retry_every (не бросаем навсегда)
     "dhcp_retry_every": 300,

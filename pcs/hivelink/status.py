@@ -187,6 +187,20 @@ def doctor():
           "нет" if not legacy else "остался (%s) — hivelink install снимет" % ", ".join(legacy[:3]))
     check(out, "usb_modeswitch", shutil.which("usb_modeswitch"),
           shutil.which("usb_modeswitch") or "нет — Zero-CD не переключится: apt-get install usb-modeswitch")
+    # что мешало на SpbVL-1 (40 модемов): MBIM, CD модемов, ModemManager, eth0 у модема
+    mbim = os.path.isdir("/sys/module/cdc_mbim")
+    check(out, "cdc_mbim", not mbim, "загружен — hivelink install выгрузит и запретит" if mbim else "не загружен")
+    held = [usb.port(d) for d in usb.devices() for i in usb.interfaces(d)
+            if os.path.basename(os.path.realpath(os.path.join(i, "driver"))) == "usb-storage"]
+    check(out, "CD/SD модемов", not held, "не подключены" if not held else
+          "usb-storage держит %d (%s…) — hivelink install отпустит" % (len(held), ", ".join(held[:3])))
+    mm = install.active("ModemManager")
+    check(out, "ModemManager", not mm, "работает — хватает модемы: hivelink install выключит" if mm else "не работает")
+    pm = install.primary_mac()
+    if pm:
+        e0 = rd("/sys/class/net/eth0/address").lower()
+        check(out, "eth0", e0 == pm, "основная сетевая карта" if e0 == pm else
+              "у eth0 MAC %s, а основной — %s: hivelink eth0" % (e0 or "—", pm))
     mode = common.net_mode(conf)
     if mode == "on":
         nd = install.active("systemd-networkd")
