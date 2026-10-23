@@ -700,8 +700,12 @@ class LadderApi:
     def reboot(self):
         self.w["calls"].append("reboot")
 
+    def radio(self):
+        return self.w.get("radio")
+
 
 real_hl = (hilink.Api, hilink.reach, driver.pause, usb.reenumerate)
+real_pc = usb.power_cycle
 hilink.Api = LadderApi
 driver.pause = lambda s: None
 reen = []
@@ -765,8 +769,46 @@ try:
     calls, _ = runs({"conn": 902}, [0, 200, 400])
     check("auto_heal выключен — ничего", calls == [[], [], []])
     conf_l["auto_heal"] = True
+
+    print("модем завис (радиочасть: IMEI пуст, SIM «нет»):")
+    d15 = usb.find("1-5")
+    md = dict(M, dev=d15)
+    cyc = []
+    usb.power_cycle = lambda d: cyc.append(d) or False
+    hung = {"conn": 902, "radio": {"imei": "", "sim": 255}}
+    calls, st = runs(hung, [0, 60, 100, 160, 230, 300], m=md)
+    check("первые 90 с ждём (загрузка), потом сразу перезагрузка — без дозвона и перерегистрации",
+          calls == [[], [], ["reboot"], [], [], []], calls)
+    check("перезагрузку принял, но не сделал (devnum тот же) — питание порта не снять: «переткни модем»",
+          cyc == [d15] and "radio.7" in st["msg"], (cyc, st["msg"]))
+    calls, _ = runs(hung, [400, 2000], st, m=md)
+    check("снять питание пробуем один раз; перезагрузка — снова через heal_reboot_every",
+          calls == [[], ["reboot"]] and len(cyc) == 1, (calls, cyc))
+    cyc.clear()
+    usb.power_cycle = lambda d: cyc.append(d) or True
+    calls, st = runs(hung, [0, 100, 230], m=md)
+    check("хаб умеет снимать питание с порта — снято", cyc == [d15] and st["heal"]["7"].get("dpower"), st)
+    calls, st = runs(hung, [0, 100], m=md)
+    mk("devices/pci0000:00/0000:00:14.0/usb1/1-5", devnum="77")
+    cyc.clear()
+    runs(hung, [230], st, m=md)
+    check("перезагрузился (devnum другой) — питание не трогаем", cyc == [], cyc)
+    runs({"conn": 901, "radio": {"imei": "8615", "sim": 257}}, [300], st, m=md)
+    check("ожил — состояние зависания забыто", not any(k in st["heal"]["7"] for k in ("dead", "dboot", "ddev")), st["heal"])
+    calls, _ = runs({"conn": 902, "radio": None}, [0, 60, 180], m=md)
+    check("прошивка не говорит про радиочасть — обычная лестница", calls[0] == ["dial1"], calls)
 finally:
     hilink.Api, hilink.reach, driver.pause, usb.reenumerate = real_hl
+    usb.power_cycle = real_pc
+
+print("питание порта:")
+check("родительский хаб и порт; устройство прямо в корневом хабе — не трогаем",
+      usb.parent_port("/s/bus/usb/devices/3-1.8.4.1.2") == ("/s/bus/usb/devices/3-1.8.4.1", "2")
+      and usb.parent_port("/s/bus/usb/devices/3-1") is None)
+hubd = usb.find("1-2")
+ganged = lambda *a, **k: types.SimpleNamespace(stdout="  wHubCharacteristic 0x0000\n    Ganged power switching\n", returncode=0)  # noqa: E731
+check("ganged-хаб (1a40:0101) — питание порта не снять, ничего не пишем",
+      not usb.power_cycle(hubd, run=ganged, sleep=lambda s: None))
 
 check("свой выход у адреса: правило from + default в таблице",
       route.routed("0:\tfrom all lookup local\n31007:\tfrom 192.168.7.100 lookup 2007\n"

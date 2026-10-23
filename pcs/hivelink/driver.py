@@ -454,8 +454,39 @@ def heal(api, n, conf, h, now, why, first=0):
 
 
 def healthy(h):
-    for k in ("bad", "lvl", "act", "stuck"):
+    for k in ("bad", "lvl", "act", "stuck", "dead", "dboot", "ddev", "dpower"):
         h.pop(k, None)
+
+
+def radio_heal(m, api, conf, st, h, now):
+    """Радиочасть модема зависла (IMEI пуст, SIM «нет»): дозвон и перерегистрация бесполезны.
+    Перезагрузка через web-API — и проверка, что она была (USB-устройство переподключилось: другой
+    devnum). Не было — снять питание с порта, если хаб это умеет; иначе — честно сказать
+    человеку: переткнуть модем. → True — модем этим занят, обычная лестница не нужна."""
+    n, qr = m["n"], conf["quiet_repeat"]
+    h.setdefault("dead", now)
+    if now - h["dead"] < conf["radio_grace"]:
+        return True                     # только загрузился — радиочасть поднимается
+    devnum = usb.attr(m["dev"], "devnum")
+    if "dboot" not in h or now - h["dboot"] >= conf["heal_reboot_every"]:
+        log("N=%d: модем завис (SIM не видна, IMEI пуст) %s — перезагружаю" % (n, _mins(now - h["dead"])))
+        h["dboot"], h["ddev"] = now, devnum
+        h.pop("dpower", None)
+        try:
+            api.reboot()
+        except hilink.HiFail as e:
+            log("N=%d: перезагрузка не вышла: %s" % (n, e))
+        return True
+    if now - h["dboot"] < conf["radio_reboot_wait"] or devnum != h.get("ddev"):
+        return True                     # ждём; devnum другой — перезагрузился, смотрим дальше
+    if not h.get("dpower"):
+        h["dpower"] = now               # одна попытка на перезагрузку
+        if usb.power_cycle(m["dev"]):
+            log("N=%d: перезагрузку модем принял, но не сделал — снял питание с порта %s" % (n, m["port"]))
+            return True
+    log_once(st, "N=%d: модем завис (SIM не видна, IMEI пуст), перезагрузку не делает, а хаб не умеет снимать "
+             "питание с порта — переткни модем (USB %s)" % (n, m["port"]), max(qr, 1800), key="radio.%d" % n)
+    return True
 
 
 def netcheck(m, conf, h, now):
@@ -518,6 +549,16 @@ def hilink_worker(m, conf, st, now=None):
         log_once(st, "N=%d: %s" % (n, e), qr, key="hilink.%d" % n)
         return
     cs = s["conn"]
+    if cs is not None and cs != 901:
+        try:
+            dead = hilink.radio_dead(api.radio())
+        except hilink.HiFail:
+            dead = False
+        if dead and conf["auto_heal"]:
+            radio_heal(m, api, conf, st, h, now)
+            return
+        for k in ("dead", "dboot", "ddev", "dpower"):
+            h.pop(k, None)
     if cs is None:
         log_once(st, "N=%d: статус не читается (%s)" % (n, hilink.error_text(s["error"]) if s["error"] else "прошивка"),
                  qr, key="hilink.%d" % n)
