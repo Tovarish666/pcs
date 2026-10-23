@@ -44,6 +44,8 @@ common.RUN = os.path.join(TMP, "run")
 common.STATE = os.path.join(TMP, "run", "state.json")
 common.CONFMAP = os.path.join(TMP, "var", "confmap.json")
 common.MP_SETUP = os.path.join(TMP, "нет-mp.space")
+common.OFF = os.path.join(TMP, "etc", "off.json")
+common.ETC = os.path.join(TMP, "etc")
 
 
 # ── подставной sysfs ────────────────────────────────────────────────────────
@@ -452,6 +454,48 @@ check("проход: питание выключено у настоящих и 
       and usb.attr(os.path.join(S, "bus/usb/devices/3-1"), "power/control") == "auto")
 check("проход: состояние сохранено", common.load_state()["cycle"] == 1)
 
+print("сеть у mp.space: модем без адреса — его настройку заново:")
+for ifn, idx in (("eth30", "30"), ("eth31", "31")):
+    os.makedirs(os.path.join(S, "class/net", ifn), exist_ok=True)
+    for f, v in (("operstate", "up"), ("ifindex", idx)):
+        with open(os.path.join(S, "class/net", ifn, f), "w") as fh:
+            fh.write(v + "\n")
+mp_mods = [{"iface": "eth30", "driver": "cdc_ether", "addr": None, "n": None},
+           {"iface": "eth31", "driver": "cdc_ether", "addr": "192.168.31.100", "n": 31},
+           {"iface": "wwan0", "driver": "cdc_mbim", "addr": None, "n": None}]
+started = []
+driver.sh = lambda *a, **k: (started.append(a), types.SimpleNamespace(stdout="", stderr="", returncode=0))[1]
+mc, mst = dict(common.DEFAULTS), {"cnt": {}, "msg": {}}
+
+
+def mp_at(t, mods=mp_mods):
+    started.clear()
+    driver.step_mp_link(mc, mst, mods, now=1000 + t, unit_exists=True)
+    return [a[-1] for a in started]
+
+
+try:
+    check("модем только пришёл (DHCP-сервер модема поднимается) — ждём mp_grace", mp_at(0) == [] and mp_at(30) == [])
+    check("без адреса дольше mp_grace — штатная настройка mp.space заново (без ожидания)", mp_at(46) == ["modem-hotplug@eth30.service"]
+          and started[0][:3] == ("systemctl", "start", "--no-block"), started)
+    check("следующий раз — не раньше mp_retry_gap", mp_at(80) == [] and mp_at(107) == ["modem-hotplug@eth30.service"])
+    check("модем с адресом и не тот драйвер — не трогаем", not any("eth31" in x or "wwan0" in x for x in mp_at(400)))
+    mst["cnt"]["mpdhcp.eth30.30"] = mc["dhcp_max_tries"]
+    mst["cnt"]["mpdhcp.eth30.30.t"] = 1000 + 500
+    check("после dhcp_max_tries — раз в dhcp_retry_every", mp_at(600) == [] and mp_at(801) == ["modem-hotplug@eth30.service"])
+    got = [dict(m, addr="192.168.30.100", n=30) if m["iface"] == "eth30" else m for m in mp_mods]
+    mp_at(810, got)
+    check("адрес появился — счётчики чистятся", not any(k.startswith("mpdhcp.eth30") for k in mst["cnt"]), mst["cnt"])
+    mst["cnt"]["mpdhcp.eth9.3"] = 2
+    mst["cnt"]["mpdhcp.eth9.3.since"] = 5
+    mp_at(820)
+    check("модема больше нет — его счётчики убраны", not any(k.startswith("mpdhcp.eth9") for k in mst["cnt"]), mst["cnt"])
+    started.clear()
+    driver.step_mp_link(mc, {"cnt": {}, "msg": {}}, mp_mods, now=5000, unit_exists=False)
+    check("mp.space не стоит (нет modem-hotplug@) — ничего не делаем", not started)
+finally:
+    driver.sh = real_sh
+
 print("установка: MBIM, CD модемов, ModemManager, eth0:")
 q = install.storage_quirks("0bda:9210:u,12d1:1f01:x")
 check("usb-storage: чужие quirks целы, наши «не брать» — 1f01 и рабочие первыми, строка ≤ 127",
@@ -507,7 +551,41 @@ check("в web-API идём только к своим", reach == {101})
 r13 = next(r for r in rows if r["usb_port"] == "1-3")
 check("Zero-CD назван ошибкой, а не прочерком", r13["n"] is None and r13["errors"] and "Zero-CD" in r13["errors"][0])
 check("сводка USB", status.summary(rows) == {"total": 3, "hilink": 2, "zerocd": 1, "stick": 0, "other": 0,
-                                             "with_addr": 1, "ok": 1}, status.summary(rows))
+                                             "with_addr": 1, "ok": 1, "off": 0}, status.summary(rows))
+print("выключенный модем (hivelink off):")
+common.save_off({"1-5": {"t": 1, "was": "N=62, wwan0"}})
+d15 = usb.find("1-5")
+left = driver.step_off(conf, {"cnt": {}, "msg": {}}, usb.devices())
+check("выключенный отцеплен от USB, остальные шаги его не видят",
+      usb.attr(d15, "authorized") == "0" and d15 not in left and usb.find("1-2") in left, left)
+rows_off, _ = status.local_rows(conf, ADDR)
+r15 = next(r for r in rows_off if r["usb_port"] == "1-5")
+check("status: «выключен (был N=62, wwan0) — hivelink on 1-5», в сводке отдельно",
+      r15["off"] and r15["errors"] == ["выключен (был N=62, wwan0) — hivelink on 1-5"]
+      and status.summary(rows_off)["off"] == 1 and status.summary(rows_off)["total"] == 3, (r15, status.summary(rows_off)))
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-2", authorized="0")
+left = driver.step_off(conf, {"cnt": {}, "msg": {}}, usb.devices())
+check("отцеплен кем-то ещё (hivelink reset идёт) — не трогаем и не обслуживаем",
+      usb.attr(usb.find("1-2"), "authorized") == "0" and usb.find("1-2") not in left)
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-2", authorized="1")
+common.save_off({})
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-5", authorized="1")
+check("включили — снова в работе", usb.find("1-5") in driver.step_off(conf, {"cnt": {}, "msg": {}}, usb.devices()))
+from pcs.core.util import Fail as HFail  # noqa: E402
+hcli = cli
+real_modems = driver.modems
+driver.modems = lambda c, t=None: ([{"iface": "eth5", "dev": usb.find("1-2"), "port": "1-2", "driver": "cdc_ether", "addr": "192.168.62.100", "n": 62},
+                                    {"iface": "eth9", "dev": usb.find("1-5"), "port": "1-5", "driver": "cdc_ether", "addr": "192.168.62.100", "n": 62}], {})
+try:
+    try:
+        hcli.off_target("62", conf)
+        check("два модема с одним N — выключить только по порту", False)
+    except HFail as e:
+        check("два модема с одним N — выключить только по порту, оба порта названы",
+              "1-2 (eth5)" in str(e) and "1-5 (eth9)" in str(e), e)
+    check("по интерфейсу — его модем", hcli.off_target("eth9", conf)["port"] == "1-5")
+finally:
+    driver.modems = real_modems
 check("doctor: чужие правила в нашем диапазоне видны",
       status.foreign_in_range(RULES) == ["31150: from all fwmark 0x1 lookup 2150"], status.foreign_in_range(RULES))
 rows2, reach2 = status.local_rows(conf, ADDR.replace("192.168.101.", "192.168.5."))

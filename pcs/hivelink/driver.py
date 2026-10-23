@@ -80,6 +80,22 @@ def step_power(conf, st):
                 pass
 
 
+def step_off(conf, st, devs, off=None):
+    """Выключенные модемы (hivelink off): отцепить от USB, если снова подключились (перезагрузка,
+    переткнули). → устройства, с которыми работают остальные шаги: без выключенных и отцепленных."""
+    off = common.load_off() if off is None else off
+    out = []
+    for d in devs:
+        p = usb.port(d)
+        if p in off:
+            if usb.authorized(d) and usb.set_authorized(d, False):
+                log("%s: модем выключен (hivelink off) — отцеплен от USB; включить: hivelink on %s" % (p, p))
+            continue
+        if usb.authorized(d):           # отцеплен кем-то ещё (reset идёт) — не трогаем
+            out.append(d)
+    return out
+
+
 def step_zerocd(conf, st, devs, now=None):
     """Zero-CD (12d1:1f01 и родня) → рабочий режим: usb_modeswitch шлёт HuaweiNewMode в
     mass-storage интерфейс ТЕКУЩЕЙ конфигурации. Конфигурацию не меняем: модем в cfg 2 (MBIM —
@@ -295,6 +311,43 @@ def step_link(conf, st, mods):
         sh("networkctl", "reconfigure", ifn, check=False)
     for k in [k for k in st["cnt"] if k.startswith("dhcp.") and k.rsplit(".t", 1)[0] not in seen and k not in seen]:
         st["cnt"].pop(k, None)
+
+
+def step_mp_link(conf, st, mods, now=None, unit_exists=None):
+    """Сеть у mp.space: адрес модему даёт его modem-hotplug@ethN (udhcpc), один раз — на событие
+    udev. При массовом включении часть запусков кончается «no valid IP obtained» (SpbVL-1,
+    23.10: 18 из 40), и модем без адреса до следующего события. Нет IPv4 дольше mp_grace —
+    запустить ту же штатную настройку mp.space заново; попытки — с паузой, как у DHCP."""
+    now = int(time.time()) if now is None else now
+    if unit_exists is None:
+        unit_exists = os.path.exists("/etc/systemd/system/modem-hotplug@.service")
+    if not unit_exists:
+        return
+    cnt, seen = st["cnt"], set()
+    for m in mods:
+        ifn = m["iface"]
+        net = os.path.join(usb.SYS, "class/net", ifn)
+        if m["driver"] not in ok_drivers(conf) or not rd(os.path.join(net, "operstate")):
+            continue
+        key = "mpdhcp.%s.%s" % (ifn, rd(os.path.join(net, "ifindex")) or "?")
+        seen.add(key)
+        if m["addr"]:
+            for k in (key, key + ".t", key + ".since"):
+                cnt.pop(k, None)
+            continue
+        since = cnt.setdefault(key + ".since", now)
+        if now - since < conf["mp_grace"]:
+            continue                    # модем только пришёл: его DHCP-сервер ещё поднимается
+        t = cnt.get(key, 0)
+        gap = conf["mp_retry_gap"] if t < conf["dhcp_max_tries"] else conf["dhcp_retry_every"]
+        if now - cnt.get(key + ".t", 0) < gap:
+            continue
+        cnt[key], cnt[key + ".t"] = t + 1, now
+        log("%s без IPv4 %d с — настройка mp.space заново (%s), попытка %d"
+            % (ifn, now - since, common.MP_UNIT % ifn, t + 1))
+        sh("systemctl", "start", "--no-block", common.MP_UNIT % ifn, check=False)
+    for k in [k for k in cnt if k.startswith("mpdhcp.") and k.rsplit(".", 1)[0] not in seen and k not in seen]:
+        cnt.pop(k, None)
 
 
 def apply_routes(w):
@@ -550,6 +603,10 @@ def run_pass(conf=None):
 
     guard("питание", step_power, conf, st)
     devs = usb.devices()
+    try:
+        devs = step_off(conf, st, devs)
+    except Exception as e:
+        log_once(st, "шаг выключенные: %s" % e, conf["quiet_repeat"])
     guard("Zero-CD", step_zerocd, conf, st, devs)
     guard("USB-конфигурация", step_usbcfg, conf, st, devs)
     try:
@@ -559,6 +616,8 @@ def run_pass(conf=None):
         log_once(st, "модемы: %s" % e, conf["quiet_repeat"])
     if on:
         guard("линк", step_link, conf, st, mods)
+    else:
+        guard("адреса mp.space", step_mp_link, conf, st, mods)
     guard("маршруты", apply_routes, w if on else {})     # сеть не наша — снимаем только своё
     if st["cycle"] % max(1, conf["hilink_every"]) == 0:
         guard("HiLink", step_hilink, conf, st, mods, w)

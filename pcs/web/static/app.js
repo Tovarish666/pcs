@@ -1162,12 +1162,13 @@
         const okc = r.conn === 901 && !(r.errors || []).length;
         const cls = r.conn === 901 ? (okc ? "ok" : "warn") : r.conn == null ? "off" : "bad";
         const note = (r.errors || []).join("; ");
-        const can = r.n != null;
+        const can = r.n != null && !r.off;
+        const port = r.usb_port || "?";
         return el("tr", {},
           el("td", {class: "num", text: r.n == null ? "—" : String(r.n)}),
           el("td", {class: "mono", title: (r.usb_id || "") + " · USB " + (r.usb_port || "?") + " · конфигурация " + (r.cfg || "?") + " · " + (r.driver || "без драйвера")},
             el("div", {text: r.iface || "—"}), el("div", {class: "sub", text: "USB " + (r.usb_port || "?") + (r.driver ? " · " + r.driver : "")})),
-          el("td", {}, el("span", {class: "pill"}, el("span", {class: "dot " + cls}), r.conn_text || (r.mode === "cdrom" ? "Zero-CD" : "—"))),
+          el("td", {}, el("span", {class: "pill"}, el("span", {class: "dot " + (r.off ? "off" : cls)}), r.off ? "выключен" : r.conn_text || (r.mode === "cdrom" ? "Zero-CD" : "—"))),
           el("td", {}, el("span", {class: "net-cell"}, SIG(r.signal), el("span", {text: r.net || "—"}))),
           el("td", {text: r.dataswitch === 1 ? "вкл" : r.dataswitch === 0 ? "выкл" : "—"}),
           el("td", {class: "mono", text: r.ext_ip || "—"}),
@@ -1176,8 +1177,12 @@
             r.dataswitch === 0 && can ? ibtn("bolt", "включить мобильные данные (hivelink dataon " + r.n + ")", (e) => act1(e.currentTarget, "dataon", r.n, "данные включены"), "", "данные") : null,
             can ? ibtn("redo", "переподключить: откл → вкл (hivelink reconnect " + r.n + ")", (e) => act1(e.currentTarget, "reconnect", r.n, "переподключён")) : null,
             can ? ibtn("link", "веб модема " + r.n + " (192.168." + r.n + ".1) — в отдельном окне", () => openModem(X, id, "192.168." + r.n + ".1")) : null,
-            ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
-              (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }))));
+            r.off ? null : ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
+              (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }),
+            r.off
+              ? ibtn("play", "включить модем на USB " + port + " (hivelink on " + port + ")", (e) => act1(e.currentTarget, "on", port, "включён"))
+              : ibtn("stop", "выключить модем: отцепить от USB, и после перезагрузки тоже (hivelink off " + port + ") — например, второй модем с тем же номером",
+                (e) => { if (window.confirm("Выключить модем " + (r.n != null ? r.n + " " : "") + "на USB " + port + "? Он пропадёт из системы (и у mp.space), пока не включите обратно.")) act1(e.currentTarget, "off", port, "выключен"); }, "danger")))));
       }));
       box.replaceChildren(info, el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, head), tb)));
       if (first) { first = false; stagger(tb); }

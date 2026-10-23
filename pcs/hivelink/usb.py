@@ -164,6 +164,19 @@ def set_config(dev, value):
         pass
 
 
+def authorized(dev):
+    """Устройство подключено логически (authorized=1). Нет файла — считаем подключённым."""
+    return attr(dev, "authorized") != "0"
+
+
+def set_authorized(dev, on):
+    try:
+        wr(os.path.join(dev, "authorized"), "1" if on else "0")
+    except OSError:
+        return False
+    return True
+
+
 def reenumerate(dev):
     """Логически отцепить и вернуть устройство (как CM_Reenumerate_DevNode в Windows).
     Питание при этом не снимается: зависшую радиочасть так не оживить."""
