@@ -169,6 +169,20 @@ class Api:
     def reboot(self):
         self.post("/api/device/control", "<Control>1</Control>")
 
+    def radio(self):
+        """Жива ли радиочасть: {"imei", "sim"} (SimState 255 — SIM не видна) или None — прошивка
+        не говорит. Веб модема может работать, когда сам модем внутри завис: IMEI пуст, SIM «нет»,
+        перезагрузку принимает («OK»), но не делает (SpbVL-2, 24.10)."""
+        info = self.get("/api/device/information")
+        if api_error(info) or "<Imei>" not in info:
+            return None                 # без входа не отдаёт — не знаем
+        return {"imei": xmlval(info, "Imei") or "", "sim": num(self.get("/api/monitoring/converged-status"), "SimState")}
+
+
+def radio_dead(r):
+    """Радиочасть не поднялась: IMEI пуст (у живого модема он есть и без SIM)."""
+    return bool(r) and not r["imei"]
+
 
 def reach(src, host="1.1.1.1", port=80, timeout=6):
     """Ходит ли трафик через модем: TCP-соединение с адреса модема (без полезной нагрузки)."""
@@ -190,6 +204,9 @@ def probe(n, src, timeout=5):
         if st["error"]:
             out["errors"].append(error_text(st["error"]))
         out["dataswitch"] = api.dataswitch()
+        if out["conn"] != 901 and radio_dead(api.radio()):
+            out["radio_dead"] = True
+            out["errors"].append("модем завис: SIM не видна, IMEI пуст — перезагрузку не выполняет, нужно снять питание")
     except HiFail as e:
         out["errors"].append(str(e))
     return out

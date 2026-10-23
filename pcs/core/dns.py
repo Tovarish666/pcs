@@ -50,7 +50,7 @@ WANT = "# PCS-WANT:"                # заданные серверы, когд�
 # запас на замену теряющим: разные сети и операторы, чтобы не упасть всем сразу
 RESERVE = ("9.9.9.9", "77.88.8.8", "1.0.0.1", "8.8.4.4", "149.112.112.112", "77.88.8.1")
 PROBES = 10         # запросов к каждому серверу
-PROBE_OK = 9        # столько должно ответить; вернуть заданный сервер на место — все PROBES
+PROBE_OK = 9        # столько должно ответить; вернуть заменённый заданный на место — все PROBES
 PROBE_TIMEOUT = 1.5
 
 UNIT_TEXT = """[Unit]
@@ -240,8 +240,8 @@ def choose(want, now=None, probe=probe, extra=()):
     → (список, {сервер: ответов из PROBES})."""
     want, now = list(want), list(now or want)
 
-    def good(x, score):
-        return score.get(x, 0) >= (PROBE_OK if x in now else PROBES)
+    def good(x, score):                 # строго — только возврат заданного: без дребезга
+        return score.get(x, 0) >= (PROBES if x in want and x not in now else PROBE_OK)
     score = probe(want)
     use = [x for x in want if good(x, score)]
     if len(use) == len(want):

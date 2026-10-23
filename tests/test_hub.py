@@ -561,7 +561,9 @@ calls = []
 remote.deliver = lambda s, root=None: (calls.append("deliver"), VERSION)[1]
 remote.stream = lambda s, cmd, tty=False: (calls.append(cmd), 0)[1]
 remote.node = lambda s, *a, **k: (calls.append("pcs-node " + " ".join(a)), {"dns": ["1.1.1.1"]})[1]
-remote.ssh = lambda s, cmd, check=True, timeout=None, input=None: types.SimpleNamespace(returncode=0, stdout="yes\n", stderr="")
+HL = {"on": False}
+remote.ssh = lambda s, cmd, check=True, timeout=None, input=None: types.SimpleNamespace(
+    returncode=0, stdout="" if "/etc/hivelink" in cmd and not HL["on"] else "yes\n", stderr="")
 s = store.load(2000)
 quiet = io.StringIO()
 with redirect_stdout(quiet):
@@ -574,6 +576,13 @@ with redirect_stdout(quiet):
     servers.setup(s)
 check("обновление: код → proxyveth setup → modlink setup (DNS не трогаем)", calls == [
     "deliver", "proxyveth setup", "modlink setup"], calls)
+calls.clear()
+HL["on"] = True
+with redirect_stdout(quiet):
+    servers.setup(s)
+check("обновление ВМ с hivelink: и hivelink install (modprobe.d, udev, юниты — новые)", calls == [
+    "deliver", "proxyveth setup", "modlink setup", "hivelink install"], calls)
+HL["on"] = False
 calls.clear()
 remote.ssh = lambda s, cmd, check=True, timeout=None, input=None: types.SimpleNamespace(returncode=1, stdout="", stderr="")
 with redirect_stdout(quiet):

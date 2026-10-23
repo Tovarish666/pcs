@@ -11,7 +11,7 @@ import os
 import re
 import time
 
-from ..core.util import rd, wr
+from ..core.util import rd, sh, wr
 
 SYS = "/sys"                                    # подменяется в тестах
 VIRTUAL = ("/dummy_hcd.", "/vhci_hcd.")         # шины виртуальных модемов proxyveth
@@ -162,6 +162,41 @@ def set_config(dev, value):
         wr(path, str(value))
     except OSError:
         pass
+
+
+def parent_port(dev):
+    """(каталог хаба, номер порта) для устройства «3-1.8.4.1.2» → (…/3-1.8.4.1, 2); у корня — None."""
+    name = os.path.basename(dev)
+    if "." not in name:
+        return None
+    hub, num = name.rsplit(".", 1)
+    return os.path.join(os.path.dirname(dev), hub), num
+
+
+def per_port_power(hub, run=sh):
+    """Хаб умеет снимать питание с отдельного порта (а не со всех разом — ganged): по дескриптору
+    хаба (lsusb -v). Дешёвые хабы 1a40:0101 — ganged: «отключить порт» там питание не снимает."""
+    bus, num = attr(hub, "busnum"), attr(hub, "devnum")
+    if not (bus and num):
+        return False
+    out = run("lsusb", "-v", "-s", "%s:%s" % (bus, num), check=False, timeout=20).stdout or ""
+    return "Per-port power switching" in out
+
+
+def power_cycle(dev, off=5, run=sh, sleep=time.sleep):
+    """Снять питание с порта модема на off секунд (хаб с per-port power switching). → True — снято."""
+    pp = parent_port(dev)
+    if not pp or not per_port_power(pp[0], run):
+        return False
+    hub = os.path.basename(pp[0])
+    ctl = os.path.join(pp[0], "%s:1.0" % hub, "%s-port%s" % (hub, pp[1]), "disable")
+    try:
+        wr(ctl, "1")
+        sleep(off)
+        wr(ctl, "0")
+    except OSError:
+        return False
+    return True
 
 
 def authorized(dev):

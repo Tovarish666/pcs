@@ -384,6 +384,13 @@ def setup(s, mode=None, sheet="", fresh=False):
     ui.hdr("modlink setup")
     if remote.stream(s, "modlink setup") != 0:
         raise Fail("modlink setup на сервере %s не прошёл — см. выше" % s["id"])
+    if remote.ssh(s, "test -d /etc/hivelink && echo yes", check=False).stdout.strip() == "yes":
+        # Код обновился — системная часть hivelink (modprobe.d, udev, юниты, initramfs) тоже должна:
+        # без install исправления до модемов не доходят (ВМ 5000, 24.10: код новый, а MBIM,
+        # usb-storage и ModemManager — как были, модемы зависали).
+        ui.hdr("hivelink install")
+        if remote.stream(s, "hivelink install") != 0:
+            raise Fail("hivelink install на сервере %s не прошёл — см. выше" % s["id"])
     try:
         if cloud_init_off(s) == "off":
             ui.ok("cloud-init выключен: своё сделал, ВМ больше не перенастраивается при перезагрузке хоста")
