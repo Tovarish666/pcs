@@ -386,7 +386,7 @@ def update(target):
                 lambda: {"version": VERSION})
 
 
-LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart"),
+LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart", "on", "off"),
         "modlink": ("setup", "migrate", "uninstall"), "hivelink": ("install", "uninstall")}
 
 
@@ -594,7 +594,20 @@ def job_retry(job_id):
     return {"job": new}
 
 
-def term_argv(target):
+def server_reconnect(id):
+    _pause()
+    with _lock:
+        srv = _srv(id)
+        if srv.get("state") == "stopped":
+            return {"ok": False, "ip": srv["ip"], "steps": [{"what": "ВМ в Proxmox", "ok": False, "text": "выключена — «Включить»"}]}
+        old, srv["state"] = srv.get("state"), "running" if srv.get("state") == "offline" else srv.get("state")
+        return {"ok": True, "ip": srv["ip"], "steps": [
+            {"what": "ВМ в Proxmox", "ok": True, "text": "работает"}, {"what": "guest agent", "ok": True, "text": "отвечает"},
+            {"what": "адрес", "ok": True, "text": srv["ip"] if old != "offline" else "сменился — теперь %s, записал" % srv["ip"]},
+            {"what": "порт SSH 22", "ok": True, "text": "открыт"}, {"what": "вход по SSH", "ok": True, "text": "up 3 minutes"}]}
+
+
+def term_argv(target, serial=False):
     """Фейковая консоль: отвечает на proxyveth/modlink/hivelink фейковыми данными. Не настоящая оболочка."""
     if target != "host":
         _srv(target)
@@ -678,6 +691,16 @@ def _host_run(part, args, inp=None):
 
 def _pv(srv, a, inp):
     cmd = a[0] if a else ""
+    if cmd in ("on", "off"):
+        on = cmd == "on"
+        if on and srv.get("pv_off_modems") is not None:
+            srv["modems"] = srv.pop("pv_off_modems")
+        elif not on and not srv.get("pv_off"):
+            srv["pv_off_modems"], srv["modems"] = srv["modems"], []
+        srv["pv_off"] = not on
+        return {"on": on, "mode": srv.get("mode")}
+    if srv.get("pv_off") and cmd in ("sync", "up", "down", "restart"):
+        raise Fail("proxyveth выключен — включить: proxyveth on")
     if cmd == "status":
         rows = [_row(m) for m in srv["modems"]]
         if "--wan" in a:
@@ -687,7 +710,7 @@ def _pv(srv, a, inp):
         return [_row(m) for m in srv["modems"] if m["state"] != "ok"]
     if cmd == "source":
         if len(a) == 1:
-            return dict(srv["source"])
+            return dict(srv["source"], on=not srv.get("pv_off"), mode=srv.get("mode"))
         if a[1] == "local":
             srv["source"]["source"] = "local"
         else:

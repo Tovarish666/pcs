@@ -56,7 +56,7 @@ def overview(s, timeout=20, wan=False, pve_row=None):
         return d
     pv = info.get("proxyveth") or {}
     d.update(mode=pv.get("mode"), modems=pv.get("modems") or dict(EMPTY), mpspace=info.get("mpspace"),
-             version=info.get("version"), info=info)
+             version=info.get("version"), info=info, pv_on=pv.get("on", True))
     if pv.get("error"):
         d["error"] = "proxyveth: %s" % pv["error"]
     if d["mode"] and d["mode"] != s.get("mode"):
@@ -101,7 +101,7 @@ def host_overview():
             "ip": host_ip(), "cpu": {"cores": os.cpu_count() or 0, "load": list(os.getloadavg())},
             "ram": node.mem(), "disk": node.disk("/var/lib/vz" if os.path.isdir("/var/lib/vz") else "/"),
             "hivelink": hl.get("data") if hl.get("ok") else {"installed": False, "error": hl.get("error")},
-            "proxyveth": pv, "mode": pv.get("mode"), "modems": pv.get("modems"), "mpspace": mp,
+            "proxyveth": pv, "mode": pv.get("mode"), "pv_on": pv.get("on", True), "modems": pv.get("modems"), "mpspace": mp,
             "mpspace_ok": mpspace_allowed()[0], "vms": kind == "proxmox",
             "modlink": node.modlink_info(), "dns": dnsfix.current()}
 
@@ -416,6 +416,65 @@ def cloud_init_off(s):
     return remote.ssh(s, "test -d /etc/cloud || { echo none; exit; }; test -e %s && { echo was; exit; }; "
                          "printf %%s %s > %s && echo off" % (CI_OFF, shlex.quote(CI_OFF_TEXT), CI_OFF),
                       timeout=30).stdout.strip()
+
+
+def reconnect(sid):
+    """«Переподключить»: связь хаба с ВМ по шагам — ВМ в Proxmox, guest agent, адрес (после
+    перезагрузки DHCP мог дать новый), порт SSH (молчит, а агент жив — перезапустить sshd через
+    агент), вход (ключ сменился — сверка агентом). → {"ok", "ip", "steps": [{what, ok, text}]}."""
+    import socket
+    s = store.load(sid)
+    sid = s["id"]
+    steps = []
+
+    def step(what, ok, text):
+        steps.append({"what": what, "ok": ok, "text": text})
+        (ui.ok if ok else ui.bad if ok is False else ui.info)("%s: %s" % (what, text))
+
+    def done(ok):
+        return {"ok": ok, "ip": s.get("ip"), "steps": steps}
+
+    remote.close_master(s)
+    pve_ = pve.is_pve()
+    agent = False
+    if pve_:
+        st = pve.qm_status(sid)
+        step("ВМ в Proxmox", st == "running", {"running": "работает", "stopped": "выключена — «Включить»",
+                                                "absent": "нет в Proxmox"}.get(st, st))
+        if st != "running":
+            return done(False)
+        agent = sh("qm", "guest", "cmd", str(sid), "ping", check=False, timeout=15).returncode == 0
+        step("guest agent", agent, "отвечает" if agent else "не отвечает (ВМ ещё загружается или агента нет)")
+        if remote.ip_moved(s, force=True):
+            step("адрес", True, "сменился — теперь %s, записал" % s["ip"])
+        else:
+            step("адрес", bool(s.get("ip")), s.get("ip") or "неизвестен")
+    port = int(s.get("port") or 22)
+
+    def port_open():
+        try:
+            socket.create_connection((s["ip"], port), timeout=5).close()
+            return True, "открыт"
+        except OSError as e:
+            return False, e.strerror or str(e)
+    ok, why = port_open()
+    if not ok and agent:
+        step("порт SSH %d" % port, False, "%s — перезапускаю sshd через guest agent" % why)
+        sh("qm", "guest", "exec", str(sid), "--timeout", "30", "--", "systemctl", "restart", "ssh.socket", "ssh",
+           check=False, timeout=45)
+        time.sleep(2)
+        ok, why = port_open()
+    step("порт SSH %d" % port, ok, why)
+    if not ok:
+        return done(False)
+    try:
+        r = remote.call(s, "uptime -p; cat /opt/pcs/VERSION 2>/dev/null || true", timeout=30)
+        out = (r.stdout or "").split("\n")
+        step("вход по SSH", r.returncode == 0, out[0].strip() or "ок")
+    except Fail as e:
+        step("вход по SSH", False, str(e))
+        return done(False)
+    return done(True)
 
 
 # ── взять существующую ВМ ──────────────────────────────────────────────────

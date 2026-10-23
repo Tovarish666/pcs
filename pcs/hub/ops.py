@@ -114,8 +114,16 @@ def ssh_port(s, port):
     raise Fail("порт %d задан, но SSH на нём не отвечает — проверь через qm terminal %s" % (port, s["id"]))
 
 
-def term_argv(t):
+def term_argv(t, serial=False):
+    """serial — консоль ВМ через Proxmox (qm terminal, последовательный порт): работает и без
+    сети и SSH; вход — root и пароль, выход — Ctrl+O."""
     if t == HOST:
         return ["bash", "-l"]
+    if serial:
+        from . import pve
+        pve.need_pve()
+        if "serial0" not in sh("qm", "config", str(t["id"]), check=False).stdout:
+            raise Fail("у ВМ %s нет последовательного порта (serial0) — консоль только через Proxmox" % t["id"])
+        return ["qm", "terminal", str(t["id"])]
     return remote.base(t, tty=True)
 
