@@ -80,39 +80,68 @@ def step_power(conf, st):
                 pass
 
 
-def step_zerocd(conf, st, devs):
+def step_zerocd(conf, st, devs, now=None):
+    """Zero-CD (12d1:1f01 и родня) → рабочий режим: usb_modeswitch шлёт HuaweiNewMode в
+    mass-storage интерфейс ТЕКУЩЕЙ конфигурации. Конфигурацию не меняем: модем в cfg 2 (MBIM —
+    её выбирает ядро) на запись cfg 1 сам переподключается, ядро снова ставит cfg 2 — и так
+    по кругу (SpbVL-1, октябрь 2026). А CD-интерфейс есть и в cfg 2. Модемы — параллельно:
+    сорок по одному — минуты. Не переключился за zerocd_max_tries — пере-enumerate."""
     if not shutil.which("usb_modeswitch"):
         if any(usb.pid_mode(usb.attr(d, "idProduct")) == "cdrom" for d in devs):
             log_once(st, "модем в Zero-CD, а usb_modeswitch нет — hivelink install поставит", conf["quiet_repeat"])
         return
     cnt = st["cnt"]
+    now = time.time() if now is None else now
+    jobs = []
     for d in devs:
         p, pid = usb.port(d), usb.attr(d, "idProduct")
         key = "zerocd." + p
         if usb.pid_mode(pid) != "cdrom" or usb.claimed(d):
-            cnt.pop(key, None)
+            for k in (key, "zcfg." + p, "zerocd_t." + p):
+                cnt.pop(k, None)
             continue
-        cur, tot = usb.config(d)
-        # Zero-CD не на первой конфигурации: там MBIM, mass-storage endpoint — единственный
-        # адресат usb_modeswitch — отсутствует. Сначала cfg 1, переключение — следующим проходом.
-        if cur is not None and cur != 1 and tot > 1:
-            log("%s 12d1:%s Zero-CD в cfg %d/%d — ставлю cfg 1" % (p, pid, cur, tot))
-            usb.set_config(d, 1)
-            cnt[key] = 0
+        # Команда ушла — модему нужно 5–10 с, чтобы отключиться и прийти в новом режиме. Проходы
+        # (udev на каждое событие, таймер) чаще: не повторять раньше zerocd_wait, иначе за секунды
+        # набираются «неудачи» и USB дёргается посреди переключения.
+        if now - cnt.get("zerocd_t." + p, 0) < conf["zerocd_wait"]:
+            continue
+        ms = usb.ms_iface(d)
+        if ms is None:
+            # В этой конфигурации CD-части нет — только тогда пробуем cfg 1, и не каждый проход:
+            # иначе модем, который на смену конфигурации переподключается, крутится вечно
+            cur, tot = usb.config(d)
+            n = cnt.get("zcfg." + p, 0)
+            cnt["zcfg." + p] = n + 1
+            if cur is not None and cur != 1 and tot > 1 and n % 4 == 0:
+                log("%s 12d1:%s Zero-CD без CD-интерфейса в cfg %d/%d — ставлю cfg 1" % (p, pid, cur, tot))
+                usb.set_config(d, 1)
             continue
         tries = cnt.get(key, 0)
+        cnt["zerocd_t." + p] = now
         if tries >= conf["zerocd_max_tries"]:
             log("%s 12d1:%s не переключается за %d попыток — пере-enumerate" % (p, pid, tries))
             usb.reenumerate(d)
             cnt[key] = 0
             continue
         bus, num = usb.attr(d, "busnum"), usb.attr(d, "devnum")
-        if not bus or not num:
-            continue
-        log("%s 12d1:%s в CD-ROM — usb_modeswitch (попытка %d)" % (p, pid, tries + 1))
-        sh("usb_modeswitch", "-v", "12d1", "-p", pid, "-b", bus, "-g", num,
-           "-c", os.path.join(common.FILES, "zerocd.conf"), check=False, timeout=60)
-        cnt[key] = tries + 1
+        if bus and num:
+            jobs.append((p, pid, bus, num, ms, tries))
+            cnt[key] = tries + 1
+    if not jobs:
+        return
+    log("Zero-CD: переключаю %d (usb_modeswitch, по %d разом)" % (len(jobs), conf["zerocd_parallel"]))
+
+    def switch(j):
+        p, pid, bus, num, ms, tries = j
+        r = sh("usb_modeswitch", "-v", "12d1", "-p", pid, "-b", bus, "-g", num,
+               "-c", os.path.join(common.FILES, "zerocd.conf"), "-i", str(ms), check=False, timeout=30)
+        out = (r.stdout or "") + (r.stderr or "")
+        if "successfully sent" not in out and "No devices in default mode" not in out:   # второе — уже ушёл
+            last = [ln.strip() for ln in out.splitlines() if ln.strip()][-1:] or ["нет ответа"]
+            log("%s 12d1:%s usb_modeswitch не отправил (попытка %d): %s" % (p, pid, tries + 1, last[0][:120]))
+
+    with ThreadPoolExecutor(max_workers=max(1, conf["zerocd_parallel"])) as ex:
+        list(ex.map(switch, jobs))
 
 
 def load_confmap():

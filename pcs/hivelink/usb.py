@@ -118,6 +118,18 @@ def claimed(dev):
     return _drv(dev) == "usbip-host" or "usbfs" in drivers(dev)
 
 
+def ms_iface(dev):
+    """Номер mass-storage интерфейса (CD модема) в текущей конфигурации или None. У Zero-CD
+    Huawei он есть и в cfg 1, и в MBIM-конфигурации 2 (там — третьим интерфейсом)."""
+    for i in interfaces(dev):
+        if attr(i, "bInterfaceClass").lower() == "08":
+            try:
+                return int(attr(i, "bInterfaceNumber") or "0", 16)
+            except ValueError:
+                return None
+    return None
+
+
 def config(dev):
     """(текущая, всего) USB-конфигураций; текущая None — не читается."""
     cur = attr(dev, "bConfigurationValue")

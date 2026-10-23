@@ -381,7 +381,46 @@ try:
     driver.step_zerocd(c, common.load_state(), usb.devices())
 finally:
     shutil.which = real_which
-check("Zero-CD не в cfg 1 — сначала cfg 1 (там есть mass-storage)", cfgs == [("1-3", 1)], cfgs)
+check("Zero-CD без CD-интерфейса в этой конфигурации — тогда cfg 1", cfgs == [("1-3", 1)], cfgs)
+# как на SpbVL-1: Zero-CD в cfg 2 (MBIM), CD — третий интерфейс; запись cfg 1 модем переподключает
+mk("%s/1-6" % PCI, idVendor="12d1", idProduct="1f01", bcdDevice="0102", bConfigurationValue="2",
+   bNumConfigurations="2", busnum="3", devnum="25", authorized="1")
+link("%s/1-6" % PCI, "bus/usb/devices/1-6")
+for n, cls in (("0", "02"), ("1", "0a"), ("2", "08")):
+    mk("%s/1-6/1-6:2.%s" % (PCI, n), bInterfaceClass=cls, bInterfaceNumber="0" + n)
+check("CD-интерфейс в текущей конфигурации: номер 2", usb.ms_iface(usb.find("1-6")) == 2)
+switched, real_sh2 = [], driver.sh
+driver.sh = lambda *a, **k: (switched.append(a), types.SimpleNamespace(
+    stdout="Trying to send message 1 to endpoint 0x02 ...\n OK, message successfully sent\n", stderr="", returncode=0))[1]
+shutil.which = lambda n: "/usr/sbin/" + n
+st0 = common.load_state()
+try:
+    cfgs.clear()
+    driver.step_zerocd(c, st0, usb.devices())
+    sw = [a for a in switched if a[0] == "usb_modeswitch"]
+    check("Zero-CD в cfg 2 с CD-интерфейсом: usb_modeswitch прямо в него (-i 2), конфигурацию не трогаем",
+          not any(x[0] == "1-6" for x in cfgs) and any(a[a.index("-b") + 1] == "3" and a[a.index("-g") + 1] == "25" and a[a.index("-i") + 1] == "2"
+                             for a in sw), (cfgs, sw))
+    n_sw = len([a for a in switched if a[0] == "usb_modeswitch"])
+    driver.step_zerocd(c, st0, usb.devices())
+    check("сразу следом (модем ещё переключается) — не повторять", len([a for a in switched if a[0] == "usb_modeswitch"]) == n_sw)
+    T = [2000000000]
+    for _ in range(2):
+        T[0] += 30
+        driver.step_zerocd(c, st0, usb.devices(), now=T[0])
+    check("CD-интерфейса нет — cfg 1 не каждый проход (модем на смену cfg переподключается)", cfgs == [("1-3", 1)], cfgs)
+    reen = []
+    real_reen = usb.reenumerate
+    usb.reenumerate = lambda d: reen.append(usb.port(d))
+    try:
+        driver.step_zerocd(c, st0, usb.devices(), now=T[0] + 30)
+    finally:
+        usb.reenumerate = real_reen
+    check("не переключился за zerocd_max_tries — пере-enumerate", reen == ["1-6"], (reen, st0["cnt"]))
+finally:
+    shutil.which, driver.sh = real_which, real_sh2
+    shutil.rmtree(os.path.join(S, PCI, "1-6"))
+    os.unlink(os.path.join(S, "bus/usb/devices/1-6"))
 os.unlink(common.CONFMAP)
 st = {"cnt": {}, "probe": {"1-5": {"1": "none", "2": "huawei_cdc_ncm", "3": "huawei_cdc_ncm"}}, "msg": {}, "dial": {}}
 st["cnt"]["cfgtry.1-5"] = c["cfg_max_tries"]
@@ -412,6 +451,49 @@ check("проход: питание выключено у настоящих и 
       usb.attr(usb.find("1-2"), "power/control") == "on" and usb.attr(os.path.join(S, "bus/usb/devices/1-4"), "power/control") == "on"
       and usb.attr(os.path.join(S, "bus/usb/devices/3-1"), "power/control") == "auto")
 check("проход: состояние сохранено", common.load_state()["cycle"] == 1)
+
+print("установка: MBIM, CD модемов, ModemManager, eth0:")
+q = install.storage_quirks("0bda:9210:u,12d1:1f01:x")
+check("usb-storage: чужие quirks целы, наши «не брать» — 1f01 и рабочие первыми, строка ≤ 127",
+      q.startswith("0bda:9210:u,") and "12d1:1f01:i" in q and "12d1:14dc:i" in q and "12d1:14db:i" in q
+      and "12d1:1f01:x" not in q and len(q) <= 127 and len(install.storage_quirks()) <= 127
+      and install.storage_quirks().count(":i") == 10, q)
+mt = install.modprobe_text()
+check("modprobe.d: cdc_mbim не грузится вовсе, usb-storage не берёт модемы",
+      "blacklist cdc_mbim" in mt and "install cdc_mbim /bin/true" in mt and "options usb-storage quirks=12d1:1f01:i," in mt, mt)
+ut = install.udev_text()
+check("udev: ModemManager не трогает модемы (штатная метка), до фильтра подсистем — и для tty",
+      'ATTRS{idVendor}=="12d1", ENV{ID_MM_DEVICE_IGNORE}="1"' in ut
+      and ut.index("ID_MM_DEVICE_IGNORE") < ut.index('SUBSYSTEM!="usb|net"') and ut.index("dummy_hcd") < ut.index("ID_MM_DEVICE_IGNORE"), ut)
+check("udev: модем, получивший eth0, уходит на свободное ethN от 64 ($$ и %c — как надо udev)",
+      'KERNEL=="eth0", ATTRS{idVendor}=="12d1"' in ut and "eth$$i" in ut and 'NAME="%c"' in ut, ut)
+check("служба eth0 — до сети", "Before=network-pre.target systemd-networkd.service" in install.eth0_text()
+      and "eth0" in install.eth0_text())
+NET = os.path.join(TMP, "sysnet")
+LINKD = os.path.join(TMP, "netd")
+os.makedirs(LINKD)
+with open(os.path.join(LINKD, "10-netplan-eth0.link"), "w") as f:
+    f.write("[Match]\nPermanentMACAddress=BC:24:11:D2:F9:06\n\n[Link]\nName=eth0\nWakeOnLan=off\n")
+for n, mac in (("eth0", "0c:5b:8f:27:9a:64"), ("eth1", "bc:24:11:d2:f9:06"), ("eth64", "0c:5b:8f:27:9a:64")):
+    os.makedirs(os.path.join(NET, n))
+    with open(os.path.join(NET, n, "address"), "w") as f:
+        f.write(mac + "\n")
+real_netd, real_sysnet, real_ifdev = install.NETD, install.SYS_NET, usb.iface_dev
+install.NETD, install.SYS_NET = (LINKD,), NET
+usb.iface_dev = lambda ifn: "/sys/bus/usb/devices/3-1.5.3.1" if ifn == "eth0" else ""
+ipcmds = []
+try:
+    check("MAC основной сетевухи — из .link netplan (имя eth0; netplan пишет PermanentMACAddress)",
+          install.primary_mac() == "bc:24:11:d2:f9:06")
+    lt = install.eth0_link_text(install.primary_mac())
+    check("своё .link для initramfs: тот же MAC → eth0", "PermanentMACAddress=bc:24:11:d2:f9:06" in lt and "Name=eth0" in lt, lt)
+    d = install.fix_eth0(wait=0, sleep=lambda s: None, run=lambda *c: ipcmds.append(" ".join(c)))
+finally:
+    install.NETD, install.SYS_NET, usb.iface_dev = real_netd, real_sysnet, real_ifdev
+check("eth0 у модема при загрузке: модем — на свободное ethN (eth65: eth64 занят), основная — eth0",
+      d["done"] and d["modem"] == "eth65" and ipcmds == ["ip link set eth0 down", "ip link set eth0 name eth65",
+                                                         "ip link set eth1 down", "ip link set eth1 name eth0",
+                                                         "ip link set eth0 up"], (d, ipcmds))
 
 print("status:")
 rows, reach = status.local_rows(conf, ADDR)

@@ -202,9 +202,15 @@ def cmd_run(args):
     return 0, None
 
 
+def cmd_eth0(args):
+    """Служебное (hivelink-eth0.service при загрузке): eth0 — основной сетевой карте, а не модему."""
+    need_root()
+    return 0, install.fix_eth0()
+
+
 CMDS = {"install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status, "doctor": cmd_doctor,
         "reconnect": cmd_reconnect, "reset": cmd_reset, "recfg": cmd_recfg, "dataon": cmd_dataon,
-        "run": cmd_run}
+        "run": cmd_run, "eth0": cmd_eth0}
 
 
 def main(argv=None):
@@ -226,7 +232,7 @@ def main(argv=None):
     if fn is None:
         def fn(a):
             raise Fail("нет команды «%s» — hivelink help" % cmd)
-    elif cmd in ("install", "uninstall", "doctor", "run") and rest:
+    elif cmd in ("install", "uninstall", "doctor", "run", "eth0") and rest:
         def fn(a, cmd=cmd):
             raise Fail("лишние аргументы: %s — hivelink help" % " ".join(a))
     return run_cli(guarded(fn), rest, as_json)
