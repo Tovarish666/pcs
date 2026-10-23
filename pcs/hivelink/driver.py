@@ -80,7 +80,7 @@ def step_power(conf, st):
                 pass
 
 
-def step_zerocd(conf, st, devs):
+def step_zerocd(conf, st, devs, now=None):
     """Zero-CD (12d1:1f01 и родня) → рабочий режим: usb_modeswitch шлёт HuaweiNewMode в
     mass-storage интерфейс ТЕКУЩЕЙ конфигурации. Конфигурацию не меняем: модем в cfg 2 (MBIM —
     её выбирает ядро) на запись cfg 1 сам переподключается, ядро снова ставит cfg 2 — и так
@@ -91,13 +91,19 @@ def step_zerocd(conf, st, devs):
             log_once(st, "модем в Zero-CD, а usb_modeswitch нет — hivelink install поставит", conf["quiet_repeat"])
         return
     cnt = st["cnt"]
+    now = time.time() if now is None else now
     jobs = []
     for d in devs:
         p, pid = usb.port(d), usb.attr(d, "idProduct")
         key = "zerocd." + p
         if usb.pid_mode(pid) != "cdrom" or usb.claimed(d):
-            cnt.pop(key, None)
-            cnt.pop("zcfg." + p, None)
+            for k in (key, "zcfg." + p, "zerocd_t." + p):
+                cnt.pop(k, None)
+            continue
+        # Команда ушла — модему нужно 5–10 с, чтобы отключиться и прийти в новом режиме. Проходы
+        # (udev на каждое событие, таймер) чаще: не повторять раньше zerocd_wait, иначе за секунды
+        # набираются «неудачи» и USB дёргается посреди переключения.
+        if now - cnt.get("zerocd_t." + p, 0) < conf["zerocd_wait"]:
             continue
         ms = usb.ms_iface(d)
         if ms is None:
@@ -111,6 +117,7 @@ def step_zerocd(conf, st, devs):
                 usb.set_config(d, 1)
             continue
         tries = cnt.get(key, 0)
+        cnt["zerocd_t." + p] = now
         if tries >= conf["zerocd_max_tries"]:
             log("%s 12d1:%s не переключается за %d попыток — пере-enumerate" % (p, pid, tries))
             usb.reenumerate(d)
@@ -129,7 +136,7 @@ def step_zerocd(conf, st, devs):
         r = sh("usb_modeswitch", "-v", "12d1", "-p", pid, "-b", bus, "-g", num,
                "-c", os.path.join(common.FILES, "zerocd.conf"), "-i", str(ms), check=False, timeout=30)
         out = (r.stdout or "") + (r.stderr or "")
-        if "successfully sent" not in out:
+        if "successfully sent" not in out and "No devices in default mode" not in out:   # второе — уже ушёл
             last = [ln.strip() for ln in out.splitlines() if ln.strip()][-1:] or ["нет ответа"]
             log("%s 12d1:%s usb_modeswitch не отправил (попытка %d): %s" % (p, pid, tries + 1, last[0][:120]))
 

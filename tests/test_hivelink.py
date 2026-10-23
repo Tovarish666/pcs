@@ -401,14 +401,19 @@ try:
     check("Zero-CD в cfg 2 с CD-интерфейсом: usb_modeswitch прямо в него (-i 2), конфигурацию не трогаем",
           not any(x[0] == "1-6" for x in cfgs) and any(a[a.index("-b") + 1] == "3" and a[a.index("-g") + 1] == "25" and a[a.index("-i") + 1] == "2"
                              for a in sw), (cfgs, sw))
+    n_sw = len([a for a in switched if a[0] == "usb_modeswitch"])
+    driver.step_zerocd(c, st0, usb.devices())
+    check("сразу следом (модем ещё переключается) — не повторять", len([a for a in switched if a[0] == "usb_modeswitch"]) == n_sw)
+    T = [2000000000]
     for _ in range(2):
-        driver.step_zerocd(c, st0, usb.devices())
+        T[0] += 30
+        driver.step_zerocd(c, st0, usb.devices(), now=T[0])
     check("CD-интерфейса нет — cfg 1 не каждый проход (модем на смену cfg переподключается)", cfgs == [("1-3", 1)], cfgs)
     reen = []
     real_reen = usb.reenumerate
     usb.reenumerate = lambda d: reen.append(usb.port(d))
     try:
-        driver.step_zerocd(c, st0, usb.devices())
+        driver.step_zerocd(c, st0, usb.devices(), now=T[0] + 30)
     finally:
         usb.reenumerate = real_reen
     check("не переключился за zerocd_max_tries — пере-enumerate", reen == ["1-6"], (reen, st0["cnt"]))
