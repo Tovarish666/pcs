@@ -287,8 +287,9 @@ def create_server(params):
         lines += ["── Модемы по таблице ──", "  ✓ proxyveth source %s" % params["sheet"], "  ✓ proxyveth sync: создано 0 (таблица пуста)"]
     if params.get("mpspace"):
         lines += ["── mobileproxy.space на сервере %d (%s) ──" % (sid, ip), "  → зеркала и пакеты…", "  ✓ установлен, перезагрузка"]
-    if name.startswith("fail"):
-        lines.append(Fail("cloud-init не закончился за 15 минут — смотри консоль ВМ %d в Proxmox" % sid))
+    if name.startswith("fail") and not params.get("resume"):
+        lines.insert(lines.index("── modlink setup ──") + 1,
+                     Fail("3proxy 1.0.0 не скачался (Temporary failure in name resolution) — проверь доступ к сети и DNS машины"))
     lines.append("── Готово за 1 мин ──")
 
     def done():
@@ -301,7 +302,8 @@ def create_server(params):
             S[sid] = srv
         return {"id": sid, "ip": ip}
 
-    jid = _job("создать ВМ %s" % name, lines, done)
+    jid = _job("создать ВМ %s" % name + (" (повтор)" if params.get("resume") else ""), lines, done)
+    _jobs[jid].update(kind="create_server", _params=dict(params))
 
     def cleanup():                       # задание упало — номер освобождается
         while _jobs[jid]["state"] == "running":
@@ -573,7 +575,23 @@ def job(job_id):
         j = _jobs.get(job_id)
         if j is None:
             raise Fail("задания %s нет (панель перезапускалась?)" % job_id)
-        return copy.deepcopy(j)
+        out = copy.deepcopy({k: v for k, v in j.items() if k != "_params"})
+        out["retry"] = j["state"] == "failed" and "_params" in j and not j.get("retried")
+        return out
+
+
+def job_retry(job_id):
+    with _lock:
+        j = _jobs.get(job_id)
+        if j is None:
+            raise Fail("нет такого задания: %s" % job_id)
+        if j["state"] != "failed" or "_params" not in j or j.get("retried"):
+            raise Fail("повторить можно только упавшее задание")
+        params = dict(j["_params"], resume=True)
+    new = create_server(params)
+    with _lock:
+        j["retried"] = new
+    return {"job": new}
 
 
 def term_argv(target):

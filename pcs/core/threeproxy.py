@@ -13,9 +13,8 @@ import os
 import platform
 import shutil
 import tempfile
-import urllib.request
 
-from .util import Fail, rd, sh
+from .util import Fail, download, rd, sh
 
 VERSION = "1.0.0"
 SHA256 = {                        # из SHA256SUMS-x86_64 / SHA256SUMS-arm64 релиза
@@ -47,10 +46,7 @@ def install(path=BIN, a=None):
         return False
     if a not in SHA256:
         raise Fail("3proxy %s: нет сборки под %s" % (VERSION, a))
-    try:
-        data = urllib.request.urlopen(url(a), timeout=120).read()
-    except OSError as e:
-        raise Fail("3proxy %s не скачался (%s) — проверь доступ к github.com" % (VERSION, e))
+    data = download(url(a), "3proxy %s" % VERSION)
     if hashlib.sha256(data).hexdigest() != SHA256[a]:
         raise Fail("3proxy %s: контрольная сумма не совпала — не ставлю" % VERSION)
     d = tempfile.mkdtemp()

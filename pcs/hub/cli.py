@@ -48,6 +48,7 @@ HELP = """pcs %s — хаб фермы мобильных прокси на хо
   pcs token [list | revoke ID]          кто присоединил этот хост (токены его хабов)
   pcs job [ID] [--server ID]            долгое (update, установка, перенос…) идёт в фоне: обрыв
                                         связи ему не мешает; здесь — список, журнал, «смотреть дальше»
+  pcs job ID --retry                    повторить упавшее (создание ВМ — продолжит ту же ВМ)
   pcs host-setup                        хост после установки/обновления: команды, hivelink, modlink
 
   Без --server — выбранный сервер (pcs server use ID). --json — ответ для программ.
@@ -141,6 +142,7 @@ def parser():
     c.add_argument("id", nargs="?")
     c.add_argument("run_id", nargs="?")
     c.add_argument("--server")
+    c.add_argument("--retry", action="store_true")
     sub.add_parser("log")
     for p in list(sub.choices.values()) + list(srv.choices.values()):
         p.add_argument("--json", action="store_true")
@@ -762,6 +764,11 @@ def c_job(a):
             return 0, remote.node(s, "bg", *([a.id] if a.id else []), timeout=60)
         cmd = "%s=%s pcs-node bg" % (bg.HUB_ID, s["id"]) + (" " + shlex.quote(a.id) if a.id else "")
         return remote.stream(s, cmd, tty=sys.stdout.isatty()), None
+    if a.id and a.retry:
+        new = jobs.retry(a.id)
+        if a.json:
+            return 0, {"job": new}
+        return jobs.follow(new), {"job": new}
     if a.id:
         if bg.is_id(a.id):
             d = bg.get(a.id)
@@ -775,6 +782,8 @@ def c_job(a):
                 print("  │ " + ln)
             if d.get("error"):
                 ui.bad(d["error"])
+            if d.get("retry"):
+                ui.info("повторить: pcs job %s --retry" % d["id"])
         return (0 if d["state"] in ("done", "running") else 1), d
     lst = sorted(jobs.recent() + bg.recent(), key=lambda d: d.get("started") or 0, reverse=True)[:30]
     if not a.json:

@@ -330,6 +330,11 @@ def job(job_id):
     return bg.get(job_id) if bg.is_id(job_id) else jobs.get(job_id)
 
 
+def job_retry(job_id):
+    """«Повторить» упавшее задание хаба (создание ВМ — продолжает ту же ВМ). → {"job": новый id}."""
+    return {"job": jobs.retry(job_id)}
+
+
 def jobs_recent(n=15):
     """Последние задания хаба и фоновые запуски на хосте, новые сверху (без журналов)."""
     from ..core import bg

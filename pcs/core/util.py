@@ -37,6 +37,25 @@ def nsx(ns, *cmd, check=True):
     return sh("ip", "netns", "exec", ns, *cmd, check=check)
 
 
+PAUSES = (5, 15, 30)          # между попытками скачать: сеть и DNS новой машины моргают
+
+
+def download(url, what, timeout=120, pauses=None, sleep=time.sleep, opener=None):
+    """Скачать url → bytes. Временный сбой (DNS «Temporary failure in name resolution», обрыв,
+    таймаут) — ещё раз через 5, 15, 30 с; не вышло — Fail «… не скачался (…)»."""
+    import urllib.request
+    opener = opener or (lambda u, t: urllib.request.urlopen(u, timeout=t).read())
+    pauses = PAUSES if pauses is None else pauses
+    for i in range(len(pauses) + 1):
+        try:
+            return opener(url, timeout)
+        except OSError as e:
+            if i == len(pauses):
+                raise Fail("%s не скачался (%s) — проверь доступ к сети и DNS машины" % (what, e))
+            print("  … %s: сбой сети (%s) — ещё раз через %d с" % (what, e, pauses[i]), file=sys.stderr, flush=True)
+            sleep(pauses[i])
+
+
 def rd(path, default=""):
     try:
         with open(path) as f:

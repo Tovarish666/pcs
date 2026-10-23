@@ -46,7 +46,7 @@ def load(sid):
         raise Fail("это хост, а не сервер: выбери ВМ (pcs server use ID)")
     s = jload(path(sid), None)
     if not isinstance(s, dict):
-        raise Fail("сервер %s PCS не знает: pcs server adopt %s (список — pcs server list)" % (sid, sid))
+        raise Fail("ВМ %s не под PCS — добавить: на обзоре хоста «Добавить в PCS» (или pcs server adopt %s)" % (sid, sid))
     s["id"] = int(s.get("id") or sid)
     s.setdefault("name", "vm%s" % sid)
     s.setdefault("ip", "")

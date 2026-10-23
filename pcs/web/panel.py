@@ -148,6 +148,7 @@ class Panel:
             ("GET", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_get),
             ("POST", r"/api/nodes/([a-z0-9-]{1,40})/(.+)", self.node_post),
             ("GET", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})", self.job),
+            ("POST", r"/api/jobs/([A-Za-z0-9_.:-]{1,80})/retry", self.job_retry),
             ("GET", r"/api/browser/(mp|ym|md)/(host|\d+)", self.br_status),
             ("POST", r"/api/browser/(mp|ym)/(host|\d+)/(proxy|check|start|stop|open|links)", self.br_act),
             ("POST", r"/api/browser/md/(host|\d+)/stop", self.br_md_stop),
@@ -699,6 +700,14 @@ class Panel:
 
     def job(self, jid, query, body):
         return ok(self.api.job(jid))
+
+    def job_retry(self, jid, query, body):
+        fn = getattr(self.api, "job_retry", None)
+        if fn is None:
+            raise Bad("этот хаб не умеет повторять задания — обновите PCS", 501)
+        r = fn(jid)
+        self.forget()
+        return ok(r)
 
     # ── присоединённые хосты ────────────────────────────────────────────────
 
