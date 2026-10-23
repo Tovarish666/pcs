@@ -22,6 +22,10 @@ UDEV_MS = "/etc/udev/rules.d/41-hivelink-modeswitch.rules"
 NETWORK = "/etc/systemd/network/25-hivelink.network"
 MODPROBE = "/etc/modprobe.d/hivelink-modems.conf"
 ETH0_UNIT = "/etc/systemd/system/hivelink-eth0.service"
+# Имя eth0 основной карте — уже в initramfs: там нет .link netplan (он в /run), карту сначала
+# зовут enp6s18, eth0 свободен — его берёт модем, и вернуть имя карте не выходит (SpbVL-1).
+# Файлы /etc/systemd/network/*.link initramfs-tools кладёт в образ.
+ETH0_LINK = "/etc/systemd/network/10-hivelink-eth0.link"
 # usb-storage не берёт настоящие модемы Huawei: Zero-CD и рабочие PID (CD и microSD модема).
 # Строка параметра у модуля — не длиннее 127 символов: по важности, сколько влезет.
 STORAGE_IGNORE = ("1f01", "14dc", "14db") + tuple(p for p in usb.ZEROCD if p != "1f01")
@@ -280,10 +284,16 @@ def primary_mac():
         for f in sorted(glob.glob(os.path.join(d, "*.link"))):
             text = rd(f)
             if re.search(r"^Name=eth0\s*$", text, re.M):
-                m = re.search(r"^MACAddress=([0-9A-Fa-f:]{17})\s*$", text, re.M)
+                m = re.search(r"^(?:Permanent)?MACAddress=([0-9A-Fa-f:]{17})\s*$", text, re.M)
                 if m:
                     return m.group(1).lower()
     return ""
+
+
+def eth0_link_text(mac):
+    return ("# hivelink: основной сетевой карте машины — eth0 с первой секунды загрузки (и в initramfs),\n"
+            "# чтобы имя не успел занять USB-модем. MAC — из .link netplan (Name=eth0).\n"
+            "[Match]\nPermanentMACAddress=%s\n\n[Link]\nName=eth0\n" % mac)
 
 
 def free_eth(start=64):
@@ -571,14 +581,15 @@ def install(skip_fix=False):
     if any(units):
         sh("systemctl", "daemon-reload", check=False)
     sh("systemctl", "enable", "hivelink-eth0.service", check=False)
-    if common.put(MODPROBE, modprobe_text()):
-        mods = in_initramfs()
-        if mods and shutil.which("update-initramfs"):
-            log("initramfs: %s грузятся из него — обновляю (минута)" % ", ".join(mods))
-            r = sh("update-initramfs", "-u", "-k", os.uname().release, check=False, timeout=600)
-            if r.returncode != 0:
-                warnings.append("initramfs не обновился: %s — после перезагрузки usb-storage может "
-                                "снова взять CD модемов до hivelink" % (r.stderr or r.stdout).strip()[-200:])
+    mac = primary_mac()
+    link = common.put(ETH0_LINK, eth0_link_text(mac)) if mac else False
+    # modprobe.d, .link и правила udev initramfs-tools кладёт в образ: поменялись — пересобрать
+    if (common.put(MODPROBE, modprobe_text()) or link or any(rules)) and shutil.which("update-initramfs"):
+        log("initramfs: правила модемов и имя eth0 — в образ (минута)")
+        r = sh("update-initramfs", "-u", "-k", os.uname().release, check=False, timeout=600)
+        if r.returncode != 0:
+            warnings.append("initramfs не обновился: %s — после перезагрузки usb-storage может снова "
+                            "взять CD модемов, а модем — имя eth0" % (r.stderr or r.stdout).strip()[-200:])
     for line in apply_modems_now():
         log(line)
     if modemmanager_off():
@@ -618,7 +629,7 @@ def uninstall():
     sh("systemctl", "disable", "--now", "hivelink.timer", check=False)
     sh("systemctl", "stop", "hivelink.service", check=False)
     sh("systemctl", "disable", "hivelink-eth0.service", check=False)
-    for p in (SERVICE, TIMER, UDEV, UDEV_PORTS, UDEV_MS, ETH0_UNIT, MODPROBE):
+    for p in (SERVICE, TIMER, UDEV, UDEV_PORTS, UDEV_MS, ETH0_UNIT, MODPROBE, ETH0_LINK):
         if os.path.exists(p):
             os.unlink(p)
     if fl.get("mm_disabled"):

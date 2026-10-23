@@ -473,7 +473,7 @@ NET = os.path.join(TMP, "sysnet")
 LINKD = os.path.join(TMP, "netd")
 os.makedirs(LINKD)
 with open(os.path.join(LINKD, "10-netplan-eth0.link"), "w") as f:
-    f.write("[Match]\nMACAddress=BC:24:11:D2:F9:06\n\n[Link]\nName=eth0\nWakeOnLan=off\n")
+    f.write("[Match]\nPermanentMACAddress=BC:24:11:D2:F9:06\n\n[Link]\nName=eth0\nWakeOnLan=off\n")
 for n, mac in (("eth0", "0c:5b:8f:27:9a:64"), ("eth1", "bc:24:11:d2:f9:06"), ("eth64", "0c:5b:8f:27:9a:64")):
     os.makedirs(os.path.join(NET, n))
     with open(os.path.join(NET, n, "address"), "w") as f:
@@ -483,7 +483,10 @@ install.NETD, install.SYS_NET = (LINKD,), NET
 usb.iface_dev = lambda ifn: "/sys/bus/usb/devices/3-1.5.3.1" if ifn == "eth0" else ""
 ipcmds = []
 try:
-    check("MAC основной сетевухи — из .link netplan (имя eth0)", install.primary_mac() == "bc:24:11:d2:f9:06")
+    check("MAC основной сетевухи — из .link netplan (имя eth0; netplan пишет PermanentMACAddress)",
+          install.primary_mac() == "bc:24:11:d2:f9:06")
+    lt = install.eth0_link_text(install.primary_mac())
+    check("своё .link для initramfs: тот же MAC → eth0", "PermanentMACAddress=bc:24:11:d2:f9:06" in lt and "Name=eth0" in lt, lt)
     d = install.fix_eth0(wait=0, sleep=lambda s: None, run=lambda *c: ipcmds.append(" ".join(c)))
 finally:
     install.NETD, install.SYS_NET, usb.iface_dev = real_netd, real_sysnet, real_ifdev
