@@ -329,7 +329,8 @@ def dns_fix(target, dns=None):
     _pause()
     if target != "host":
         _srv(target)
-    return {"target": target, "dns": (dns or "1.1.1.1 8.8.8.8").split(),
+    want = (dns or "1.1.1.1 8.8.8.8").split()
+    return {"target": target, "dns": want, "want": want,
             "checked": ["github.com", "docs.google.com", "mobileproxy.space"]}
 
 

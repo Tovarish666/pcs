@@ -103,7 +103,7 @@ def host_overview():
             "hivelink": hl.get("data") if hl.get("ok") else {"installed": False, "error": hl.get("error")},
             "proxyveth": pv, "mode": pv.get("mode"), "pv_on": pv.get("on", True), "modems": pv.get("modems"), "mpspace": mp,
             "mpspace_ok": mpspace_allowed()[0], "vms": kind == "proxmox",
-            "modlink": node.modlink_info(), "dns": dnsfix.current()}
+            "modlink": node.modlink_info(), "dns": dnsfix.current(), "dns_use": dnsfix.active()}
 
 
 def mpspace_allowed():

@@ -1,7 +1,7 @@
 """pcs-node — служебная команда хаба на сервере (§9). Человеку не нужна: её зовёт хаб.
 
     pcs-node info [--wan] [--json]            версия кода, режим proxyveth, модемы, mp.space
-    pcs-node dns-fix [--dns "1.1.1.1 8.8.8.8"] [--boot] [--json]
+    pcs-node dns-fix [--dns "1.1.1.1 8.8.8.8"] [--boot|--watch] [--json]   --watch — таймер: проверить серверы
     pcs-node passwd [--json]                  пароль root — строкой со stdin
     pcs-node key [--add|--drop] [--json]      ключи root; ключ — строкой со stdin
     pcs-node ssh-port PORT [--json]           порт SSH (на Ubuntu 24.04 — через ssh.socket)
@@ -187,7 +187,7 @@ def info(wan=False, root="/", run=sh):
          "proxyveth": proxyveth_info(root, run), "mpspace": mpspace_info(root, run),
          "modlink": modlink_info(root, run),
          "hivelink": {"installed": os.path.isdir(at(root, "etc/hivelink"))},
-         "dns": dnsfix.current(root)}
+         "dns": dnsfix.current(root), "dns_use": dnsfix.active(root)}
     if wan:
         d["wan"] = wan_ip(run)
     return d
@@ -414,8 +414,15 @@ def cmd(a):
             print(json.dumps(d, ensure_ascii=False, indent=1))
         return 0, d
     if a.cmd == "dns-fix":
-        lock = util.lock("/run/pcs/dns.lock", what="правка DNS")
         try:
+            lock = util.lock("/run/pcs/dns.lock", wait=0 if a.watch else 300, what="правка DNS")
+        except util.Busy:
+            if a.watch:                      # идёт pcs dns — он сам и проверит
+                return 0, {"busy": True}
+            raise
+        try:
+            if a.watch:
+                return 0, dnsfix.watch(log=say)
             d = dnsfix.fix(dnsfix.parse_dns(a.dns) if a.dns else None, boot=a.boot, log=say)
         finally:
             lock.close()
@@ -473,6 +480,7 @@ def parser():
     p = sub.add_parser("dns-fix")
     p.add_argument("--dns")
     p.add_argument("--boot", action="store_true")
+    p.add_argument("--watch", action="store_true")
     sub.add_parser("passwd")
     p = sub.add_parser("key")
     g = p.add_mutually_exclusive_group()
