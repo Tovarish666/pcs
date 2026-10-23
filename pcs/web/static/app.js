@@ -1182,7 +1182,7 @@
             r.off
               ? ibtn("play", "включить модем на USB " + port + " (hivelink on " + port + ")", (e) => act1(e.currentTarget, "on", port, "включён"))
               : ibtn("stop", "выключить модем: отцепить от USB, и после перезагрузки тоже (hivelink off " + port + ") — например, второй модем с тем же номером",
-                (e) => { if (window.confirm("Выключить модем " + (r.n != null ? r.n + " " : "") + "на USB " + port + "? Он пропадёт из системы (и у mp.space), пока не включите обратно.")) act1(e.currentTarget, "off", port, "выключен"); }, "danger")))));
+                (e) => { if (window.confirm("Выключить модем " + (r.n != null ? r.n + " " : "") + "на USB " + port + "? Он пропадёт из системы (и у mp.space), пока не включите обратно.")) act1(e.currentTarget, "off", port, "выключен"); }, "danger"))));
       }));
       box.replaceChildren(info, el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, head), tb)));
       if (first) { first = false; stagger(tb); }
