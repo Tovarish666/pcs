@@ -175,11 +175,11 @@ check("испорченный файл — понятная ошибка, а н�
 print("конфиг 3proxy:")
 rows = [store.norm(x) for x in (
     dict(id=201, enabled=True, name="m201", login="modem201", password="pw:1", port=10000, lan_ip="192.168.201.100",
-         modem_ip="192.168.201.1", reboot_port=10001, reconnect_port=10002, interval_min=0),
+         modem_ip="192.168.201.1", reboot_port=10001, reconnect_port=10002, interval_min=0, protect=True),
     dict(id=202, enabled=True, name="m202", login="modem202", password="pw2", port=10003, lan_ip="192.168.202.100",
-         modem_ip="192.168.202.1", reboot_port=10004, reconnect_port=10005, interval_min=5),
+         modem_ip="192.168.202.1", reboot_port=10004, reconnect_port=10005, interval_min=5, protect=True),
     dict(id=203, enabled=False, name="m203", login="modem203", password="pw3", port=10006, lan_ip="192.168.203.100",
-         modem_ip="192.168.203.1", reboot_port=10007, reconnect_port=10008, interval_min=0))]
+         modem_ip="192.168.203.1", reboot_port=10007, reconnect_port=10008, interval_min=0, protect=True))]
 S0 = dict(store.SETTINGS)
 cfg = store.config3(rows, S0)
 lines3 = cfg.splitlines()
@@ -211,7 +211,10 @@ check("кавычки и $ в пароле — внутри кавычек, эк
     [store.norm(dict(rows[0], login="x", password='p"w$1'))], S0))
 
 print("защита строки (protect):")
-check("по умолчанию защита включена (и у старых строк без поля)", all(r["protect"] for r in rows))
+check("по умолчанию (с 24.10.2026) защиты нет: и у строки без поля, и у новой",
+      store.norm({k: v for k, v in rows[0].items() if k != "protect"})["protect"] is False
+      and store.add({"next_id": 1001, "proxies": []}, "192.168.9.100")["protect"] is False)
+check("заданная защита держится", all(r["protect"] for r in rows))
 dom = next((x for x in b if "mts.ru" in x), "")
 check("ЛК операторов закрыты — по имени и поддоменам, только TCP (UDP 3proxy по имени рубит весь)",
       dom.startswith("deny modem201 * ") and "*.mts.ru" in dom and ",mts.ru," in dom and "megafon.ru" in dom
@@ -844,7 +847,8 @@ check("пусто, кривой порт, повтор логина — поня
       and "логин m" in fails(store.parse_sheet, "1.2.3.4:1:m:p\n1.2.3.4:4:m:q\n"))
 cur = {"next_id": 1001, "proxies": [
     store.norm({"id": 201, "name": "modem 201", "login": "modem201", "password": "old", "port": 10000, "lan_ip": "192.168.201.100",
-                "modem_ip": "192.168.201.1", "reconnect_port": 10002, "reboot_port": 10001, "interval_min": 30}),
+                "modem_ip": "192.168.201.1", "reconnect_port": 10002, "reboot_port": 10001, "interval_min": 30,
+                "protect": True}),
     store.norm({"id": 202, "name": "modem 202", "login": "modem202", "password": "aecjeptr7e", "port": 16003,
                 "lan_ip": "192.168.202.100", "modem_ip": "192.168.202.1", "reconnect_port": 16005, "reboot_port": 16004}),
     store.norm({"id": 204, "name": "modem 204", "login": "modem204", "password": "x", "port": 10009, "lan_ip": "192.168.204.100",
@@ -916,7 +920,7 @@ finally:
 
 print("команда modlink:")
 fresh_root()
-rc, out, err = run_cli("add", "--lan-ip", "192.168.201.100", "--json")
+rc, out, err = run_cli("add", "--lan-ip", "192.168.201.100", "--protect", "--json")
 env = json.loads(out)
 check("--json: конверт ok/data, пароль скрыт", rc == 0 and env["ok"] and env["data"]["row"]["password"] is None, out)
 rc, out, err = run_cli("list", "--json", "--show-pass")
@@ -939,8 +943,10 @@ rc, out, err = run_cli("status", "--json")
 check("status --json: строки и состояния служб", rc == 0 and json.loads(out)["data"]["rows"][0]["state"] == "pending", out)
 rc, out, err = run_cli("log", "201", "--json")
 check("log --json", rc == 0 and json.loads(out)["data"] == {"id": 201, "lines": []}, out)
-rc, out, err = run_cli("add", "--lan-ip", "192.168.202.100", "--no-protect", "--json")
-check("add --no-protect — строка без защиты", rc == 0 and json.loads(out)["data"]["row"]["protect"] is False, out)
+rc, out, err = run_cli("add", "--lan-ip", "192.168.202.100", "--json")
+check("add без флага — строка без защиты (по умолчанию)", rc == 0 and json.loads(out)["data"]["row"]["protect"] is False, out)
+rc2, out2, _ = run_cli("add", "--lan-ip", "192.168.250.100", "--no-protect", "--protect", "--json")
+check("--protect и --no-protect разом — отказ", rc2 != 0, out2)
 rc, out, err = run_cli("protect", "--json")
 d = json.loads(out)["data"] if rc == 0 else {}
 check("protect без аргументов: списки и строки без защиты", d.get("off") == [202] and "mts.ru" in d.get("domains", [])

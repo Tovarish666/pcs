@@ -166,7 +166,7 @@ def norm(r):
             "reconnect_port": as_cport(r.get("reconnect_port"), "reconnect_port"),
             "reboot_port": as_cport(r.get("reboot_port", 0), "reboot_port"),
             "interval_min": as_interval(r.get("interval_min", 0)),
-            "protect": as_bool(r.get("protect", True), "protect"),
+            "protect": as_bool(r.get("protect", False), "protect"),
         }
     except Fail as e:
         raise Fail("строка %d: %s" % (rid, e))
@@ -481,7 +481,7 @@ def resolve_ports(doc, row, port, rport, bport="auto", skip_id=None, mine=()):
 
 
 def add(doc, lan_ip, name=None, login=None, password=None, port="auto", modem_ip=None,
-        reconnect_port="auto", interval_min=0, enabled=True, protect=True, reboot_port="auto"):
+        reconnect_port="auto", interval_min=0, enabled=True, protect=False, reboot_port="auto"):
     lan_ip = as_ipv4(lan_ip, "lan_ip")
     rid = new_id(doc, lan_ip)
     n = modem_n(lan_ip)
@@ -536,7 +536,7 @@ def delete(doc, rid):
     return r
 
 
-# ── защита (protect=1 у строки, так по умолчанию) ─────────────────────────
+# ── защита (protect=1 у строки; по умолчанию с 24.10.2026 — без защиты) ───
 # Мобильная сеть узнаёт абонента по IP: личный кабинет оператора, оплата с баланса,
 # подписки и веб модема открываются без пароля. Клиент прокси получил бы всё это.
 GUARD_DOMAINS = (
@@ -626,7 +626,7 @@ def config3(rows, s=None, extra=None):
     `flush` перед сервисом: правила не перетекают между портами.
 
     У любой строки закрыты частные сети, CGNAT, сам сервер (IPv6 не выйдет: выход — IPv4).
-    Защита (protect, по умолчанию вкл): сверх того сайты и ЛК операторов (по имени, которое
+    Защита (protect, по умолчанию выкл): сверх того сайты и ЛК операторов (по имени, которое
     прислал клиент), опасные порты и веб модема. Без защиты веб своего модема открыт.
     traffic=tcp — UDP ASSOCIATE запрещён. wan_ip задан — его 3proxy сообщает клиенту для UDP."""
     s = s or settings()
@@ -867,7 +867,7 @@ def import_plan(doc, specs, addrs, replace=False, how="number", skip_devs=()):
             row.update(want)
             act = "change" if changed else "same"
         else:
-            row = dict(want, id=0, name="modem %d" % modem_n(ip), modem_ip=default_modem_ip(ip), interval_min=0, protect=True)
+            row = dict(want, id=0, name="modem %d" % modem_n(ip), modem_ip=default_modem_ip(ip), interval_min=0, protect=False)
             changed, act = [], "add"
         rows.append(row)
         n = modem_n(ip)

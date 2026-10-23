@@ -898,8 +898,8 @@ def _ml(srv, a, inp):
             return dict(base, proxy="inactive", unit="legacy", panel="active")
         return dict(base, proxy="active" if on else "inactive", unit="ours")
     if cmd == "add":
-        noprot = "--no-protect" in a
-        a = [x for x in a if x != "--no-protect"]
+        prot = "--protect" in a
+        a = [x for x in a if x not in ("--protect", "--no-protect")]
         opts = dict(zip(a[1::2], a[2::2]))
         if "--lan-ip" not in opts:
             raise Fail("нужен --lan-ip")
@@ -921,7 +921,7 @@ def _ml(srv, a, inp):
                "password": _pw("gen%s%s" % (rid, time.time())) if pw == "gen" else pw,
                "port": pick("--port", ports[0]), "lan_ip": opts["--lan-ip"], "modem_ip": opts.get("--modem-ip", ""),
                "reboot_port": pick("--reboot-port", ports[1]), "reconnect_port": pick("--reconnect-port", ports[2]),
-               "interval_min": int(opts.get("--interval", 0)), "protect": not noprot}
+               "interval_min": int(opts.get("--interval", 0)), "protect": prot}
         if any(r["login"] == row["login"] for r in srv["modlink"]):
             raise Fail("логин «%s» уже есть — логины не повторяются" % row["login"])
         srv["modlink"].append(row)

@@ -840,7 +840,9 @@ def _ml_add(row):
         elif not (k == "password" or v == "auto"):
             v = _ml_val(k, v)
         a += [flag, v]
-    if row.get("protect") is False:
+    if row.get("protect") is True:
+        a.append("--protect")
+    elif row.get("protect") is False:
         a.append("--no-protect")
     return a, secret
 

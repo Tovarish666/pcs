@@ -6,7 +6,7 @@
   modlink list [--show-pass]              таблица прокси
   modlink add --lan-ip IP [--name …] [--login …] [--password …|gen|-] [--port N|auto]
               [--modem-ip IP] [--reboot-port N|auto|0] [--reconnect-port N|auto|0]
-              [--interval MIN] [--disabled] [--no-protect]
+              [--interval MIN] [--disabled] [--protect]   (по умолчанию без защиты)
   modlink set ID поле=значение …          поля: enabled name login password port lan_ip
                                           modem_ip reboot_port reconnect_port interval_min protect
   modlink del ID --yes | enable ID | disable ID
@@ -97,7 +97,9 @@ def parser():
     c.add_argument("--reboot-port", default="auto")
     c.add_argument("--interval", default="0")
     c.add_argument("--disabled", action="store_true")
-    c.add_argument("--no-protect", action="store_true")
+    g = c.add_mutually_exclusive_group()
+    g.add_argument("--protect", action="store_true")
+    g.add_argument("--no-protect", action="store_true")     # по умолчанию и так; для старых вызовов
     c = sub.add_parser("set")
     c.add_argument("id")
     c.add_argument("pairs", nargs="+")
@@ -165,7 +167,7 @@ def row_line(r, show=False):
     return "  %-5d %-4s %-14s %-6d %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
         r["id"], "да" if r["enabled"] else "нет", r["name"][:14], r["port"], r.get("reboot_port") or "—",
         r["reconnect_port"] or "—", r["lan_ip"], r["modem_ip"] or "—", r["login"][:12],
-        r["password"] if show else "••••", iv, "да" if r.get("protect", True) else "НЕТ")
+        r["password"] if show else "••••", iv, "да" if r.get("protect") else "нет")
 
 
 HEAD = "  %-5s %-4s %-14s %-6s %-6s %-7s %-16s %-15s %-12s %-14s %-5s %s" % (
@@ -192,7 +194,7 @@ def cmd_add(a):
         r = store.add(doc, a.lan_ip, name=a.name, login=a.login, password=secret(a.password),
                       port=a.port, modem_ip=a.modem_ip, reconnect_port=a.reconnect_port, reboot_port=a.reboot_port,
                       interval_min=store.as_interval(a.interval), enabled=not a.disabled,
-                      protect=not a.no_protect)
+                      protect=a.protect)
         dup = [x["id"] for x in doc["proxies"] if x["lan_ip"] == r["lan_ip"] and x["id"] != r["id"]]
         store.save(doc)
     say("  + строка %d: %s, порт %d, ребут %s, реконнект %s, логин %s" % (
@@ -305,7 +307,7 @@ def cmd_protect(a):
         doc = store.load()
         g = store.guard_lists(store.guard_extra())
         off = [r["id"] for r in doc["proxies"] if not r["protect"]]
-        say("  защита строки (по умолчанию включена) закрывает:")
+        say("  защита строки (по умолчанию выключена, включается modlink protect ID on) закрывает:")
         say("    сайты и ЛК операторов: %s" % ", ".join(g["domains"]))
         say("    порты: %s, %s" % (", ".join(map(str, g["ports"])), ", ".join(x.replace(":", "–") for x in g["port_ranges"])))
         if g["cidrs"]:
