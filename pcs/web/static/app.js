@@ -438,19 +438,25 @@
     void close;
   }
   // Опасное — только после ввода номера ВМ (как в меню).
+  // Опасное — подтвердить вводом: номер ВМ, слово host или имя присоединённого хоста.
+  // Регистр не важен: хост назвали «SpbVl-2», а хаб хранит «spbvl-2» — кнопка не должна молча стоять серой.
   function confirmNumber(title, warn, expected, actText) {
     return new Promise((resolve) => {
       let go;
-      const inp = el("input", {inputmode: "numeric", autocomplete: "off", placeholder: String(expected)});
-      inp.addEventListener("input", () => { go.disabled = inp.value.trim() !== String(expected); });
+      const want = String(expected), num = /^\d+$/.test(want);
+      const inp = el("input", {inputmode: num ? "numeric" : "text", autocomplete: "off", autocapitalize: "off",
+        spellcheck: "false", placeholder: want});
+      const same = () => inp.value.trim().toLowerCase() === want.toLowerCase();
+      inp.addEventListener("input", () => { go.disabled = !same(); });
       inp.addEventListener("keydown", (e) => { if (e.key === "Enter" && !go.disabled) go.click(); });
       let done = false;
+      const what = num ? "Введите номер ВМ " : want === "host" ? "Введите слово " : "Введите имя хоста ";
       const body = el("div", {}, el("p", {text: warn}),
-        el("label", {}, String(expected) === "host" ? "Введите слово " : "Введите номер ВМ ", el("b", {text: String(expected)}), ", чтобы подтвердить: ", inp));
+        el("label", {}, what, el("b", {text: want}), ", чтобы подтвердить: ", inp));
       const close = modal(title, body, [
         {text: "Отмена", onclick: (c) => { done = true; c(); resolve(null); }},
         {text: actText || "Подтвердить", cls: "danger solid", ref: (b) => { go = b; b.disabled = true; },
-          onclick: (c) => { done = true; c(); resolve(inp.value.trim()); }}]);
+          onclick: (c) => { done = true; c(); resolve(want); }}]);
       inp.focus();
       const obs = new MutationObserver(() => { if (!inp.isConnected) { obs.disconnect(); if (!done) resolve(null); } });
       obs.observe(document.body, {childList: true});

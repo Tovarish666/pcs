@@ -742,7 +742,7 @@ class Panel:
         return ok(r)
 
     def node_remove(self, name, query, body):
-        if str(body.get("confirm", "")).strip() != name:
+        if str(body.get("confirm", "")).strip().lower() != name:
             raise Bad("подтвердите отсоединение именем хоста (%s)" % name, 403)
         r = self.api.node_remove(name)
         self.forget()
