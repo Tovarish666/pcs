@@ -99,8 +99,22 @@ class World:
         return self.idx(cmd) >= 0
 
 
+def answers(**got):
+    """Подменённая проверка серверов: сколько из PROBES ответили; не названные — все."""
+    def probe(servers):
+        probe.asked += list(servers)
+        return {x: got.get(x.replace(".", "_"), dns.PROBES) for x in servers}
+    probe.asked = []
+    return probe
+
+
 def fix(root, w, **kw):
+    kw.setdefault("probe", answers())
     return dns.fix(root=root, run=w.run, log=lambda m: None, ensure_base=w.base, sleep=lambda s: None, **kw)
+
+
+def watch(root, w, probe):
+    return dns.watch(root=root, run=w.run, log=lambda m: None, sleep=lambda s: None, probe=probe)
 
 
 def read(root, rel):
@@ -126,6 +140,91 @@ try:
     check("не адрес — честная ошибка", False)
 except Fail as e:
     check("не адрес — честная ошибка", "google.com" in str(e), e)
+
+print("проверка сервера запросами:")
+pkt = dns.query_packet("github.com", 0x1234)
+check("запрос A: id, RD, один вопрос, имя метками", pkt[:6] == b"\x12\x34\x01\x00\x00\x01"
+      and b"\x06github\x03com\x00\x00\x01\x00\x01" in pkt, pkt)
+check("ответ NOERROR на наш id — сервер жив", dns.answered(b"\x12\x34\x81\x80" + b"\0" * 8, 0x1234))
+check("NXDOMAIN — тоже ответ", dns.answered(b"\x12\x34\x81\x83" + b"\0" * 8, 0x1234))
+check("SERVFAIL, чужой id, запрос вместо ответа, обрывок — нет",
+      not dns.answered(b"\x12\x34\x81\x82" + b"\0" * 8, 0x1234)
+      and not dns.answered(b"\x43\x21\x81\x80" + b"\0" * 8, 0x1234)
+      and not dns.answered(b"\x12\x34\x01\x00" + b"\0" * 8, 0x1234) and not dns.answered(b"\x12\x34", 0x1234))
+
+
+class Sock:
+    """UDP-сокет понарошку: отвечает по сценарию на последний отправленный запрос."""
+
+    def __init__(self, replies):
+        self.replies, self.sent, self.closed = list(replies), [], False
+
+    def __call__(self, fam, kind):
+        self.fam = fam
+        return self
+
+    def settimeout(self, t):
+        self.timeout = t
+
+    def sendto(self, data, addr):
+        self.sent.append((data, addr))
+
+    def close(self):
+        self.closed = True
+
+    def recvfrom(self, n):
+        if not self.replies:
+            raise OSError("timed out")
+        qid = self.sent[-1][0][:2]
+        kind = self.replies.pop(0)
+        if kind == "ok":
+            return qid + b"\x81\x80" + b"\0" * 8, None
+        return b"\xff\xff\x81\x80" + b"\0" * 8, None     # чужой ответ (опоздавший)
+
+
+sk = Sock(["ok"])
+check("ответил — True, запрос на 53 порт, сокет закрыт", dns.ask("9.9.9.9", "github.com", sock=sk)
+      and sk.sent[0][1] == ("9.9.9.9", 53) and sk.closed)
+sk = Sock(["late", "ok"])
+check("чужой ответ пропускается, ждём свой", dns.ask("9.9.9.9", "github.com", sock=sk))
+check("тишина — False", not dns.ask("1.1.1.1", "github.com", sock=Sock([])))
+import socket as _socket  # noqa: E402
+sk = Sock(["ok"])
+dns.ask("2606:4700:4700::1111", "github.com", sock=sk)
+check("IPv6-сервер — IPv6-сокет", sk.fam == _socket.AF_INET6)
+seen = []
+score = dns.probe(["1.1.1.1", "9.9.9.9", "1.1.1.1"], n=6,
+                  ask=lambda srv, name: seen.append((srv, name)) or (srv == "9.9.9.9" or name == "github.com"))
+check("баллы: сколько из 6 ответили, повтор сервера — один раз", score == {"1.1.1.1": 2, "9.9.9.9": 6}, score)
+check("имена по кругу из HOSTS", {n for _, n in seen} == set(dns.HOSTS), seen)
+
+print("выбор серверов:")
+use, sc = dns.choose(["1.1.1.1", "8.8.8.8"], probe=answers())
+check("все отвечают — заданные как есть", use == ["1.1.1.1", "8.8.8.8"])
+pr = answers(**{"1_1_1_1": 6})
+use, sc = dns.choose(["1.1.1.1", "8.8.8.8"], probe=pr)
+check("теряющий 1.1.1.1 (6/10) заменён первым рабочим из запаса", use == ["8.8.8.8", "9.9.9.9"], use)
+check("запас проверяется, только когда нужен", dns.choose(["9.9.9.9"], probe=answers())[0] == ["9.9.9.9"])
+pr = answers(**{"1_1_1_1": 3, "8_8_8_8": 4, "9_9_9_9": 0})
+use, sc = dns.choose(["1.1.1.1", "8.8.8.8"], probe=pr)
+check("оба теряют, 9.9.9.9 молчит — следующие из запаса", use == ["77.88.8.8", "1.0.0.1"], use)
+nobody = lambda servers: {x: 0 for x in servers}  # noqa: E731
+check("не ответил никто (сети нет) — заданные: хуже не делать",
+      dns.choose(["1.1.1.1", "8.8.8.8"], probe=nobody)[0] == ["1.1.1.1", "8.8.8.8"])
+use, _ = dns.choose(["1.1.1.1"], probe=lambda servers: {x: (dns.PROBES if x == "192.168.88.1" else 0) for x in servers},
+                    extra=("192.168.88.1",))
+check("молчит весь интернет-DNS — роутер последним запасным", use == ["192.168.88.1"], use)
+pr = answers(**{"1_1_1_1": dns.PROBE_OK})
+use, _ = dns.choose(["1.1.1.1", "8.8.8.8"], now=["9.9.9.9", "8.8.8.8"], probe=pr)
+check("заменённый вернётся, только если ответил на всё (9/10 мало)", use == ["8.8.8.8", "9.9.9.9"], use)
+use, _ = dns.choose(["1.1.1.1", "8.8.8.8"], now=["1.1.1.1", "8.8.8.8"], probe=pr)
+check("стоящий сейчас 9/10 — остаётся (без дребезга)", use == ["1.1.1.1", "8.8.8.8"], use)
+check("журнал: кто и сколько ответил", dns.lossy(["1.1.1.1", "8.8.8.8"], ["8.8.8.8", "9.9.9.9"],
+                                                {"1.1.1.1": 6}) == "1.1.1.1 (6/10)")
+gw = types.SimpleNamespace(returncode=0, stderr="", stdout="default via 192.168.4.1 dev eth12 metric 104\n"
+                           "default via 192.168.88.1 dev eth0 proto dhcp src 192.168.88.21 metric 100\n")
+check("шлюз — с меньшей метрикой (модемы mp.space тоже в main)", dns.gateway(lambda *c, **k: gw) == "192.168.88.1")
+check("шлюза нет — None", dns.gateway(lambda *c, **k: types.SimpleNamespace(stdout="")) is None)
 
 print("сервер Ubuntu (resolved + netplan, DHCP):")
 root = mkroot()
@@ -158,6 +257,10 @@ check("остаток DNS от DHCP на eth0 снят", w.has(("resolvectl", "r
 check("DNS модема на его интерфейсе не трогаем", not w.has(("resolvectl", "revert", "eth201")))
 check("pcs-dns.service при загрузке", "dns-fix --boot" in read(root, dns.UNIT)
       and w.has(("systemctl", "enable", "pcs-dns.service")))
+check("таймер перепроверки: раз в 10 минут dns-fix --watch", "dns-fix --watch" in read(root, dns.CHECK_UNIT)
+      and "OnUnitActiveSec=10min" in read(root, dns.TIMER)
+      and w.has(("systemctl", "enable", "--now", "pcs-dns-check.timer")))
+check("все заданные отвечают — без строки PCS-WANT", dns.WANT not in conf and res["dns"] == res["want"])
 check("проверка имён", res["ok"] and set(res["check"]) == set(dns.HOSTS) and all(res["check"].values()), res)
 check("сводка: что поменялось", "/" + dns.NETPLAN in res["changed"] and res["netplan"] == "применён", res)
 
@@ -176,6 +279,42 @@ w4 = World()
 res = fix(root, w4, boot=True)
 check("при загрузке берутся запомненные DNS, юнит не переписывается", res["dns"] == ["9.9.9.9"]
       and not w4.has(("systemctl", "enable", "pcs-dns.service")))
+shutil.rmtree(root)
+
+print("теряющий запросы DNS (у провайдера 1.1.1.1 и 8.8.8.8 по UDP теряются):")
+root = mkroot()
+w = World()
+logs = []
+res = dns.fix(root=root, run=w.run, log=logs.append, ensure_base=w.base, sleep=lambda s: None,
+              probe=answers(**{"1_1_1_1": 6, "8_8_8_8": 7}))
+conf = read(root, dns.RESOLVED)
+check("стоят рабочие из запаса", "DNS=9.9.9.9 77.88.8.8\n" in conf and res["dns"] == ["9.9.9.9", "77.88.8.8"], conf)
+check("заданные запомнены (PCS-WANT) — current их и отдаёт", dns.current(root) == ["1.1.1.1", "8.8.8.8"]
+      and dns.active(root) == ["9.9.9.9", "77.88.8.8"])
+check("в журнале — кто терял и сколько ответил", any("1.1.1.1 (6/10), 8.8.8.8 (7/10)" in m for m in logs), logs)
+check("сводка: заданные и баллы", res["want"] == ["1.1.1.1", "8.8.8.8"] and res["probe"]["1.1.1.1"] == 6, res)
+w = World()
+res = watch(root, w, answers(**{"1_1_1_1": dns.PROBES, "8_8_8_8": dns.PROBE_OK}))
+check("таймер: 8.8.8.8 ответил 9/10 — мало, чтобы вернуть; 1.1.1.1 вернулся",
+      res["dns"] == ["1.1.1.1", "9.9.9.9"] and "DNS=1.1.1.1 9.9.9.9\n" in read(root, dns.RESOLVED)
+      and w.has(("systemctl", "restart", "systemd-resolved")), (res, read(root, dns.RESOLVED)))
+w = World()
+res = watch(root, w, answers(**{"8_8_8_8": dns.PROBE_OK}))
+check("таймер: ничего не поменялось — resolved не трогаем (только смотрим шлюз)", res["changed"] == []
+      and all(c[0] == "ip" for c in w.calls), (res, w.calls))
+w = World()
+watch(root, w, answers())
+check("таймер: всё отвечает — заданные на месте, PCS-WANT убран", "DNS=1.1.1.1 8.8.8.8\n" in read(root, dns.RESOLVED)
+      and dns.WANT not in read(root, dns.RESOLVED))
+w = World()
+res = fix(root, w, dns=["8.8.8.8"], probe=answers(**{"8_8_8_8": dns.PROBE_OK}))
+check("новые DNS руками: 9/10 хватает (порог для стоящих)", res["dns"] == ["8.8.8.8"], res)
+shutil.rmtree(root)
+root = mkroot()
+w = World()
+res = watch(root, w, answers(**{"1_1_1_1": 0}))
+check("таймер там, где pcs dns не запускали, — не наше дело", res["mode"] is None and not w.calls
+      and not os.path.exists(os.path.join(root, dns.RESOLVED)), res)
 shutil.rmtree(root)
 
 print("netplan не принял drop-in:")
@@ -248,6 +387,15 @@ check("resolved и netplan не трогаем", not w.has(("systemctl", "restar
       and not w.has(("netplan", "generate")) and not os.path.exists(os.path.join(root, dns.RESOLVED)), w.calls)
 check("сводка хоста", res["mode"] == "resolv.conf" and res["ok"], res)
 check("DNS хоста запомнены в resolv.conf", dns.current(root) == ["1.1.1.1", "8.8.8.8"])
+w = World()
+res = watch(root, w, answers(**{"1_1_1_1": 2}))
+rc2 = read(root, "etc/resolv.conf")
+check("хост: теряющий заменён прямо в resolv.conf, search и options на месте",
+      "nameserver 8.8.8.8\nnameserver 9.9.9.9" in rc2 and dns.WANT + " 1.1.1.1 8.8.8.8" in rc2
+      and "search example.lan" in rc2 and "options edns0" in rc2 and not w.has(("systemctl", "restart", "systemd-resolved")), rc2)
+check("хост: заданные помнятся", dns.current(root) == ["1.1.1.1", "8.8.8.8"] and dns.active(root) == ["8.8.8.8", "9.9.9.9"])
+watch(root, World(), answers())
+check("хост: заработал — вернулся тот же файл", read(root, "etc/resolv.conf") == rc)
 w = World()
 fix(root, w)
 check("повтор не плодит бэкапов и не меняет файл", read(root, "etc/resolv.conf") == rc)

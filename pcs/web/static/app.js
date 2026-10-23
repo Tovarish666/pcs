@@ -2464,6 +2464,13 @@
     };
   }
 
+  // Итог «Починить DNS»: что стоит; заданные, но теряющие запросы, — чем заменены.
+  function dnsDone(d) {
+    const use = (d && d.dns) || [], want = (d && d.want) || [];
+    const lost = want.filter((x) => !use.includes(x));
+    return "DNS: " + use.join(" ") + (lost.length ? " — " + lost.join(" ") + " теряют запросы, заменены" : "");
+  }
+
   // ── вкладка «настройка и управление» ─────────────────────────────────────
   function setTab(X, id) {
     const T = "/api/targets/" + id;
@@ -2471,8 +2478,8 @@
     const facts = el("div", {class: "facts"}, el("span", {class: "skel", style: "width:320px"}));
     const fact = (list) => facts.replaceChildren(...list.filter(Boolean).map((t) => el("span", {text: t})));
     const dns = el("input", {placeholder: "1.1.1.1 8.8.8.8 (необязательно)"});
-    const rDns = actRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space", dns,
-      btn("Починить", (e) => act(e.target, rDns.res, () => POST(T + "/dns", {dns: dns.value}), "Применено")));
+    const rDns = actRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space; теряющий запросы сервер — заменить рабочим", dns,
+      btn("Починить", (e) => act(e.target, rDns.res, () => POST(T + "/dns", {dns: dns.value}), dnsDone)));
     const pw = el("input", {type: "password", autocomplete: "new-password", placeholder: "новый пароль root"});
     const rPw = actRow("Пароль root", H ? "пароль root этого хоста (вход по SSH)" : "пароль root этой ВМ (вход по SSH и в консоль Proxmox)", pw,
       btn("Сохранить", async (e) => {

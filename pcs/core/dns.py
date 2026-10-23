@@ -10,13 +10,22 @@ resolved всё равно переписывал своё, а скрипты, �
 серверы пишутся прямо в /etc/resolv.conf (так же делает сам Proxmox), строки
 search/domain/options сохраняются.
 
+Заданные серверы сначала проверяются (§12.4): у части провайдеров 1.1.1.1 и 8.8.8.8
+по UDP теряют до половины запросов — имена ищутся секундами, и всё, что ждёт
+коротко (проверка IP после реконнекта mp.space — 5 с), отваливается. Такой сервер
+заменяется рабочим из запаса; таймер pcs-dns-check раз в 10 минут проверяет снова.
+
 Все пути — от root, команды — через run: так проверяется на временном корне.
 """
 import ipaddress
 import json
 import os
+import random
 import re
+import socket
+import struct
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from .util import Fail, sh
 
@@ -32,8 +41,17 @@ NETPLAN_DIR = "etc/netplan"
 NETPLAN = "etc/netplan/99-pcs-dns.yaml"
 RESOLV = "etc/resolv.conf"
 UNIT = "etc/systemd/system/pcs-dns.service"
+CHECK_UNIT = "etc/systemd/system/pcs-dns-check.service"
+TIMER = "etc/systemd/system/pcs-dns-check.timer"
 DEVICES = ("ethernets", "bonds", "bridges", "vlans")     # там, где бывает DHCP
 MARK = "# PCS:"
+WANT = "# PCS-WANT:"                # заданные серверы, когда вместо части из них стоят запасные
+
+# запас на замену теряющим: разные сети и операторы, чтобы не упасть всем сразу
+RESERVE = ("9.9.9.9", "77.88.8.8", "1.0.0.1", "8.8.4.4", "149.112.112.112", "77.88.8.1")
+PROBES = 10         # запросов к каждому серверу
+PROBE_OK = 9        # столько должно ответить; вернуть заданный сервер на место — все PROBES
+PROBE_TIMEOUT = 1.5
 
 UNIT_TEXT = """[Unit]
 Description=PCS: DNS машины — свои серверы, DNS от DHCP не берём (pcs dns)
@@ -47,6 +65,27 @@ ExecStart=%s dns-fix --boot
 [Install]
 WantedBy=multi-user.target
 """ % NODE
+
+CHECK_TEXT = """[Unit]
+Description=PCS: проверка DNS — теряющий запросы сервер заменить рабочим (pcs dns)
+After=network-online.target systemd-resolved.service
+
+[Service]
+Type=oneshot
+ExecStart=%s dns-fix --watch
+""" % NODE
+
+TIMER_TEXT = """[Unit]
+Description=PCS: проверка DNS раз в 10 минут (pcs dns)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
+"""
 
 
 def at(root, rel):
@@ -84,23 +123,142 @@ def _raw(path):
         return None
 
 
-def current(root="/"):
-    """DNS, заданные раньше (наш drop-in или наш resolv.conf), иначе DEFAULT."""
-    m = re.search(r"^DNS=(.+)$", _raw(at(root, RESOLVED)) or "", re.M)
-    if m and m.group(1).split():
-        return m.group(1).split()
+def _ours(root):
+    """Текст нашего файла с DNS: drop-in resolved или resolv.conf, который писали мы."""
+    text = _raw(at(root, RESOLVED))
+    if text is not None:
+        return text, "resolved"
     text = _raw(at(root, RESOLV)) or ""
     if not os.path.islink(at(root, RESOLV)) and text.startswith(MARK):
-        ns = re.findall(r"^nameserver\s+(\S+)", text, re.M)
-        if ns:
-            return ns
-    return list(DEFAULT)
+        return text, "resolv.conf"
+    return "", None
 
 
-def resolved_text(dns):
+def active(root="/"):
+    """DNS, которые стоят сейчас (с заменой теряющих), иначе DEFAULT."""
+    text, kind = _ours(root)
+    if kind == "resolved":
+        m = re.search(r"^DNS=(.+)$", text, re.M)
+        found = m.group(1).split() if m else []
+    else:
+        found = re.findall(r"^nameserver\s+(\S+)", text, re.M)
+    return found or list(DEFAULT)
+
+
+def current(root="/"):
+    """DNS, заданные раньше (pcs dns --dns или по умолчанию), иначе DEFAULT.
+    Замена теряющего сервера запасным их не меняет: заработает — вернётся."""
+    m = re.search(r"^%s\s*(.+)$" % re.escape(WANT), _ours(root)[0], re.M)
+    if m and m.group(1).split():
+        return m.group(1).split()
+    return active(root)
+
+
+def _want_line(dns, want):
+    if not want or list(want) == list(dns):
+        return ""
+    return "%s %s\n" % (WANT, " ".join(want))
+
+
+def resolved_text(dns, want=None):
     return ("%s DNS машины (pcs dns). DNS от DHCP не берём — см. /etc/netplan/99-pcs-dns.yaml\n"
-            "[Resolve]\nDNS=%s\nFallbackDNS=%s\nDomains=~.\nDNSStubListener=yes\n"
-            "DNSSEC=no\nDNSOverTLS=no\nCache=yes\n" % (MARK, " ".join(dns), FALLBACK))
+            "%s[Resolve]\nDNS=%s\nFallbackDNS=%s\nDomains=~.\nDNSStubListener=yes\n"
+            "DNSSEC=no\nDNSOverTLS=no\nCache=yes\n" % (MARK, _want_line(dns, want), " ".join(dns), FALLBACK))
+
+
+# ── здоровье серверов: отвечает ли сервер, не теряет ли запросы ────────────
+def query_packet(name, qid):
+    """Запрос A для name — ровно то, что шлёт resolved."""
+    qname = b"".join(bytes([len(p)]) + p.encode("ascii") for p in name.rstrip(".").split("."))
+    return struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + qname + b"\0" + struct.pack(">HH", 1, 1)
+
+
+def answered(data, qid):
+    """Ответ на наш запрос: тот же id, флаг ответа, NOERROR или NXDOMAIN (сервер жив)."""
+    if len(data) < 12:
+        return False
+    rid, flags = struct.unpack(">HH", data[:4])
+    return rid == qid and bool(flags & 0x8000) and (flags & 0xF) in (0, 3)
+
+
+def ask(server, name, timeout=PROBE_TIMEOUT, sock=socket.socket, clock=time.monotonic):
+    """Один запрос по UDP. → True, если сервер ответил вовремя."""
+    qid = random.randrange(1 << 16)
+    try:
+        s = sock(socket.AF_INET6 if ":" in server else socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return False
+    try:
+        end = clock() + timeout
+        s.settimeout(timeout)
+        s.sendto(query_packet(name, qid), (server, 53))
+        while True:
+            data = s.recvfrom(4096)[0]
+            if answered(data, qid):
+                return True
+            left = end - clock()
+            if left <= 0:
+                return False
+            s.settimeout(left)
+    except OSError:                          # и таймаут: socket.timeout — тоже OSError
+        return False
+    finally:
+        s.close()
+
+
+def probe(servers, names=HOSTS, n=PROBES, ask=ask):
+    """{сервер: сколько из n запросов получили ответ}. Серверы — параллельно, к одному — подряд."""
+    servers = list(dict.fromkeys(servers))
+    if not servers:
+        return {}
+
+    def one(srv):
+        return sum(1 for i in range(n) if ask(srv, names[i % len(names)]))
+    with ThreadPoolExecutor(max_workers=len(servers)) as ex:
+        return dict(zip(servers, ex.map(one, servers)))
+
+
+def gateway(run=sh):
+    """Шлюз по умолчанию (меньшая метрика) — роутер часто сам DNS. Последний запасной."""
+    out = run("ip", "-4", "route", "show", "default", check=False).stdout or ""
+    best = None
+    for line in out.splitlines():
+        m = re.search(r"\bvia\s+(\S+)", line)
+        if not m:
+            continue
+        mm = re.search(r"\bmetric\s+(\d+)", line)
+        metric = int(mm.group(1)) if mm else 0
+        if best is None or metric < best[0]:
+            best = (metric, m.group(1))
+    return best[1] if best else None
+
+
+def choose(want, now=None, probe=probe, extra=()):
+    """Какие DNS ставить. Заданные отвечают — они. Теряющий запросы — заменить рабочим из запаса.
+    Не ответил никто (сети нет, ранняя загрузка) — заданные: хуже не делать.
+    now — что стоит сейчас: заданный сервер, который уже заменён, вернётся, только если ответил на всё.
+    → (список, {сервер: ответов из PROBES})."""
+    want, now = list(want), list(now or want)
+
+    def good(x, score):
+        return score.get(x, 0) >= (PROBE_OK if x in now else PROBES)
+    score = probe(want)
+    use = [x for x in want if good(x, score)]
+    if len(use) == len(want):
+        return use, score
+    spare = [x for x in list(RESERVE) + [e for e in extra if e] if x not in want]
+    score.update(probe(spare))
+    for x in spare:
+        if len(use) >= len(want):
+            break
+        if good(x, score):
+            use.append(x)
+    return (use or want), score
+
+
+def lossy(want, use, score):
+    """«1.1.1.1 (6/10)» — для журнала: какие заданные заменены и сколько ответили."""
+    return ", ".join("%s (%d/%d)" % (x, score.get(x, 0), PROBES) for x in want if x not in use)
 
 
 # ── netplan: без PyYAML (на хосте его может не быть) ───────────────────────
@@ -272,20 +430,31 @@ def foreign(out, dns, dhcp):
     return bad
 
 
-def resolv_text(dns, old):
+def resolv_text(dns, old, want=None):
     keep = [ln for ln in (old or "").splitlines()
             if re.match(r"^\s*(search|domain|options)\s", ln)]
-    return "\n".join(["%s DNS хоста (pcs dns --host). Свои серверы, без systemd-resolved." % MARK]
-                     + keep + ["nameserver %s" % x for x in dns[:3]]) + "\n"
+    head = ["%s DNS хоста (pcs dns --host). Свои серверы, без systemd-resolved." % MARK]
+    head += [_want_line(dns, want).rstrip("\n")] if _want_line(dns, want) else []
+    return "\n".join(head + keep + ["nameserver %s" % x for x in dns[:3]]) + "\n"
 
 
 # ── сам фикс ───────────────────────────────────────────────────────────────
-def fix(dns=None, root="/", run=sh, log=print, boot=False, ensure_base=None, sleep=time.sleep, tries=None):
+def pick(want, root, run, log, probe, fresh=False):
+    """Проверить заданные серверы и выбрать, какие ставить (§12.4). → (список, баллы)."""
+    use, score = choose(want, None if fresh else active(root), probe, extra=(gateway(run),))
+    if use != want:
+        log("⚠ DNS %s теряют запросы — вместо них %s" % (lossy(want, use, score), " ".join(x for x in use if x not in want)))
+    return use, score
+
+
+def fix(dns=None, root="/", run=sh, log=print, boot=False, ensure_base=None, sleep=time.sleep, tries=None,
+        probe=probe):
     """Привести DNS машины в порядок (§12). Идемпотентно. → сводка; ошибка — Fail."""
-    dns = list(dns) if dns else current(root)
-    for x in dns:
+    want = list(dns) if dns else current(root)
+    for x in want:
         parse_dns(x)
-    res = {"dns": dns, "mode": "resolved" if has_resolved(root) else "resolv.conf",
+    dns, score = pick(want, root, run, log, probe, fresh=bool(dns))
+    res = {"dns": dns, "want": want, "probe": score, "mode": "resolved" if has_resolved(root) else "resolv.conf",
            "changed": [], "netplan": "нет", "foreign": [], "check": {}}
     resolv = at(root, RESOLV)
     # 0. наследие старых версий: immutable resolv.conf
@@ -295,7 +464,7 @@ def fix(dns=None, root="/", run=sh, log=print, boot=False, ensure_base=None, sle
     dhcp = set()
     if res["mode"] == "resolved":
         # 1. наши серверы; Domains=~. — маршрут по умолчанию для всех имён
-        if put(at(root, RESOLVED), resolved_text(dns)):
+        if put(at(root, RESOLVED), resolved_text(dns, want)):
             res["changed"].append("/" + RESOLVED)
         # 2–3. netplan: DNS от DHCP не брать — только там, где DHCP включён
         if has_netplan(root):
@@ -322,15 +491,18 @@ def fix(dns=None, root="/", run=sh, log=print, boot=False, ensure_base=None, sle
         old = _raw(resolv) if not os.path.islink(resolv) else None
         if old is not None and not old.startswith(MARK) and not os.path.exists(resolv + ".pcs-bak"):
             put(resolv + ".pcs-bak", old)
-        if put(resolv, resolv_text(dns, old)):
+        if put(resolv, resolv_text(dns, old, want)):
             res["changed"].append("/" + RESOLV)
 
-    # 6. то же при каждой загрузке
-    if not boot and put(at(root, UNIT), UNIT_TEXT):
-        res["changed"].append("/" + UNIT)
-        run("systemctl", "daemon-reload", check=False)
+    # 6. то же при каждой загрузке; таймер — перепроверка серверов (§12.4)
     if not boot:
+        units = [rel for rel, text in ((UNIT, UNIT_TEXT), (CHECK_UNIT, CHECK_TEXT), (TIMER, TIMER_TEXT))
+                 if put(at(root, rel), text)]
+        res["changed"] += ["/" + rel for rel in units]
+        if units:
+            run("systemctl", "daemon-reload", check=False)
         run("systemctl", "enable", "pcs-dns.service", check=False)
+        run("systemctl", "enable", "--now", "pcs-dns-check.timer", check=False)
 
     # 5. проверка — без неё «починили» ничего не значит
     tries = tries or (15 if boot else 4)
@@ -360,6 +532,32 @@ def fix(dns=None, root="/", run=sh, log=print, boot=False, ensure_base=None, sle
         raise Fail("DNS не в порядке: %s%s. Проверь, открыт ли выход на %s по 53 порту"
                    % ("; ".join(why), (" (resolvectl: %s)" % brief) if brief else "", " ".join(dns)))
     res["ok"] = True
+    return res
+
+
+def watch(root="/", run=sh, log=print, sleep=time.sleep, probe=probe):
+    """pcs-dns-check.timer: заданный сервер начал терять запросы — заменить, снова отвечает — вернуть.
+    Не поменялось ничего — ничего и не трогать: resolved не перезапускается зря."""
+    text, kind = _ours(root)
+    want = current(root)
+    res = {"dns": active(root), "want": want, "changed": [], "mode": kind}
+    if kind is None:                         # pcs dns здесь не запускали — не наш DNS
+        return res
+    use, res["probe"] = pick(want, root, run, lambda m: None, probe)
+    if use == res["dns"]:
+        return res
+    if kind == "resolved":
+        changed = put(at(root, RESOLVED), resolved_text(use, want))
+    else:
+        changed = put(at(root, RESOLV), resolv_text(use, text, want))
+    if changed:
+        res["changed"].append("/" + (RESOLVED if kind == "resolved" else RESOLV))
+        if kind == "resolved":
+            run("systemctl", "restart", "systemd-resolved", check=False)
+            sleep(1)
+        why = lossy(want, use, res["probe"])
+        log("DNS: %s → %s%s" % (" ".join(res["dns"]), " ".join(use), (" — теряют запросы: " + why) if why else ""))
+    res["dns"] = use
     return res
 
 

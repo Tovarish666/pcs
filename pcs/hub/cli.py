@@ -434,6 +434,9 @@ def c_dns(a):
         ui.info("изменён %s" % f)
     for f in d.get("foreign") or []:
         ui.info("снят чужой DNS %s" % f)
+    if d.get("want") and d["want"] != d["dns"]:
+        ui.warn("заданные %s теряют запросы — стоят %s; таймер pcs-dns-check вернёт их, когда заработают"
+                % (" ".join(d["want"]), " ".join(d["dns"])))
     ui.ok("DNS в порядке: %s (%s)" % (" ".join(d["dns"]), d.get("mode")))
     return 0, d
 
