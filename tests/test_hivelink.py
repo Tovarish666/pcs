@@ -797,6 +797,16 @@ try:
     check("ожил — состояние зависания забыто", not any(k in st["heal"]["7"] for k in ("dead", "dboot", "ddev")), st["heal"])
     calls, _ = runs({"conn": 902, "radio": None}, [0, 60, 180], m=md)
     check("прошивка не говорит про радиочасть — обычная лестница", calls[0] == ["dial1"], calls)
+    calls, st = runs(hung, [0, 100], m=md)
+    check("в состоянии зависшего — только числа", all(isinstance(v, (int, float)) for v in st["heal"]["7"].values()), st)
+    st["heal"]["8"] = {"old": "строка"}
+    real_sh_h, driver.sh = driver.sh, lambda *a, **k: types.SimpleNamespace(stdout="", stderr="", returncode=0)
+    try:
+        with redirect_stdout(io.StringIO()):
+            driver.step_hilink(conf_l, st, [], {})
+        check("уборка состояния не падает на нечисловом значении (шаг HiLink падал для всех модемов)", "8" not in st["heal"])
+    finally:
+        driver.sh = real_sh_h
 finally:
     hilink.Api, hilink.reach, driver.pause, usb.reenumerate = real_hl
     usb.power_cycle = real_pc

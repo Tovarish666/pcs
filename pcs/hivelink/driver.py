@@ -467,7 +467,7 @@ def radio_heal(m, api, conf, st, h, now):
     h.setdefault("dead", now)
     if now - h["dead"] < conf["radio_grace"]:
         return True                     # только загрузился — радиочасть поднимается
-    devnum = usb.attr(m["dev"], "devnum")
+    devnum = int(usb.attr(m["dev"], "devnum") or 0)    # в состоянии — только числа (уборка их сравнивает)
     if "dboot" not in h or now - h["dboot"] >= conf["heal_reboot_every"]:
         log("N=%d: модем завис (SIM не видна, IMEI пуст) %s — перезагружаю" % (n, _mins(now - h["dead"])))
         h["dboot"], h["ddev"] = now, devnum
@@ -596,7 +596,8 @@ def step_hilink(conf, st, mods, w):
     now = int(time.time())
     # состояние модема, которого давно нет, — забыть (перезагрузка — это минута-две без модема)
     keep = 2 * max(conf["heal_reboot_every"], conf["api_reenum_every"])
-    for k in [k for k, h in st["heal"].items() if not isinstance(h, dict) or max([0] + list(h.values())) < now - keep]:
+    for k in [k for k, h in st["heal"].items() if not isinstance(h, dict)
+              or max([0] + [v for v in h.values() if isinstance(v, (int, float))]) < now - keep]:
         st["heal"].pop(k, None)
     if not targets:
         return
