@@ -20,6 +20,9 @@ Zero-CD → USB-конфигурация с rndis_host → DHCP → маршру
   hivelink reset N            заново подключить USB-устройство модема N
   hivelink recfg N            забыть выученную USB-конфигурацию модема и подобрать заново
   hivelink dataon N|--all     включить мобильные данные
+  hivelink off ПОРТ|ethN|N    выключить модем: отцепить от USB (authorized=0), и после перезагрузки
+                              тоже — например, второй модем с тем же N; без аргумента — список
+  hivelink on ПОРТ            включить выключенный
 
   N — номер модема (модем 192.168.N.1, машина 192.168.N.100); у reset и recfg можно
   USB-порт (3-1.4.2) — для модема, который до адреса не дошёл. --json — у всех команд.
@@ -190,6 +193,56 @@ def cmd_dataon(args):
     return 0, {"done": done, "failed": failed}
 
 
+def off_target(arg, c):
+    """Модем для off: USB-порт, интерфейс или N. Два модема с одним N — только по порту."""
+    mods, _ = driver.modems(c)
+    if re.fullmatch(r"\d+", arg or ""):
+        same = [m for m in mods if m["n"] == int(arg)]
+        if len(same) > 1:
+            raise Fail("у N=%s модемов %d: %s — укажи порт: hivelink off ПОРТ"
+                       % (arg, len(same), ", ".join("%s (%s)" % (m["port"], m["iface"]) for m in same)))
+    if re.fullmatch(r"(eth|enx|wwan|usb)[\w-]*", arg or ""):
+        m = next((m for m in mods if m["iface"] == arg), None)
+        if not m:
+            raise Fail("%s — не интерфейс настоящего модема (hivelink status)" % arg)
+        return m
+    return target(arg, c)
+
+
+def cmd_off(args):
+    need_root()
+    off = common.load_off()
+    if not args:
+        say("\n".join("  %s%s" % (p, " — был %s" % v.get("was") if v.get("was") else "") for p, v in sorted(off.items()))
+            or "  выключенных модемов нет")
+        return 0, {"off": off}
+    m = off_target(one_arg(args, "off"), conf())
+    p = m["port"]
+    was = ", ".join(x for x in ("N=%d" % m["n"] if m["n"] else "", m["iface"] or "") if x)
+    with held():
+        off[p] = {"t": int(time.time()), "was": was}
+        common.save_off(off)
+        usb.set_authorized(m["dev"], False)
+    log("%s: модем выключен%s — отцеплен от USB; включить: hivelink on %s" % (p, " (%s)" % was if was else "", p))
+    return 0, {"usb_port": p, "was": was, "off": True}
+
+
+def cmd_on(args):
+    need_root()
+    arg = one_arg(args, "on")
+    off = common.load_off()
+    d = next((x for x in usb.devices() if usb.port(x) == arg), None)
+    if arg not in off and not (d and not usb.authorized(d)):
+        raise Fail("модем на порту %s не выключен — выключенные: %s" % (arg, ", ".join(sorted(off)) or "нет"))
+    with held():
+        off.pop(arg, None)
+        common.save_off(off)
+        if d:
+            usb.set_authorized(d, True)
+    log("%s: модем включён%s" % (arg, "" if d else " (сейчас его на USB нет — подключится, когда появится)"))
+    return 0, {"usb_port": arg, "off": False, "present": bool(d)}
+
+
 def cmd_run(args):
     """Служебное: один проход драйвера (зовут hivelink.service, udev и таймер)."""
     need_root()
@@ -210,7 +263,7 @@ def cmd_eth0(args):
 
 CMDS = {"install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status, "doctor": cmd_doctor,
         "reconnect": cmd_reconnect, "reset": cmd_reset, "recfg": cmd_recfg, "dataon": cmd_dataon,
-        "run": cmd_run, "eth0": cmd_eth0}
+        "run": cmd_run, "eth0": cmd_eth0, "off": cmd_off, "on": cmd_on}
 
 
 def main(argv=None):

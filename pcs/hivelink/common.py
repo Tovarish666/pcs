@@ -9,6 +9,9 @@ from ..core.util import Fail, Log, jload, jsave, rd, sh, wr
 PART = "hivelink"
 ETC = "/etc/hivelink"
 CONF = ETC + "/config.json"
+# Выключенные модемы по USB-порту (hivelink off): два модема с одним N мешают друг другу —
+# лишний отцепляется от USB (authorized=0) и не возвращается после перезагрузки.
+OFF = ETC + "/off.json"
 VAR = "/var/lib/hivelink"
 CONFMAP = VAR + "/confmap.json"     # модель → USB-конфигурация, дающая нужный драйвер
 FLAGS = VAR + "/flags.json"         # что установщик поменял в системе — вернуть при снятии
@@ -18,8 +21,9 @@ STATE = RUN + "/state.json"         # счётчики попыток: до пе
 LOGDIR = "/var/log/hivelink"
 CACHE = "/var/cache/hivelink"
 FILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "files")
-# Скрипт mp.space, который сам берёт адрес у каждого воткнутого модема (udhcpc)
+# Скрипт mp.space, который сам берёт адрес у каждого воткнутого модема (udhcpc), и его юнит
 MP_SETUP = "/usr/local/bin/modem-interface-setup.sh"
+MP_UNIT = "modem-hotplug@%s.service"
 
 DEFAULTS = {
     "net": "auto",                  # auto | on | off — DHCP и маршруты модемов (auto: off при mp.space)
@@ -33,6 +37,8 @@ DEFAULTS = {
     "nodrv_grace": 3,               # проходов ждать привязки драйвера
     "dhcp_max_tries": 10,           # подряд; потом — раз в dhcp_retry_every (не бросаем навсегда)
     "dhcp_retry_every": 300,
+    "mp_grace": 45,                 # с: сеть у mp.space — модем без адреса дольше — его настройку заново
+    "mp_retry_gap": 60,             # с между такими перезапусками (после dhcp_max_tries — dhcp_retry_every)
     "hilink_every": 4,              # web-API — раз в столько проходов
     "hilink_concurrency": 8,
     "auto_dataswitch": True,
@@ -81,6 +87,17 @@ def net_mode(conf):
     if conf["net"] == "auto":
         return "off" if os.path.exists(MP_SETUP) else "on"
     return conf["net"]
+
+
+def load_off():
+    """{USB-порт: {"t": когда, "was": что это было}}."""
+    d = jload(OFF, {})
+    return {str(k): v if isinstance(v, dict) else {} for k, v in d.items()} if isinstance(d, dict) else {}
+
+
+def save_off(d):
+    os.makedirs(ETC, exist_ok=True)
+    jsave(OFF, d, mode=0o644)
 
 
 def load_state():

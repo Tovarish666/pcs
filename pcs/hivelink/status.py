@@ -10,7 +10,7 @@ from ..core.util import Fail, jload, rd, sh
 from . import common, driver, hilink, install, rndis, route, usb
 
 ROW_KEYS = ("n", "iface", "driver", "usb_port", "usb_id", "mode", "cfg", "addr", "conn", "conn_text",
-            "dataswitch", "net", "signal", "ext_ip", "errors")
+            "dataswitch", "net", "signal", "ext_ip", "errors", "off")
 
 
 def local_rows(conf, addr_text=None):
@@ -24,6 +24,7 @@ def local_rows(conf, addr_text=None):
     for m in mods:
         by_dev.setdefault(m["dev"], []).append(m)
     rows, reach = [], set()
+    off = common.load_off()
     for d in usb.devices():
         pid = usb.attr(d, "idProduct").lower()
         mode = usb.pid_mode(pid)
@@ -37,7 +38,13 @@ def local_rows(conf, addr_text=None):
                    cfg="%s/%d" % ("?" if cur is None else cur, tot), addr=m["addr"] if m else None, errors=[])
         e = row["errors"]
         n = row["n"]
-        if usb.claimed(d):
+        row["off"] = row["usb_port"] in off
+        if row["off"]:
+            was = (off[row["usb_port"]] or {}).get("was")
+            e.append("выключен%s — hivelink on %s" % (" (был %s)" % was if was else "", row["usb_port"]))
+        elif not usb.authorized(d):
+            e.append("отцеплен от USB (authorized=0) — hivelink reset %s" % row["usb_port"])
+        elif usb.claimed(d):
             e.append("отдан в ВМ или usbip — здесь не обслуживается")
         elif mode == "cdrom":
             e.append("Zero-CD: ждёт переключения (usb_modeswitch)")
@@ -78,8 +85,11 @@ def probe_row(row, ext=True):
 
 
 def summary(rows):
-    s = {"total": len(rows), "hilink": 0, "zerocd": 0, "stick": 0, "other": 0, "with_addr": 0, "ok": 0}
+    s = {"total": len(rows), "hilink": 0, "zerocd": 0, "stick": 0, "other": 0, "with_addr": 0, "ok": 0, "off": 0}
     for r in rows:
+        if r.get("off"):
+            s["off"] += 1
+            continue
         k = {"hilink": "hilink", "cdrom": "zerocd", "stick": "stick", "stick-serial": "stick"}.get(r["mode"], "other")
         s[k] += 1
         s["with_addr"] += bool(r["addr"])
@@ -124,9 +134,10 @@ def net_text(mode):
 
 def show(data, conf):
     s = data["usb"]
-    print("  hivelink %s%s · USB-модемов %d: HiLink %d, Zero-CD %d, stick %d, прочих %d · с адресом %d · сеть: %s"
+    print("  hivelink %s%s · USB-модемов %d: HiLink %d, Zero-CD %d, stick %d, прочих %d%s · с адресом %d · сеть: %s"
           % (data["version"], "" if data["installed"] else " (не установлен: hivelink install)", s["total"],
-             s["hilink"], s["zerocd"], s["stick"], s["other"], s["with_addr"], net_text(data["net"])))
+             s["hilink"], s["zerocd"], s["stick"], s["other"], ", выключено %d" % s["off"] if s.get("off") else "",
+             s["with_addr"], net_text(data["net"])))
     if data["virtual"]:
         print("  виртуальных модемов proxyveth (dummy_hcd): %d — не трогаю" % data["virtual"])
     print("  фикс приёма rndis_host: %s" % fix_text(data["fix"], conf["rx_urb_size"]))
@@ -142,7 +153,7 @@ def show(data, conf):
                      dash(r["conn_text"]), dash(r["dataswitch"]), dash(r["net"]), dash(r["ext_ip"])))
         for e in r["errors"]:
             print("       ⚠ %s" % e)
-    bad = sum(1 for r in data["modems"] if r["errors"])
+    bad = sum(1 for r in data["modems"] if r["errors"] and not r.get("off"))
     if bad:
         print("\n  с проблемами: %d — подробности: hivelink doctor, journalctl -t hivelink -n 50" % bad)
 
