@@ -562,6 +562,16 @@
         if (opts.onDone) opts.onDone(j);
       } else {
         setRes(st, "err", "Ошибка: " + ((j.result && j.result.error) || j.error || "задание не удалось"));
+        const home = opts.base && opts.base.indexOf("/api/nodes/") === 0 ? "#/n/" + opts.base.slice(11) : "#";
+        const res = el("span", {class: "res"});
+        tail.replaceChildren(j.retry ? el("div", {class: "bar job-retry"},
+          btn([ic("redo"), j.kind === "create_server" ? "Повторить — продолжить с этой ВМ" : "Повторить"], async (e) => {
+            const r = await act(e.currentTarget, res, () => POST((opts.base || "/api") + "/jobs/" + encodeURIComponent(jid) + "/retry", {}), "Запущено");
+            if (!r || !r.ok || !r.data || !r.data.job) return;
+            if (opts.page) location.hash = home + "/job/" + encodeURIComponent(r.data.job);
+            else box.replaceWith(jobView(r.data.job, Object.assign({}, opts, {title: null})));
+          }, "primary", j.kind === "create_server" ? "ВМ не создаётся заново: шаги с первой загрузки повторяются, сделанное пропускается" : "то же задание ещё раз"), res)
+          : j.retried ? el("p", {class: "muted"}, "Уже повторено: ", link("задание " + j.retried, home + "/job/" + encodeURIComponent(j.retried), "")) : "");
         refresh();
       }
     }

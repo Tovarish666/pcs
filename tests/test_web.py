@@ -545,6 +545,13 @@ check("новая ВМ в обзоре (кэш сброшен)", any(s["id"] == 
 r, d = P("/api/servers", {"name": "fail-vm", "mode": "usb"})
 j = wait_job(d["data"]["job"])
 check("упавшее задание — состояние failed и причина", j["state"] == "failed" and j["result"]["error"], j)
+check("упавшее задание можно повторить", j["retry"] is True, j)
+r, d = P("/api/jobs/%s/retry" % j["id"])
+j2 = wait_job(d["data"]["job"]) if d["ok"] else None
+check("«Повторить» — новое задание, ВМ доделана", j2 and j2["state"] == "done" and "(повтор)" in j2["title"], (d, j2))
+r, d = P("/api/jobs/%s/retry" % j["id"])
+check("повторить второй раз то же — отказ; старое знает, кем повторено", not d["ok"]
+      and G("/api/jobs/" + j["id"])[1]["data"]["retried"] == j2["id"], d)
 
 print("браузер вкладок mp.space и ЮMoney (фейк):")
 r, d = G("/api/browser/mp/2000")

@@ -18,9 +18,8 @@ import os
 import platform
 import tarfile
 import tempfile
-import urllib.request
 
-from .util import Fail, sh
+from .util import Fail, download, sh
 
 VERSION = "1.14.2"
 SHA256 = {                       # контрольные суммы архивов релиза (совпадают с digest на GitHub)
@@ -56,7 +55,7 @@ def install(path=BIN, a=None):
         return False
     if a not in SHA256:
         raise Fail("sing-box %s: нет контрольной суммы под %s" % (VERSION, a))
-    data = urllib.request.urlopen(url(a), timeout=120).read()
+    data = download(url(a), "sing-box %s" % VERSION)
     if hashlib.sha256(data).hexdigest() != SHA256[a]:
         raise Fail("sing-box %s: контрольная сумма не совпала — не ставлю" % VERSION)
     with tarfile.open(fileobj=io.BytesIO(data)) as t:

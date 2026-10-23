@@ -6,9 +6,8 @@
 import hashlib
 import json
 import os
-import urllib.request
 
-from .util import Fail, rd, sh
+from .util import Fail, download, rd, sh
 
 VERSION = "1.0.1"
 SHA256 = {"amd64": "44ae2098585f41cc84ac03ffb291bc318bda4b4f854059a4c1c06e0c1a8a2df0"}
@@ -25,10 +24,7 @@ def install(path=BIN, a="amd64"):
         return False
     if a not in SHA256:
         raise Fail("yaspeed %s: сборка есть только под amd64" % VERSION)
-    try:
-        data = urllib.request.urlopen(URL, timeout=180).read()
-    except OSError as e:
-        raise Fail("yaspeed не скачался (%s) — проверь доступ к github.com" % e)
+    data = download(URL, "yaspeed", timeout=180)
     if hashlib.sha256(data).hexdigest() != SHA256[a]:
         raise Fail("yaspeed %s: контрольная сумма не совпала — не ставлю" % VERSION)
     os.makedirs(os.path.dirname(path), exist_ok=True)

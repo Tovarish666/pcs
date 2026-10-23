@@ -404,7 +404,7 @@ kinds = {"ok": ok_job, "bad": bad_job, "crash": crash_job}
 j = jobs.get(jobs.start("ok", {"x": "a"}, "проверка", target=7, launcher=inproc(kinds)))
 check("готово: результат, журнал без цветов", j["state"] == "done" and j["result"] == {"done": "a"}
       and "  ✓ шаг 2 для a" in j["log"] and j["target"] == "7", j)
-check("параметры удалены, как только прочитаны", not os.path.exists(os.path.join(jobs.DIR, j["id"] + ".params")))
+check("готово — параметры удалены", not os.path.exists(os.path.join(jobs.DIR, j["id"] + ".params")))
 j = jobs.get(jobs.start("bad", {"x": "b"}, launcher=inproc(kinds)))
 check("провал: текст ошибки", j["state"] == "failed" and j["error"] == "не вышло: b" and j["finished"], j)
 j = jobs.get(jobs.start("crash", {}, launcher=inproc(kinds)))
@@ -415,9 +415,131 @@ jid = jobs.start("ok", {"x": 1}, launcher=lambda jid: None)
 st = json.load(open(os.path.join(jobs.DIR, jid + ".json")))
 st["pid"] = 999999
 json.dump(st, open(os.path.join(jobs.DIR, jid + ".json"), "w"))
-check("процесс исчез — failed с объяснением", jobs.get(jid)["state"] == "failed" and "оборвалось" in jobs.get(jid)["error"])
+check("процесс исчез — failed с объяснением; можно повторить (параметры сохранены)", jobs.get(jid)["state"] == "failed"
+      and "оборвалось" in jobs.get(jid)["error"] and jobs.get(jid)["retry"] is True)
 check("список последних", len(jobs.recent()) >= 6 and jobs.recent()[0]["id"] >= jobs.recent()[-1]["id"])
 check("файлы заданий — 600", stat.S_IMODE(os.stat(os.path.join(jobs.DIR, jid + ".json")).st_mode) == 0o600)
+
+print("«Повторить» упавшее задание:")
+FLAKY = {"n": 0}
+
+
+def flaky_job(p):
+    FLAKY["n"] += 1
+    p["id"] = 4000                       # как создание ВМ: номер узнан по ходу — повтор продолжит её
+    jobs.remember(p)
+    FLAKY["saved"] = json.load(open(os.path.join(jobs.DIR, jobs.CURRENT[0] + ".params")))
+    if FLAKY["n"] == 1:
+        raise Fail("3proxy 1.0.0 не скачался (Temporary failure in name resolution)")
+    return {"id": p["id"], "resume": p.get("resume"), "pw": p.get("pw")}
+
+
+kinds["create_server"] = flaky_job
+j1 = jobs.get(jobs.start("create_server", {"name": "SpbVl-2", "pw": "секрет"}, "Создание ВМ SpbVl-2", target="new",
+                         launcher=inproc(kinds)))
+check("номер ВМ записан в параметры сразу (оборвётся процесс — повтор продолжит её)", FLAKY["saved"].get("id") == 4000, FLAKY)
+check("упало — можно повторить; параметры для повтора — 600", j1["state"] == "failed" and j1["retry"] is True
+      and stat.S_IMODE(os.stat(os.path.join(jobs.DIR, j1["id"] + ".retry")).st_mode) == 0o600, j1)
+j2 = jobs.get(jobs.retry(j1["id"], launcher=inproc(kinds)))
+check("повтор: те же параметры (и пароль), создание ВМ — продолжить ту же ВМ (resume, номер 4000)",
+      j2["state"] == "done" and j2["result"] == {"id": 4000, "resume": True, "pw": "секрет"} and j2["target"] == "4000"
+      and j2["title"] == "Создание ВМ SpbVl-2 (повтор)", j2)
+j1 = jobs.get(j1["id"])
+check("старое задание: повторено, параметры забраны (второй раз — нельзя)", j1["retry"] is False and j1["retried"] == j2["id"]
+      and not os.path.exists(os.path.join(jobs.DIR, j1["id"] + ".retry")), j1)
+for jid_, why in ((j1["id"], "уже повторено"), (j2["id"], "готовое")):
+    try:
+        jobs.retry(jid_, launcher=inproc(kinds))
+        msg = None
+    except Fail as e:
+        msg = str(e)
+    check("повторить %s — понятный отказ" % why, msg is not None, msg)
+check("api.job_retry → новый id", callable(api.job_retry))
+
+print("скачивание с повтором (DNS новой ВМ моргает):")
+from pcs.core import util as cutil  # noqa: E402
+calls, slept = [], []
+
+
+def opener(url, timeout):
+    calls.append(url)
+    if len(calls) < 3:
+        raise OSError("<urlopen error [Errno -3] Temporary failure in name resolution>")
+    return b"deb"
+
+
+with redirect_stderr(io.StringIO()) as err:
+    data = cutil.download("https://github.com/x.deb", "3proxy 1.0.0", opener=opener, sleep=slept.append)
+check("два сбоя DNS — третья попытка удалась; паузы 5 и 15 с, в журнале видно", data == b"deb" and slept == [5, 15]
+      and "ещё раз через 5 с" in err.getvalue(), (slept, err.getvalue()))
+try:
+    with redirect_stderr(io.StringIO()):
+        cutil.download("https://x", "sing-box", opener=lambda u, t: (_ for _ in ()).throw(OSError("нет сети")), sleep=lambda s: None)
+    msg = None
+except Fail as e:
+    msg = str(e)
+check("все попытки мимо — Fail «… не скачался»", msg and "sing-box не скачался" in msg, msg)
+
+print("создание ВМ: запись сразу, повтор продолжает ту же ВМ:")
+SN = os.path.join(TMP, "snippets")
+os.makedirs(SN)
+ran, setups = [], []
+real = {k: getattr(pve, k) for k in ("need_pve", "used_ids", "SNIPPETS", "host_net", "next_id", "storages", "ensure_image",
+                                      "ensure_snippets", "user_data", "qm_status", "vm_name")}
+real_s = {k: getattr(servers, k) for k in ("_finish", "setup", "mpspace_install", "sh", "print_info")}
+real_key = remote.ensure_key
+pve.need_pve, pve.SNIPPETS, pve.host_net = (lambda: None), SN, (lambda: ("192.168.88.1", "vmbr0", "192.168.88.254/24"))
+pve.next_id, pve.storages, pve.ensure_image, pve.ensure_snippets = (lambda: 4000), (lambda: ["local-lvm"]), (lambda: None), (lambda: None)
+pve.user_data, pve.vm_name = (lambda *a, **k: "#cloud-config\n"), (lambda vmid: "SpbVl-2")
+remote.ensure_key = lambda: HUBPUB
+servers.print_info = lambda *a, **k: None
+servers._finish = lambda p, s, t0, select: s.update(ip=s.get("ip") or "192.168.88.22")
+servers.setup = lambda s, **kw: setups.append((s["id"], kw.get("fresh"), kw.get("mode"))) or []
+servers.mpspace_install = lambda *a: ran.append(("mpspace",))
+
+
+def fake_sh(*c, **k):
+    ran.append(c)
+    if c[:2] == ("qm", "importdisk"):
+        raise Fail("importdisk: нет места")
+    return types.SimpleNamespace(returncode=0, stdout="unused0: local-lvm:vm-4000-disk-0\n", stderr="")
+
+
+servers.sh = fake_sh
+pve.used_ids = lambda: set()
+pve.qm_status = lambda vmid: "stopped"
+try:
+    with redirect_stdout(io.StringIO()):
+        try:
+            servers.create({"name": "SpbVl-2", "mode": "usb"}, select=False)
+            msg = None
+        except Fail as e:
+            msg = str(e)
+    rec = store.load(4000)
+    check("упало сразу после qm create — ВМ всё равно в PCS (удалить или «Повторить»), а не «ничья» (adopt)",
+          msg and "importdisk" in msg and rec["name"] == "SpbVl-2" and rec["mode"] == "usb", (msg, rec))
+    open(os.path.join(SN, "pcs-4000.yaml"), "w").write("#cloud-config\n")
+    pve.used_ids = lambda: {4000}
+    del ran[:]
+    p = {"name": "SpbVl-2", "mode": "usb", "mpspace": True, "resume": True}
+    with redirect_stdout(io.StringIO()) as out:
+        r = servers.create(p, select=False)
+    check("повтор: ВМ не создаётся заново, запущена, дальше — с первой загрузки до mp.space",
+          not any(c[:2] == ("qm", "create") for c in ran) and ("qm", "start", "4000") in ran and setups[-1] == (4000, True, "usb")
+          and ("mpspace",) in ran and r["id"] == 4000 and p["id"] == 4000 and "Продолжаю ВМ 4000" in out.getvalue(), (ran, setups))
+    try:
+        servers.create({"name": "x", "id": 4000}, select=False)
+        msg = None
+    except Fail as e:
+        msg = str(e)
+    check("без повтора занятый номер — отказ, как раньше", msg and "уже есть" in msg, msg)
+finally:
+    for k, v in real.items():
+        setattr(pve, k, v)
+    for k, v in real_s.items():
+        setattr(servers, k, v)
+    remote.ensure_key = real_key
+    store.drop(4000)
 
 print("доставка кода на сервер:")
 data = remote.tarball()

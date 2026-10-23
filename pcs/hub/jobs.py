@@ -5,7 +5,8 @@
   ID.json    состояние: {"id", "kind", "title", "state": running|done|failed, "started",
              "finished", "pid", "result", "error"}
   ID.log     всё, что задание напечатало (журнал для панели)
-  ID.params  параметры (там бывают пароли): 600, удаляется, как только задание их прочло.
+  ID.params  параметры (там бывают пароли): 600, пока задание идёт; готово — удаляются.
+  ID.retry   параметры упавшего или оборвавшегося задания (600) — для «Повторить»; повтор их забирает.
 """
 import os
 import re
@@ -69,16 +70,23 @@ def start(kind, params, title="", target=None, launcher=None):
     return jid
 
 
+CURRENT = [None]                 # id задания, которое исполняет этот процесс
+
+
+def remember(params):
+    """Задание узнало по ходу важное для повтора (создание ВМ — её номер): записать в параметры —
+    оборвётся процесс целиком (перезагрузка хоста), «Повторить» продолжит ту же ВМ."""
+    if CURRENT[0]:
+        jsave(_p(CURRENT[0], "params"), params, 0o600)
+
+
 def run(jid, kinds):
     """Исполнитель (внутри `pcs job run ID`). Печать уходит в журнал задания."""
     st = jload(_p(jid, "json"), None)
     if not st:
         raise Fail("нет такого задания: %s" % jid)
     params = jload(_p(jid, "params"), {})
-    try:
-        os.unlink(_p(jid, "params"))
-    except OSError:
-        pass
+    CURRENT[0] = jid
     st["pid"] = os.getpid()
     _save(st)
     fn = kinds.get(st["kind"])
@@ -96,6 +104,13 @@ def run(jid, kinds):
     except Exception as e:                       # noqa: BLE001 — задание не должно висеть «running»
         st["state"], st["error"] = "failed", "внутренняя ошибка: %s: %s" % (type(e).__name__, e)
         print(traceback.format_exc(), flush=True)
+    if st["state"] == "failed":
+        jsave(_p(jid, "retry"), params, 0o600)   # как было (создание ВМ дописало свой номер) — для «Повторить»
+    try:
+        os.unlink(_p(jid, "params"))
+    except OSError:
+        pass
+    CURRENT[0] = None
     st["finished"] = int(time.time())
     _save(st)
     return 0 if st["state"] == "done" else 1
@@ -119,6 +134,8 @@ def get(jid, lines=400):
                (not st.get("pid") and time.time() - st.get("started", 0) > 120)
         if gone:
             st.update(state="failed", error="задание оборвалось (процесс исчез) — смотри журнал", finished=int(time.time()))
+            if os.path.exists(_p(jid, "params")):
+                os.replace(_p(jid, "params"), _p(jid, "retry"))      # «Повторить» — с того, что успело
             _save(st)
     try:
         with open(_p(jid, "log"), errors="replace") as f:
@@ -126,8 +143,45 @@ def get(jid, lines=400):
     except OSError:
         log = []
     out = {k: st.get(k) for k in ("id", "kind", "title", "target", "state", "result", "error", "started", "finished")}
+    out["retry"] = st.get("state") == "failed" and os.path.exists(_p(jid, "retry"))
+    if st.get("retried"):
+        out["retried"] = st["retried"]
     out["log"] = log
     return out
+
+
+RESUME = {"create_server"}       # эти при повторе продолжают, а не начинают заново
+
+
+def retry(jid, launcher=None):
+    """«Повторить» упавшее задание: то же с теми же параметрами; создание ВМ — продолжает ту же ВМ.
+    → id нового задания."""
+    st = jload(_p(jid, "json"), None)
+    if not st:
+        raise Fail("нет такого задания: %s" % jid)
+    if get(jid, lines=0)["state"] != "failed":
+        raise Fail("повторить можно только упавшее задание")
+    params = jload(_p(jid, "retry"), None)
+    if params is None:
+        raise Fail("у задания %s нет параметров для повтора (старое или уже повторено: %s)"
+                   % (jid, st.get("retried") or "—"))
+    if st["kind"] in RESUME:
+        params["resume"] = True
+    target = st.get("target")
+    if target == "new" and params.get("id"):
+        target = str(params["id"])
+    b = busy(target=target) if target not in (None, "new") else None
+    if b:
+        raise Fail("с %s уже идёт задание %s — дождись его" % (target, b))
+    title = st["title"] if st["title"].endswith("(повтор)") else st["title"] + " (повтор)"
+    new = start(st["kind"], params, title=title, target=target, launcher=launcher)
+    try:
+        os.unlink(_p(jid, "retry"))
+    except OSError:
+        pass
+    st["retried"] = new
+    _save(st)
+    return new
 
 
 def follow(jid, out=None, sleep=time.sleep):
@@ -170,7 +224,7 @@ def prune():
         st = jload(os.path.join(DIR, jid + ".json"), {})
         if st.get("state") == "running":
             continue
-        for ext in ("json", "log", "params"):
+        for ext in ("json", "log", "params", "retry"):
             try:
                 os.unlink(os.path.join(DIR, "%s.%s" % (jid, ext)))
             except OSError:

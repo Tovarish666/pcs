@@ -24,7 +24,7 @@ MODES = ("usb", "gw")
 HOST_BIN = ("pcs", "proxyveth", "modlink", "hivelink", "pcs-node")   # команды в /usr/local/bin хоста
 DEFAULTS = {"id": None, "name": "", "cores": 4, "ram_gb": 4, "disk_gb": 40, "storage": "", "bridge": "vmbr0",
             "ip": "", "gw": "", "dns": None, "password": "", "mode": "usb", "sheet": "", "mpspace": False,
-            "auth": "", "proxy": "", "replace": False}
+            "auth": "", "proxy": "", "replace": False, "resume": False}
 EMPTY = {"ok": 0, "warn": 0, "broken": 0, "total": 0}
 
 
@@ -166,27 +166,78 @@ def normalize(p):
         raise Fail("таблица — ссылка https://… (или путь к файлу на сервере)")
     q["mpspace"] = q["mpspace"] in (True, 1, "1", "true", "yes", "on", "да")
     q["replace"] = q["replace"] in (True, 1, "1", "true", "yes")
+    q["resume"] = q["resume"] in (True, 1, "1", "true", "yes")
     return q
 
 
 def create(p, select=True):
     """ВМ Ubuntu 24.04 под ключ: образ → ВМ → cloud-init → код PCS → proxyveth → (таблица) → (mp.space).
-    select — сделать новую ВМ выбранной (только из терминала: задание панели выбор человека не трогает)."""
+    select — сделать новую ВМ выбранной (только из терминала: задание панели выбор человека не трогает).
+    resume — повтор упавшего создания: ВМ, созданная PCS (её сниппет pcs-<id>.yaml), уже есть —
+    не создавать заново, а продолжить с первой загрузки (шаги повторяемы). Номер ВМ пишется в p:
+    повтор задания продолжит именно её."""
+    orig = p if isinstance(p, dict) else {}
     p = normalize(p)
     pve.need_pve()
     pub = remote.ensure_key()
     t0 = time.time()
     gw_def, _, _ = pve.host_net()
     lk = util.lock(os.path.join(remote.RUN, "create.lock"), wait=3600, what="создание ВМ")
+    resumed = False
     try:
         vmid = p["id"] or pve.next_id()
         if vmid in pve.used_ids():
-            if not p["replace"]:
+            if p["resume"] and os.path.exists(os.path.join(pve.SNIPPETS, "pcs-%d.yaml" % vmid)):
+                resumed = True
+            elif not p["replace"]:
                 raise Fail("ВМ %d уже есть (пересоздать — --replace)" % vmid)
-            ui.warn("удаляю ВМ %d со всеми дисками (--replace)" % vmid)
-            sh("qm", "stop", str(vmid), check=False, timeout=120)
-            sh("qm", "destroy", str(vmid), "--destroy-unreferenced-disks", "1", "--purge", "1", timeout=300)
-            store.drop(vmid)
+            else:
+                ui.warn("удаляю ВМ %d со всеми дисками (--replace)" % vmid)
+                sh("qm", "stop", str(vmid), check=False, timeout=120)
+                sh("qm", "destroy", str(vmid), "--destroy-unreferenced-disks", "1", "--purge", "1", timeout=300)
+                store.drop(vmid)
+        orig["id"] = vmid
+        from . import jobs
+        jobs.remember(orig)
+        if resumed:
+            prev = {}
+            try:
+                prev = store.load(vmid)
+            except Fail:
+                pass
+            name = prev.get("name") or p["name"] or pve.vm_name(vmid)
+            password = prev.get("password") or ""
+            ui.hdr("Продолжаю ВМ %d (%s): сама ВМ уже создана" % (vmid, name))
+            store.save(dict(prev, id=vmid, name=name, ip=prev.get("ip") or (p["ip"].split("/")[0] if p["ip"] else ""),
+                            password=password, net="static" if p["ip"] else "dhcp", mode=p["mode"],
+                            created=prev.get("created") or time.strftime("%F %T"), pcs=VERSION))
+            if pve.qm_status(vmid) != "running":
+                sh("qm", "start", str(vmid))
+                ui.ok("ВМ %d запущена" % vmid)
+    except BaseException:
+        lk.close()
+        raise
+    if resumed:
+        lk.close()
+    else:
+        vmid, name, password = _create_vm(p, vmid, pub, gw_def, lk)
+    s = store.load(vmid)
+    s.update(ip=s.get("ip") or (p["ip"].split("/")[0] if p["ip"] else ""), mode=p["mode"])
+    _finish(p, s, t0, select)
+    warns = setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
+    if p["mpspace"]:
+        mpspace_install(s, p["auth"], p["proxy"])
+    ui.hdr("Готово за %d мин%s" % ((time.time() - t0) // 60 + 1, " — с замечаниями (см. ⚠ выше)" if warns else ""))
+    print_info(s, show_password=not p["password"] and ui.interactive())
+    return {"id": vmid, "name": name, "ip": s["ip"], "mode": s.get("mode"),
+            "password": password if not p["password"] else None, "warnings": warns}
+
+
+def _create_vm(p, vmid, pub, gw_def, lk):
+    """Сама ВМ: диск из образа, cloud-init, запуск. Запись PCS — сразу после qm create: что бы ни
+    упало дальше, ВМ остаётся в PCS (удалить или «Повторить» задание), а не «ничьей» (adopt).
+    → (vmid, name, password)."""
+    try:
         name = p["name"] or "pcs%d" % vmid
         st = pve.storages()
         storage = p["storage"] or ("local-lvm" if "local-lvm" in st else (st or ["local"])[0])
@@ -201,6 +252,9 @@ def create(p, select=True):
            # без «QEMU Tablet» в lsusb: серверу мышь не нужна, а по ней видно виртуалку
            "--tablet", "0", "--onboot", "1",
            "--description", "pcs %s: сервер под модемы (proxyveth %s)" % (VERSION, p["mode"]))
+        store.save({"id": vmid, "name": name, "ip": p["ip"].split("/")[0] if p["ip"] else "", "password": password,
+                    "net": "static" if p["ip"] else "dhcp", "created": time.strftime("%F %T"), "pcs": VERSION,
+                    "mode": p["mode"]})
         sh("qm", "importdisk", str(vmid), pve.IMG_PATH, storage, timeout=900)
         disk = re.search(r"^unused\d+: (\S+)", sh("qm", "config", str(vmid)).stdout, re.M).group(1)
         sh("qm", "set", str(vmid), "--scsi0", "%s,discard=on,ssd=1,iothread=1" % disk, "--boot", "order=scsi0")
@@ -219,9 +273,12 @@ def create(p, select=True):
     finally:
         lk.close()
     ui.ok("ВМ %d создана и запущена" % vmid)
+    return vmid, name, password
 
-    s = {"id": vmid, "name": name, "ip": p["ip"].split("/")[0] if p["ip"] else "", "password": password,
-         "net": "static" if p["ip"] else "dhcp", "created": time.strftime("%F %T"), "pcs": VERSION, "mode": p["mode"]}
+
+def _finish(p, s, t0, select):
+    """Первая загрузка: адрес, SSH, cloud-init, перезагрузка на новое ядро. Повторяемо."""
+    vmid = s["id"]
     ui.hdr("Первая загрузка: пакеты, обновление системы%s" % (", ядро с USB-модулями" if p["mode"] == "usb" else ""))
     while not s["ip"]:
         s["ip"] = pve.vm_ip(vmid, p["bridge"])
@@ -249,13 +306,6 @@ def create(p, select=True):
         ui.ok("ядро %s" % remote.retry(s, lambda: remote.ssh(s, "uname -r").stdout.strip(), "версия ядра"))
     if select:
         store.set_active(vmid)
-    warns = setup(s, mode=p["mode"], sheet=p["sheet"], fresh=True)
-    if p["mpspace"]:
-        mpspace_install(s, p["auth"], p["proxy"])
-    ui.hdr("Готово за %d мин%s" % ((time.time() - t0) // 60 + 1, " — с замечаниями (см. ⚠ выше)" if warns else ""))
-    print_info(s, show_password=not p["password"] and ui.interactive())
-    return {"id": vmid, "name": name, "ip": s["ip"], "mode": s.get("mode"),
-            "password": password if not p["password"] else None, "warnings": warns}
 
 
 def wait_cloud_init(s, bridge="vmbr0", limit=3600):
