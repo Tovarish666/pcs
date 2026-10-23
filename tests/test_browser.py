@@ -168,10 +168,7 @@ json.dump({"proxy": {"scheme": "http", "host": "127.0.0.1", "port": HTTP, "user"
 sock = os.path.join(TMP, "p.sock")
 fw = B.Forward(conf, unix=sock)
 threading.Thread(target=fw.serve, daemon=True).start()
-for _ in range(50):
-    if os.path.exists(sock):
-        break
-    time.sleep(0.05)
+fw.ready.wait(5)              # файл сокета появляется при bind, принимать он начинает после listen
 
 
 def via_forward(host, port):
