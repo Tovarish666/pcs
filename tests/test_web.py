@@ -148,7 +148,11 @@ add = next(c for c in rc.calls if c[2][0] == "add")
 check("набранный пароль новой строки — через stdin, не в аргументах",
       "S3cret!x" not in " ".join(add[2]) and add[2][add[2].index("--password") + 1] == "-" and add[3] == "S3cret!x\n", add)
 check("порты по умолчанию — auto", add[2][add[2].index("--port") + 1] == "auto")
-check("новая строка с защитой — без --no-protect", "--no-protect" not in add[2])
+check("новая строка без поля защиты — без флагов (по умолчанию без защиты)",
+      "--no-protect" not in add[2] and "--protect" not in add[2])
+rc = Rec()
+Panel(rc).handle("POST", "/api/targets/2000/modlink/save", {}, {"add": [{"lan_ip": "192.168.9.100", "protect": True}]})
+check("новая строка с галочкой защиты — add --protect", any(c[2][0] == "add" and "--protect" in c[2] for c in rc.calls), rc.calls)
 rc = Rec()
 code, r = Panel(rc).handle("POST", "/api/targets/host/modlink/save", {}, {
     "set": [{"id": 8, "fields": {"protect": False}}], "add": [{"lan_ip": "192.168.3.100", "protect": False}]})

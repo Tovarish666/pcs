@@ -1927,7 +1927,7 @@
     function newRow(n) {
       const [p, b, rc] = nextPorts();
       const f = {enabled: true, n: n || "", password: genPw(12), port: String(p), reboot_port: String(b), reconnect_port: String(rc),
-        interval_min: "0", protect: true};
+        interval_min: "0", protect: false};
       for (const [k, fn] of Object.entries(DERIVED)) f[k] = n ? fn(n) : "";
       return {tmp: ++seq, touched: {}, fields: f};
     }
@@ -1951,7 +1951,7 @@
           onchange: (e) => { isNew ? (r.fields[k] = e.target.checked) : setEdit(r, k, e.target.checked); draw(); }}), "включён");
       }
       if (k === "protect") {
-        const on = v !== false;
+        const on = v === true;
         const box = el("input", {type: "checkbox", checked: on, onchange: (e) => {
           if (!e.target.checked && !window.confirm("Снять защиту строки " + (isNew ? "(новой)" : r.id) + "? Клиенту прокси откроются " +
               "личный кабинет оператора (вход по SIM без пароля), веб модема и опасные порты. Только для своих (ген1).")) {
