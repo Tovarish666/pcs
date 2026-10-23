@@ -765,6 +765,90 @@ try:
 finally:
     subprocess.run = real_run
     remote.scan_keys, remote.agent_keys = real_scan, real_agent
+print("адрес ВМ сменился (DHCP после перезагрузки) и «Связь»:")
+real_vm_ip = pve.vm_ip
+s2000 = store.load(2000)
+old_ip = s2000["ip"]
+pve.vm_ip = lambda vmid, bridge="vmbr0": "192.168.88.77"
+calls2 = []
+
+
+def run_unreach(argv, *a, **kw):
+    if argv and argv[0] == "ssh":
+        if "-O" in argv:
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        calls2.append(argv[-2])
+        if argv[-2].endswith("@192.168.88.77"):
+            return types.SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
+        return types.SimpleNamespace(returncode=255, stdout="", stderr="ssh: connect to host %s port 22: No route to host\n"
+                                     % argv[-2].split("@")[1])
+    return real_run(argv, *a, **kw)
+
+
+subprocess.run = run_unreach
+remote._IP_CHECKED.clear()
+try:
+    with redirect_stdout(io.StringIO()) as out:
+        r = REAL_CALL(s2000, "uname -r")
+    check("«No route to host» → адрес у Proxmox (агент) другой → записан, команда прошла по новому",
+          r.stdout == "ok\n" and calls2 == ["root@" + old_ip, "root@192.168.88.77"]
+          and store.load(2000)["ip"] == "192.168.88.77" and "адрес сменился" in out.getvalue(), (calls2, out.getvalue()))
+    store.save(dict(store.load(2000), ip=old_ip))
+    s2000, calls2[:] = store.load(2000), []
+    try:
+        REAL_CALL(s2000, "true")
+    except Fail:
+        pass
+    check("не чаще раза в минуту: страница с многими ВМ не ждёт агентов", calls2 == ["root@" + old_ip], calls2)
+finally:
+    subprocess.run = real_run
+real_ssh, real_conn = servers.sh, None
+import socket as _socket  # noqa: E402
+real_conn = _socket.create_connection
+agent_calls = []
+servers.sh = lambda *c, **k: agent_calls.append(c) or types.SimpleNamespace(returncode=0, stdout="", stderr="")
+PORT = {"open": False}
+
+
+def fake_conn(addr, timeout=None):
+    if not PORT["open"]:
+        PORT["open"] = True             # после перезапуска sshd через агент — открыт
+        raise OSError(113, "No route to host")
+    return types.SimpleNamespace(close=lambda: None)
+
+
+_socket.create_connection = fake_conn
+try:
+    with redirect_stdout(io.StringIO()):
+        d = servers.reconnect(2000)
+    whats = [(x["what"], x["ok"]) for x in d["steps"]]
+    check("«Связь»: ВМ работает, агент, адрес сменился — записан, порт молчал — sshd перезапущен агентом, вход есть",
+          d["ok"] and whats[:3] == [("ВМ в Proxmox", True), ("guest agent", True), ("адрес", True)]
+          and "сменился" in d["steps"][2]["text"] and ("порт SSH 22", False) in whats and whats[-1] == ("вход по SSH", True)
+          and any(c[:3] == ("qm", "guest", "exec") and "ssh" in c for c in agent_calls), d)
+    VM["200"] = "stopped"
+    with redirect_stdout(io.StringIO()):
+        d = servers.reconnect(200)
+    check("«Связь»: ВМ выключена — так и сказано, дальше не ждём", not d["ok"] and d["steps"][-1]["text"].startswith("выключена"), d)
+finally:
+    servers.sh, _socket.create_connection, pve.vm_ip = real_ssh, real_conn, real_vm_ip
+    store.save(dict(store.load(2000), ip=old_ip))
+from pcs.hub import ops as hops  # noqa: E402
+real_np, real_osh = pve.need_pve, hops.sh
+pve.need_pve = lambda: None
+try:
+    hops.sh = lambda *c, **k: types.SimpleNamespace(stdout="serial0: socket\n", returncode=0)
+    argv = hops.term_argv(store.load(2000), serial=True)
+    hops.sh = lambda *c, **k: types.SimpleNamespace(stdout="net0: virtio\n", returncode=0)
+    try:
+        hops.term_argv(store.load(2000), serial=True)
+        msg = None
+    except Fail as e:
+        msg = str(e)
+finally:
+    pve.need_pve, hops.sh = real_np, real_osh
+check("консоль ВМ без SSH — qm terminal (последовательный порт); порта нет — понятный отказ",
+      argv == ["qm", "terminal", "2000"] and msg and "serial0" in msg, (argv, msg))
 check("ВМ, созданная PCS: cloud-init выключается при setup (сниппет pcs-<id>.yaml), чужая — нет",
       "cloud_init_off(s)" in open(servers.__file__).read() and servers.CI_OFF == "/etc/cloud/cloud-init.disabled")
 

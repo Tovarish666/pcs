@@ -203,10 +203,14 @@ class TermApi:
     def __getattr__(self, k):
         return getattr(fake_api, k)
 
-    def term_argv(self, target):
+    def term_argv(self, target, serial=False):
         if target != "host":
             fake_api.server(target)            # нет такой ВМ — Fail
+        SERIAL.append(serial)
         return [sys.executable, "-c", TERM_SCRIPT]
+
+
+SERIAL = []
 
 
 httpd = make_server(0, TermApi(), "127.0.0.1", CFG, fake=True, fail_delay=0,
@@ -613,6 +617,10 @@ check("применить: строки как в таблице", d["ok"] and d
 for body, what in (({}, "пусто"), ({"text": "a\0b"}, "мусор"), ({"url": "ftp://x"}, "не http"), ({"text": SHEET, "map": "x"}, "map")):
     r, d = P("/api/targets/2000/modlink/import", body)
     check("конфиг по таблице: %s — отказ 400" % what, r.status == 400, (r.status, d))
+print("«Связь» с ВМ (фейк):")
+r, d = P("/api/servers/2000/reconnect", {})
+check("«Связь»: шаги — ВМ, агент, адрес, порт SSH, вход", d["ok"] and d["data"]["ok"]
+      and [x["what"] for x in d["data"]["steps"]][-1] == "вход по SSH", d)
 print("ключ SSH сервера (фейк):")
 r, d = P("/api/servers/2000/hostkey", {})
 check("сверить: хаб знает старый, сервер показывает новый, агент подтверждает", d["ok"] and d["data"]["same"] is False
@@ -725,6 +733,13 @@ check("WS без Origin — 403", st == 403)
 s.close()
 s, st, h, key, rest = ws_open("/ws/term?target=2000", version="8")
 check("WS не 13-й версии — 426", st == 426 and h.get("sec-websocket-version") == "13")
+s.close()
+s, st, h, key, rest = ws_open("/ws/term?target=host&console=serial")
+check("консоль ВМ (qm terminal) для хоста — 400: она только у ВМ", st == 400, st)
+s.close()
+del SERIAL[:]
+s, st, h, key, rest = ws_open("/ws/term?target=2000&console=serial")
+check("консоль ВМ: терминал открыт в режиме serial (qm terminal)", st == 101 and SERIAL == [True], (st, SERIAL))
 s.close()
 s, st, h, key, rest = ws_open("/ws/term?target=4242")
 check("WS к несуществующей ВМ — 400", st == 400)

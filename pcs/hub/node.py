@@ -82,8 +82,9 @@ def proxyveth_info(root="/", run=sh):
     cfg = jload(at(root, PV_CONFIG), {})
     mode = cfg.get("mode") if isinstance(cfg, dict) and cfg.get("mode") in ("usb", "gw") else None
     d = {"installed": os.path.exists(at(root, "usr/local/bin/proxyveth")), "mode": mode,
+         "on": not (isinstance(cfg, dict) and cfg.get("on") is False),
          "modems": summarize([]), "legacy": "vmodem" if os.path.exists(at(root, "usr/local/sbin/vmodem")) else None}
-    if not d["installed"]:
+    if not d["installed"] or not d["on"]:
         return d
     r = run("proxyveth", "status", "--json", check=False, timeout=60)
     env = envelope(r.stdout)

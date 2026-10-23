@@ -41,6 +41,9 @@ ICON = {"ok": "✓", "warn": "⚠", "broken": "✗", "absent": "·", "disabled":
 
 HELP = """proxyveth — из прокси сетевой интерфейс (режим сервера: usb или gw)
 
+  proxyveth on | off                    включить / выключить proxyveth целиком. Выключен — модемов нет,
+                                        таймер sync стоит, при загрузке ничего не поднимается (dummy_hcd
+                                        не грузится — ОС стартует быстро); таблица и настройки остаются
   proxyveth mode [usb|gw] [--yes]       режим сервера; смена — снять всё своё и поднять в новом
   proxyveth source [URL|local]          источник таблицы; local — главной становится локальная копия
   proxyveth table [show|pull|edit|put]  показать / из Google / копия в $EDITOR / копия со stdin
@@ -88,6 +91,14 @@ def held():
 
 
 # ── режим ──────────────────────────────────────────────────────────────────
+def is_on(cfg):
+    """Выключатель proxyveth ("on" в config.json). Нет флага — включён: так было всегда."""
+    return cfg.get("on", True) is not False
+
+
+OFF_HINT = "proxyveth выключен — включить: proxyveth on"
+
+
 def mode_mod(mode):
     """Модуль режима с интерфейсом §6. gw пишется отдельно — пока его нет, честно сказать."""
     if mode not in MODES:
@@ -323,6 +334,9 @@ def cmd_setup(a):
             return 0, {"mode": None, "migrated": False, "sync": None}
         mod = mode_mod(mode)
         save_cfg(mode=mode)
+        if not is_on(cfg):
+            log("%s; режим %s, таблица и настройки на месте — модемы не поднимаю" % (OFF_HINT, mode))
+            return 0, {"mode": mode, "on": False, "migrated": migrated, "sync": None}
         mod.setup(load_cfg())
         if migrated:
             usb.vmodem_purge()
@@ -337,6 +351,51 @@ def cmd_setup(a):
         return 0, {"mode": mode, "migrated": migrated, "sync": res}
 
 
+def cmd_off(a):
+    """Выключить: модемы и всё своё снять (как при смене режима), таймер sync остановить, при
+    загрузке ничего не поднимать — dummy_hcd не грузится, ОС стартует быстро. Таблица, режим,
+    настройки и собранный dummy_hcd остаются: `proxyveth on` поднимет всё как было."""
+    need_root()
+    cfg = load_cfg()
+    if not is_on(cfg):
+        say("  proxyveth и так выключен")
+        return 0, {"on": False, "changed": False}
+    mode = cur_mode(cfg)
+    if mode and running_of(mode_mod(mode)):
+        confirm(a, "выключить proxyveth: все модемы сервера будут сняты", "да")
+    to_bg(a, "off")
+    with held():
+        save_cfg(on=False)
+        sh("systemctl", "disable", "--now", "proxyveth-sync.timer", check=False)
+        n = 0
+        if mode:
+            mod = mode_mod(mode)
+            n = len(running_of(mod))
+            mod.teardown()
+        log("proxyveth выключен: модемов снято %d, таймер sync стоит, при загрузке ничего не поднимается "
+            "(включить: proxyveth on)" % n)
+        return 0, {"on": False, "changed": True, "removed": n}
+
+
+def cmd_on(a):
+    """Включить: подготовить режим (модули, юниты), таймер sync — и модемы по таблице."""
+    need_root()
+    cfg = load_cfg()
+    to_bg(a, "on")
+    with held():
+        save_cfg(on=True)
+        mode = cur_mode(cfg)
+        if not mode:
+            log("proxyveth включён; режим не задан — proxyveth mode usb|gw")
+            return 0, {"on": True, "mode": None, "sync": None}
+        mod = mode_mod(mode)
+        mod.setup(load_cfg())
+        ensure_timer()
+        res = do_sync(load_cfg(), mode, mod) if load_cfg().get("source") else None
+        log("proxyveth включён: режим %s, таймер sync идёт%s" % (mode, "" if res else " (таблицы нет — модемов нет)"))
+        return 0, {"on": True, "mode": mode, "sync": res}
+
+
 def cmd_mode(a):
     cfg = load_cfg()
     cur = cur_mode(cfg)
@@ -349,10 +408,14 @@ def cmd_mode(a):
     old_vm = usb.vmodem_found()
     if not cur:
         cur = "usb" if old_vm else ("gw" if os.path.exists(OLD_GW) else None)
-    if cur and cur != new:
+    if cur and cur != new and is_on(cfg):
         confirm(a, "режим %s → %s: все модемы сервера будут сняты и подняты заново" % (cur, new), new)
     to_bg(a, "mode")
     with held():
+        if not is_on(cfg):                # выключен: модемов нет — только запомнить режим
+            save_cfg(mode=new)
+            say("  режим: %s — %s (тогда и поднимется)" % (new, OFF_HINT))
+            return 0, {"mode": new, "previous": cur, "on": False}
         migrated = migrate_vmodem() if old_vm else False
         if cur and cur != new:
             mode_mod(cur).teardown()
@@ -375,7 +438,8 @@ def cmd_source(a):
     if not a.url:
         have = os.path.exists(TABLE)
         data = {"source": cfg.get("source") or None, "sheet": cfg.get("sheet") or None,
-                "copy": TABLE if have else None, "copy_time": int(os.path.getmtime(TABLE)) if have else None}
+                "copy": TABLE if have else None, "copy_time": int(os.path.getmtime(TABLE)) if have else None,
+                "on": is_on(cfg), "mode": cur_mode(cfg)}
         say("  таблица: %s" % ({"local": "локальная копия %s" % TABLE}.get(cfg.get("source"), cfg.get("source"))
                                or "не задана"))
         if have:
@@ -518,6 +582,10 @@ def cmd_sync(a):
         raise
     with lk:
         cfg = load_cfg()
+        if not is_on(cfg):
+            if a.quiet:
+                return 0, {"skipped": True, "on": False}
+            raise Fail(OFF_HINT)
         mode, mod = need_mode(cfg)
         res = do_sync(cfg, mode, mod, force=a.force)
         if not a.quiet:
@@ -541,6 +609,8 @@ def cmd_updown(a):
     need_root()
     n = parse_n(a.n, allow_all=True)
     cfg = load_cfg()
+    if not is_on(cfg):
+        raise Fail(OFF_HINT)
     mode, mod = need_mode(cfg)
     if n is None and a.cmd in ("down", "restart"):
         confirm(a, "%s все модемы сервера" % ("снять" if a.cmd == "down" else "пересоздать"), "да")
@@ -581,6 +651,9 @@ def print_rows(rows):
 
 def cmd_status(a):
     cfg = load_cfg()
+    if not is_on(cfg):
+        say("  " + OFF_HINT)
+        return 0, []
     _, mod = need_mode(cfg)
     rows = rows_of(mod, wan=a.wan)
     print_rows(rows)
@@ -589,6 +662,9 @@ def cmd_status(a):
 
 def cmd_problems(a):
     cfg = load_cfg()
+    if not is_on(cfg):
+        say("  " + OFF_HINT)
+        return 0, []
     _, mod = need_mode(cfg)
     rows = [r for r in rows_of(mod) if r["state"] not in ("ok", "disabled", "stopped")]
     if rows:
@@ -665,7 +741,7 @@ def cmd_replug(a):
     return 0, {"n": int(a.n), "text": msg}
 
 
-COMMANDS = {"setup": cmd_setup, "mode": cmd_mode, "source": cmd_source, "table": cmd_table, "lint": cmd_lint,
+COMMANDS = {"setup": cmd_setup, "on": cmd_on, "off": cmd_off, "mode": cmd_mode, "source": cmd_source, "table": cmd_table, "lint": cmd_lint,
             "sync": cmd_sync, "up": cmd_updown, "down": cmd_updown, "restart": cmd_updown, "status": cmd_status,
             "problems": cmd_problems, "diag": cmd_diag, "rotate": cmd_rotate, "reboot": cmd_rotate,
             "doctor": cmd_doctor, "version": cmd_version, "routes": cmd_routes, "hostside": cmd_hostside,
@@ -688,8 +764,9 @@ def parser():
     ap = Parser(prog="proxyveth", add_help=False)
     sub = ap.add_subparsers(dest="cmd", parser_class=Parser)
     sub.required = True
-    for c in ("setup", "lint", "problems", "doctor", "version"):
+    for c in ("setup", "lint", "problems", "doctor", "version", "on"):
         sub.add_parser(c, add_help=False)
+    sub.add_parser("off", add_help=False).add_argument("--yes", action="store_true")
     p = sub.add_parser("mode", add_help=False)
     p.add_argument("mode", nargs="?", choices=MODES)
     p.add_argument("--yes", action="store_true")

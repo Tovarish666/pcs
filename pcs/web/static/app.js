@@ -985,10 +985,34 @@
   const TABS = [["net", "сетевые интерфейсы"], ["modlink", "modlink"], ["term", "терминал"], ["settings", "управление"],
     ["mp", "mp.space"], ["ym", "ЮMoney"]];
 
+  // «Связь»: хаб ↔ ВМ по шагам — ВМ в Proxmox, guest agent, адрес (после перезагрузки DHCP мог
+  // дать новый), порт SSH (молчит — sshd перезапускается через агент), вход. Не ждать у моря погоды.
+  function reconnectDlg(X, id) {
+    const list = el("ol", {class: "stages"});
+    const note = el("p", {class: "muted", style: "margin:12px 0 0"});
+    async function run() {
+      list.replaceChildren(el("li", {class: "now"}, el("span", {class: "mk"}), el("span", {text: "проверяю: ВМ, guest agent, адрес, SSH…"})));
+      note.textContent = "";
+      const r = await X.POST("/servers/" + id + "/reconnect", {});
+      if (!r.ok) { list.replaceChildren(); note.textContent = "Ошибка: " + r.error; return; }
+      const d = r.data || {};
+      list.replaceChildren(...(d.steps || []).map((x) => el("li", {class: (x.ok ? "done" : "fail") + " fresh"}, el("span", {class: "mk"}),
+        el("span", {}, el("b", {text: x.what + ": "}), x.text))));
+      note.textContent = d.ok ? "Связь есть — данные ВМ обновлены." : "Связи нет. Без сети и SSH войти можно через консоль ВМ (Proxmox, qm terminal).";
+      (X.node ? refreshNodes() : refresh());
+    }
+    modal("Связь с ВМ " + id, el("div", {}, list, note), [
+      {text: "Консоль ВМ", onclick: (close) => { close(); S.wantSerial = String(id); location.hash = X.href("/vm/" + id + "/term"); }},
+      {text: "Проверить ещё раз", onclick: () => run()},
+      {text: "Закрыть", cls: "primary"}]);
+    run();
+  }
+
   function plaque(X, id) {
     const term = link("", X.href("/vm/" + id + "/term"), "btn");
     term.replaceChildren(ic("term"), "Терминал");
-    const ph = pageHead({chip: true, actions: term});
+    const conn = btn([ic("sync"), "Связь"], () => reconnectDlg(X, id), "", "переподключить: ВМ, guest agent, адрес, SSH — по шагам");
+    const ph = pageHead({chip: true, actions: [conn, term]});
     function update() {
       const s = X.srv(id);
       if (!s) {
@@ -1450,7 +1474,49 @@
       load(false);
     }, "источник модемов");
     const bEdit = {set disabled(v) { tableMenu.querySelector("button").disabled = v; }};
-    const bar = el("div", {class: "toolbar"}, bSync, tests, allMenu, tableMenu, res);
+    // Выключатель proxyveth (как у modlink): выключен — модемов нет, таймер sync стоит, при загрузке
+    // ОС ничего не поднимается (dummy_hcd не грузится) — сервер стартует быстро. Таблица остаётся.
+    let pvOn = null;
+    const swT = el("b", {text: "proxyveth"});
+    const swSub = el("span", {class: "muted", text: "…"});
+    const swJobs = el("div");
+    const sw = el("button", {type: "button", class: "switch", role: "switch", "aria-checked": "false", "aria-label": "proxyveth включён",
+      title: "включить или выключить proxyveth: виртуальные модемы и таймер sync", onclick: () => pvPower()}, el("span", {class: "knob", "aria-hidden": "true"}));
+    const powerBar = el("div", {class: "ml-power", hidden: true}, sw, el("div", {class: "ml-power-t"}, swT, swSub));
+    function showPower(on) {
+      if (on === undefined || on === null) { powerBar.hidden = true; return; }
+      powerBar.hidden = false;
+      pvOn = !!on;
+      sw.setAttribute("aria-checked", String(pvOn));
+      powerBar.classList.toggle("on", pvOn);
+      swT.textContent = pvOn ? "proxyveth включён" : "proxyveth выключен";
+      swSub.textContent = pvOn ? "модемы — по таблице, таймер sync идёт" : "модемов нет, при загрузке ОС ничего не поднимается — таблица на месте";
+      for (const b of [bSync, tests.querySelector("button"), allMenu.querySelector("button")]) if (b) b.disabled = !pvOn;
+    }
+    async function pvPower() {
+      const want = !pvOn;
+      let confirm = null;
+      if (!want) {
+        confirm = await confirmNumber("Выключить proxyveth · " + tname(id), "Все виртуальные модемы " + tname(id) + " будут сняты, таймер sync " +
+          "остановлен; при загрузке ОС ничего не поднимается (сервер стартует быстрее). Таблица и настройки останутся — включить можно в любой момент.",
+          id, "Выключить");
+        if (confirm == null) return;
+      }
+      sw.disabled = true;
+      const what = "proxyveth " + (want ? "включён" : "выключен");
+      const r = await act(null, res, () => X.run(id, "proxyveth", want ? ["on"] : ["off", "--yes"], want ? null : {confirm}), what);
+      sw.disabled = false;
+      const after = () => { load(false); refresh(); };
+      if (r && r.ok && r.data && r.data.job != null) {         // долгое — заданием: журнал здесь, по концу — перечитать
+        setRes(res, "run", want ? "включаю: модемы поднимаются по таблице…" : "выключаю: модемы снимаются…");
+        swJobs.replaceChildren(jobView(r.data.job, {title: (want ? "Включить" : "Выключить") + " proxyveth · " + tname(id),
+          base: X.node ? X.base : undefined, onDone: () => { setRes(res, "ok", what); toast(what + " · " + tname(id), want ? "ok" : "info"); after(); }}));
+        return;
+      }
+      if (r && r.ok) toast(what + " · " + tname(id), want ? "ok" : "info");
+      after();
+    }
+    const bar = el("div", {class: "toolbar"}, powerBar, bSync, tests, allMenu, tableMenu, res);
 
     async function sync(force) {
       extra.replaceChildren();
@@ -1509,7 +1575,9 @@
       }
       if (statusErr) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: "Ошибка: " + statusErr})); chips.hidden = true; return; }
       renderChips();
-      if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", style: "padding:16px", text: "Модемов нет — таблица пуста или не задана. «Таблица» → «Сменить ссылку» или «Править локально»."})); return; }
+      if (!rows.length) { tbl.replaceChildren(el("div", {class: "item muted", style: "padding:16px", text: pvOn === false
+        ? "proxyveth выключен — виртуальных модемов нет. Включить — переключателем выше: модемы поднимутся по таблице."
+        : "Модемов нет — таблица пуста или не задана. «Таблица» → «Сменить ссылку» или «Править локально»."})); return; }
       const shown = flt === "all" ? rows : rows.filter((r) => kindOf(r) === flt);
       const head = el("tr", {}, ["n", "real", "прокси", "состояние", "внешний IP", "заметки"].map((t) => el("th", {text: t})), el("th", {class: "acts-cell", text: "действия"}));
       const body = shown.map((r) => {
@@ -1577,6 +1645,7 @@
       if (!r.ok) { statusErr = r.error; renderRows(); if (opts.onCount) opts.onCount(0, 0); return; }
       const st = r.data.status;
       if (r.data.source) source = r.data.source;
+      showPower(source && source.ok && source.data ? source.data.on : undefined);
       statusErr = st && !st.ok ? st.error : null;
       rows = st && st.ok ? rowsOf(st.data) : statusErr && /режим[^.]*не задан/i.test(statusErr) ? [] : rows;
       renderInfo(); renderRows();
@@ -1644,7 +1713,7 @@
     }
 
     const pl = poller(10000, pollStatus);
-    const root = el("div", {}, info, bar, extra, editor, chips, tbl);
+    const root = el("div", {}, info, bar, swJobs, extra, editor, chips, tbl);
     let loaded = false;
     return {
       el: root,
@@ -2302,7 +2371,7 @@
   }
 
   class Term {
-    constructor(target, box, stateEl, wsPath) { this.target = target; this.box = box; this.stateEl = stateEl; this.wsPath = wsPath || "/ws/term"; this.enc = new TextEncoder(); }
+    constructor(target, box, stateEl, wsPath) { this.target = target; this.box = box; this.stateEl = stateEl; this.wsPath = wsPath || "/ws/term"; this.enc = new TextEncoder(); this.query = ""; }
     async open() {
       try { await loadXterm(); } catch (e) { this.state("xterm.js не загрузился", "err"); return; }
       this.t = new window.Terminal({cursorBlink: true, fontSize: 13, scrollback: 5000,
@@ -2326,11 +2395,15 @@
       if (this.ws && this.ws.readyState <= 1) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const url = proto + "//" + location.host + this.wsPath + "?target=" + encodeURIComponent(this.target) +
-        "&cols=" + this.t.cols + "&rows=" + this.t.rows;
+        "&cols=" + this.t.cols + "&rows=" + this.t.rows + this.query;
       this.state("подключение…", "run");
       const ws = this.ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
-      ws.onopen = () => { this.state("подключено", "ok"); this.ctl({type: "resize", cols: this.t.cols, rows: this.t.rows}); this.t.focus(); };
+      ws.onopen = () => {
+        this.state(this.query ? "консоль ВМ (qm terminal)" : "подключено", "ok");
+        if (this.query) this.t.write("\x1b[2m[консоль ВМ через Proxmox: Enter — приглашение входа; вход — root и пароль; выход — Ctrl+O]\x1b[0m\r\n");
+        this.ctl({type: "resize", cols: this.t.cols, rows: this.t.rows}); this.t.focus();
+      };
       ws.onmessage = (ev) => this.t.write(typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data));
       ws.onclose = (ev) => {
         const why = ev.reason || (ev.code === 1006 ? "соединение оборвалось" : "закрыто");
@@ -2339,6 +2412,13 @@
       };
     }
     send(bytes) { if (this.ws && this.ws.readyState === 1) this.ws.send(bytes); }
+    // консоль ВМ через Proxmox (qm terminal) или обычный SSH — переподключиться в другом режиме
+    mode(serial) {
+      this.query = serial ? "&console=serial" : "";
+      if (this.ws) { try { this.ws.onclose = null; this.ws.close(); } catch (e) { /* уже закрыт */ } this.ws = null; }
+      if (this.t) this.t.reset();
+      this.connect();
+    }
     ctl(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); }
     type(cmd) {
       if (!this.ws || this.ws.readyState !== 1) { this.connect(); return; }
@@ -2359,13 +2439,27 @@
     let t = null;
     const quick = (target === "host" ? ["hivelink status"] : QUICK).map((q) =>
       btn(q, () => t && t.type(q), "", "напечатать в консоль и выполнить"));
+    let serial = false;
+    const bSer = String(target) === "host" ? null : btn("Консоль ВМ", () => setSerial(!serial), "",
+      "без сети и SSH: последовательный порт ВМ через Proxmox (qm terminal); вход — root и пароль, выход — Ctrl+O");
+    function setSerial(on) {
+      serial = on;
+      if (bSer) { bSer.textContent = on ? "SSH" : "Консоль ВМ"; bSer.classList.toggle("on", on); }
+      for (const b of quick) b.disabled = on;
+      if (t && t.t) t.mode(on);
+    }
     const root = el("div", {},
-      el("div", {class: "term-bar"}, quick, el("span", {class: "spacer"}), st,
+      el("div", {class: "term-bar"}, quick, el("span", {class: "spacer"}), st, bSer,
         btn("Переподключить", () => { if (t) { t.t.write("\r\n"); t.connect(); } }, "link")),
       box);
     return {
       el: root,
-      show() { if (!t) { t = new Term(target, box, st, X.wsPath); t.open(); } else { t.refit(); if (t.t) t.t.focus(); } },
+      show() {
+        const want = S.wantSerial === String(target);
+        S.wantSerial = null;
+        if (!t) { t = new Term(target, box, st, X.wsPath); if (want) { serial = true; t.query = "&console=serial"; setSerial(true); } t.open(); }
+        else { t.refit(); if (t.t) t.t.focus(); if (want && !serial) setSerial(true); }
+      },
       dispose() { if (t) t.close(); },
     };
   }

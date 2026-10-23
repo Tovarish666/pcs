@@ -173,7 +173,7 @@ def update(target=None):
     return jobs.start("update", params, title="Обновление PCS (%s)" % key, target=key)
 
 
-LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart"),
+LONG = {"proxyveth": ("setup", "mode", "sync", "up", "down", "restart", "on", "off"),
         "modlink": ("setup", "migrate", "uninstall"),
         "hivelink": ("install", "uninstall")}
 
@@ -341,9 +341,14 @@ def jobs_recent(n=15):
     return sorted(jobs.recent(n) + bg.recent(n), key=lambda d: d.get("started") or 0, reverse=True)[:n]
 
 
-def term_argv(target):
-    """argv для pty терминала: ssh -tt … или bash -l для хоста."""
-    return ops.term_argv(_target(target))
+def term_argv(target, serial=False):
+    """argv для pty терминала: ssh -tt … или bash -l для хоста; serial — qm terminal (консоль ВМ без SSH)."""
+    return ops.term_argv(_target(target), serial=serial)
+
+
+def server_reconnect(id):
+    """«Переподключить»: связь с ВМ по шагам (ВМ, агент, адрес, порт SSH, вход). → {"ok", "ip", "steps"}."""
+    return srv.reconnect(_server(id)["id"])
 
 
 # ── исполнители фоновых заданий (pcs job run ID) ──────────────────────────

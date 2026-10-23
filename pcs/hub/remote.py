@@ -57,8 +57,8 @@ def call(s, cmd, input=None, timeout=None, key=None):
     принимается (rekey), команда — ещё раз."""
     if not s.get("ip"):
         raise Fail("у сервера %s нет адреса: pcs server adopt %s --ip IP" % (s.get("id"), s.get("id")))
-    argv = base(s, key=key) + [cmd]
     for attempt in (1, 2):
+        argv = base(s, key=key) + [cmd]
         try:
             r = subprocess.run(argv, capture_output=True, text=True, input=input, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -76,6 +76,8 @@ def call(s, cmd, input=None, timeout=None, key=None):
                 raise Fail("нет SSH до сервера %s (%s): ключ сервера сменился — %s" % (s["id"], s["ip"], e))
             ui.warn("сервер %s: ключ SSH сменился (%s → %s), новый подтверждён через guest agent Proxmox — принят"
                     % (s["id"], ", ".join(d["old"]) or "—", ", ".join(d["new"])))
+            continue
+        if attempt == 1 and unreachable(r.stderr) and ip_moved(s):
             continue
         why = (r.stderr.strip().splitlines() or [""])[-1] or "соединение оборвалось (сервер перезагружается или сеть моргнула)"
         raise Fail("нет SSH до сервера %s (%s): %s" % (s["id"], s["ip"], why))
@@ -127,6 +129,43 @@ def alive(s, timeout=30, key=None):
         return call(s, "true", timeout=timeout, key=key).returncode == 0
     except Fail:
         return False
+
+
+# ── адрес ВМ сменился (DHCP после перезагрузки) ──────────────────────────────
+UNREACH = ("No route to host", "Connection timed out", "Connection refused", "Network is unreachable",
+           "Host is down", "Operation timed out")
+_IP_CHECKED = {}
+IP_RECHECK = 60                  # с: не чаще — страница со многими ВМ не должна ждать агентов
+
+
+def unreachable(text):
+    return any(m in (text or "") for m in UNREACH)
+
+
+def ip_moved(s, force=False):
+    """ВМ этого хоста не отвечает по записанному адресу: спросить её адрес у Proxmox (guest agent,
+    соседи). Сменился — записать (сообщить) и → True: команда пойдёт по новому."""
+    from . import pve
+    sid = str(s.get("id", ""))
+    if not sid.isdigit() or not pve.is_pve():
+        return False
+    now = time.time()
+    if not force and now - _IP_CHECKED.get(sid, 0) < IP_RECHECK:
+        return False
+    _IP_CHECKED[sid] = now
+    try:
+        ip = pve.vm_ip(sid)
+    except (Fail, OSError, subprocess.TimeoutExpired):
+        return False
+    if not ip or ip == s.get("ip"):
+        return False
+    ui.warn("сервер %s: адрес сменился %s → %s (DHCP после перезагрузки?) — записал" % (sid, s.get("ip"), ip))
+    s["ip"] = ip
+    try:
+        store.save(dict(store.load(sid), ip=ip))
+    except Fail:
+        pass
+    return True
 
 
 # ── ключ сервера (known_hosts хаба) ────────────────────────────────────────

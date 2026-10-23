@@ -392,6 +392,47 @@ def test_mode():
         undo()
 
 
+def test_onoff():
+    print("выключатель proxyveth (как у modlink):")
+    fu = Fake("usb", running=[1, 2])
+    undo = with_modes(usb=fu)
+    try:
+        put_cfg(mode="usb", source=src(CSV))
+        rc, d = ok_json("source")
+        check("по умолчанию включён (флага нет — как было всегда); состояние видно в source", d["data"]["on"] is True, d)
+        rc, d = ok_json("off")
+        check("off с модемами без --yes в скрипте — отказ, ничего не тронуто", rc == 1 and "--yes" in d["error"]
+              and not fu.calls and json.load(open(cli.CONFIG)).get("on") is not False, d)
+        ran.clear()
+        rc, d = ok_json("off", "--yes")
+        check("off: модемы и своё сняты (teardown), таймер выключен, флаг записан; таблица и режим остались",
+              d["ok"] and d["data"]["removed"] == 2 and fu.names() == ["teardown"]
+              and ("systemctl", "disable", "--now", "proxyveth-sync.timer") in ran
+              and json.load(open(cli.CONFIG)) == dict(json.load(open(cli.CONFIG)), on=False, mode="usb")
+              and os.path.exists(json.load(open(cli.CONFIG))["source"]), (d, fu.names(), ran))
+        fu.calls.clear()
+        rc, d = ok_json("sync", "--quiet")
+        check("выключен: таймерный sync пропускает молча", d["ok"] and d["data"] == {"skipped": True, "on": False} and not fu.calls, d)
+        for args in (("sync",), ("up", "1"), ("down", "all", "--yes")):
+            rc, d = ok_json(*args)
+            check("выключен: %s — понятный отказ" % " ".join(args), rc == 1 and "proxyveth выключен" in d["error"], d)
+        rc, d = ok_json("status")
+        check("выключен: status — пусто, без опроса режима", d["ok"] and d["data"] == [] and not fu.calls, d)
+        rc, d = ok_json("mode", "usb")
+        check("выключен: mode — только запомнить режим, без подтверждения и без модемов", d["ok"] and d["data"]["on"] is False
+              and not fu.calls, (d, fu.names()))
+        rc, d = ok_json("setup")
+        check("выключен: setup (pcs update) не поднимает модемы и таймер", d["ok"] and d["data"]["on"] is False
+              and "setup" not in fu.names(), (d, fu.names()))
+        ran.clear()
+        rc, d = ok_json("on")
+        check("on: режим поднят, таймер включён, модемы — по таблице", d["ok"] and fu.names()[:2] == ["setup", "apply"]
+              and ("systemctl", "enable", "--now", "proxyveth-sync.timer") in ran and json.load(open(cli.CONFIG))["on"] is True,
+              (d, fu.names()))
+    finally:
+        undo()
+
+
 def test_migrate():
     print("переезд vmodem 4.x → proxyveth usb (временный корень):")
     root = os.path.join(TMP, "vmodem-root")
@@ -528,6 +569,7 @@ if __name__ == "__main__":
         test_commands()
         test_source()
         test_mode()
+        test_onoff()
         test_migrate()
     finally:
         net.local_octets, net.pin_proxies = net_saved

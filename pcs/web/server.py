@@ -507,7 +507,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         q = {k: v[-1] for k, v in urllib.parse.parse_qs(u.query).items()}
         try:
             t = target(q.get("target", ""))
-            argv = app.api.term_argv(t)
+            if q.get("console") == "serial":
+                if t == "host":
+                    raise Bad("консоль через Proxmox — только у ВМ")
+                argv = app.api.term_argv(t, serial=True)
+            else:
+                argv = app.api.term_argv(t)
             cols, rows = int(q.get("cols", 100)), int(q.get("rows", 30))
         except (Bad, Fail, ValueError) as e:
             return self._send(400, str(e), "text/plain; charset=utf-8")

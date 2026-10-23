@@ -129,6 +129,7 @@ class Panel:
             ("POST", r"/api/servers/(\d+)/forget", self.forget_server),
             ("POST", r"/api/servers/(\d+)/color", self.color),
             ("POST", r"/api/servers/(\d+)/hostkey", self.hostkey),
+            ("POST", r"/api/servers/(\d+)/reconnect", self.reconnect),
             ("GET", r"/api/vms", self.vms_other),
             ("POST", r"/api/vms/(\d+)/adopt", self.adopt),
             ("GET", r"/api/colors", self.colors),
@@ -660,6 +661,15 @@ class Panel:
 
     def color(self, sid, query, body):
         r = self.api.server_color(int(sid), _s(body.get("color"), "цвет", 20).strip())
+        self.forget()
+        return ok(r)
+
+    def reconnect(self, sid, query, body):
+        """«Переподключить»: связь с ВМ по шагам; после — обзор заново (там «нет SSH» уйдёт сразу)."""
+        fn = getattr(self.api, "server_reconnect", None)
+        if fn is None:
+            raise Bad("этот хаб не умеет переподключать — обновите PCS", 501)
+        r = fn(int(sid))
         self.forget()
         return ok(r)
 
