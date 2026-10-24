@@ -3,8 +3,8 @@
    цвета состояний — только для состояний. Поверхности разделяет тон, линии — только в таблицах.
    Движение — transform и opacity, ease-out на вход; при prefers-reduced-motion — без перемещений. */
 
-@font-face { font-family: "Geist"; src: url("/static/fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
-@font-face { font-family: "Geist Mono"; src: url("/static/fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Geist"; src: url("fonts/Geist-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Geist Mono"; src: url("fonts/GeistMono-Variable.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
 
 :root {
   /* светлая */
@@ -18,6 +18,12 @@
   --skel: rgba(15, 23, 42, .06); --skel-hi: rgba(15, 23, 42, .11);
   --chip-l: 46%;
   color-scheme: light;
+  /* космос (украшения, не данные): звёзды, орбиты, планета на входе */
+  --cos-star: hsl(244 45% 45% / .4); --cos-orbit: hsl(246 60% 50% / .2); --cos-sat: hsl(250 80% 58%);
+  --cos-p0: #f3f1ff; --cos-p1: #d6d0fb; --cos-p2: #b9adf1; --cos-rim: hsl(250 90% 72% / .55);
+  --cos-stars: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='620' height='620'%3E%3Ccircle cx='202' cy='96' r='0.9' fill='%23fff' fill-opacity='0.52'/%3E%3Ccircle cx='402' cy='48' r='1' fill='%23fff' fill-opacity='0.97'/%3E%3Ccircle cx='332' cy='228' r='1' fill='%23fff' fill-opacity='0.89'/%3E%3Ccircle cx='39' cy='315' r='1.2' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='27' cy='269' r='0.9' fill='%23fff' fill-opacity='0.45'/%3E%3Ccircle cx='47' cy='60' r='0.7' fill='%23fff' fill-opacity='0.54'/%3E%3Ccircle cx='264' cy='510' r='0.8' fill='%23fff' fill-opacity='0.6'/%3E%3Ccircle cx='80' cy='141' r='1' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='388' cy='584' r='1' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='601' cy='33' r='1' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='529' cy='181' r='0.9' fill='%23fff' fill-opacity='0.88'/%3E%3Ccircle cx='92' cy='76' r='0.7' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='193' cy='503' r='0.7' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='115' cy='360' r='1.4' fill='%23fff' fill-opacity='0.83'/%3E%3Ccircle cx='395' cy='232' r='0.8' fill='%23fff' fill-opacity='0.69'/%3E%3Ccircle cx='339' cy='42' r='0.8' fill='%23fff' fill-opacity='0.66'/%3E%3Ccircle cx='40' cy='130' r='1.2' fill='%23fff' fill-opacity='0.6'/%3E%3Ccircle cx='420' cy='266' r='1.4' fill='%23fff' fill-opacity='0.97'/%3E%3Ccircle cx='196' cy='362' r='1.2' fill='%23fff' fill-opacity='0.64'/%3E%3Ccircle cx='281' cy='187' r='1' fill='%23fff' fill-opacity='0.85'/%3E%3Ccircle cx='490' cy='432' r='0.7' fill='%23fff' fill-opacity='0.83'/%3E%3Ccircle cx='153' cy='356' r='0.8' fill='%23fff' fill-opacity='1.0'/%3E%3Ccircle cx='325' cy='540' r='0.7' fill='%23fff' fill-opacity='0.49'/%3E%3Ccircle cx='450' cy='180' r='1' fill='%23fff' fill-opacity='0.88'/%3E%3Ccircle cx='604' cy='76' r='0.8' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='260' cy='467' r='1' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='97' cy='303' r='1.2' fill='%23fff' fill-opacity='0.96'/%3E%3Ccircle cx='28' cy='413' r='0.8' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='472' cy='355' r='0.8' fill='%23fff' fill-opacity='0.41'/%3E%3Ccircle cx='430' cy='368' r='1.4' fill='%23fff' fill-opacity='0.98'/%3E%3Ccircle cx='359' cy='283' r='1.2' fill='%23fff' fill-opacity='0.46'/%3E%3Ccircle cx='518' cy='582' r='1.2' fill='%23fff' fill-opacity='0.96'/%3E%3Ccircle cx='294' cy='410' r='1' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='240' cy='413' r='0.8' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='40' cy='474' r='0.8' fill='%23fff' fill-opacity='0.42'/%3E%3Ccircle cx='505' cy='533' r='0.8' fill='%23fff' fill-opacity='0.58'/%3E%3Ccircle cx='174' cy='258' r='0.8' fill='%23fff' fill-opacity='0.86'/%3E%3Ccircle cx='224' cy='545' r='0.9' fill='%23fff' fill-opacity='0.56'/%3E%3Ccircle cx='147' cy='301' r='1' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='365' cy='165' r='0.7' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='587' cy='427' r='0.9' fill='%23fff' fill-opacity='0.94'/%3E%3Ccircle cx='319' cy='382' r='1.2' fill='%23fff' fill-opacity='0.75'/%3E%3Ccircle cx='555' cy='481' r='1' fill='%23fff' fill-opacity='0.65'/%3E%3Ccircle cx='244' cy='248' r='1' fill='%23fff' fill-opacity='0.48'/%3E%3Ccircle cx='67' cy='392' r='0.8' fill='%23fff' fill-opacity='0.71'/%3E%3Ccircle cx='132' cy='103' r='0.7' fill='%23fff' fill-opacity='0.92'/%3E%3Ccircle cx='212' cy='36' r='1.4' fill='%23fff' fill-opacity='0.51'/%3E%3Ccircle cx='4' cy='97' r='0.7' fill='%23fff' fill-opacity='0.87'/%3E%3Ccircle cx='66' cy='227' r='0.8' fill='%23fff' fill-opacity='0.5'/%3E%3Ccircle cx='20' cy='539' r='1' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='380' cy='95' r='0.7' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='158' cy='217' r='0.9' fill='%23fff' fill-opacity='0.81'/%3E%3Ccircle cx='289' cy='300' r='1' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='214' cy='166' r='1.4' fill='%23fff' fill-opacity='0.87'/%3E%3Ccircle cx='511' cy='103' r='1' fill='%23fff' fill-opacity='0.43'/%3E%3Ccircle cx='18' cy='586' r='0.8' fill='%23fff' fill-opacity='0.57'/%3E%3Ccircle cx='327' cy='94' r='1.4' fill='%23fff' fill-opacity='0.46'/%3E%3Ccircle cx='327' cy='603' r='1' fill='%23fff' fill-opacity='0.74'/%3E%3Ccircle cx='532' cy='430' r='1.4' fill='%23fff' fill-opacity='0.94'/%3E%3Ccircle cx='106' cy='476' r='0.7' fill='%23fff' fill-opacity='0.67'/%3E%3Ccircle cx='330' cy='481' r='1' fill='%23fff' fill-opacity='0.98'/%3E%3Ccircle cx='21' cy='175' r='1' fill='%23fff' fill-opacity='0.71'/%3E%3Cpath transform='translate%28112 418%29 scale%281%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28488 96%29 scale%280.8%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28322 262%29 scale%280.55%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28560 530%29 scale%280.65%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3C/svg%3E");
+  --cos-rings: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='760' height='760' fill='none' stroke='%23fff'%3E%3Ccircle cx='380' cy='380' r='378' stroke-width='1.2'/%3E%3Ccircle cx='380' cy='380' r='300' stroke-width='1' stroke-dasharray='2 9'/%3E%3Ccircle cx='380' cy='380' r='216' stroke-width='1' stroke-opacity='.6'/%3E%3C/svg%3E");
+  --cos-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%23fff'%3E%3Ccircle cx='16' cy='16' r='6.2' fill='%23fff' stroke='none'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='4.4' stroke-width='1.6' transform='rotate%28-24 16 16%29'/%3E%3Ccircle cx='26.4' cy='10.6' r='1.7' fill='%23fff' stroke='none'/%3E%3C/svg%3E");
 
   --sans: "Geist", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -38,6 +44,8 @@
   --skel: rgba(255, 255, 255, .05); --skel-hi: rgba(255, 255, 255, .1);
   --chip-l: 62%;
   color-scheme: dark;
+  --cos-star: hsl(232 80% 92% / .75); --cos-orbit: hsl(236 80% 78% / .18); --cos-sat: hsl(190 100% 80%);
+  --cos-p0: #3b2f9a; --cos-p1: #1c1758; --cos-p2: #0b0d22; --cos-rim: hsl(196 100% 70% / .5);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -51,6 +59,8 @@
     --skel: rgba(255, 255, 255, .05); --skel-hi: rgba(255, 255, 255, .1);
     --chip-l: 62%;
     color-scheme: dark;
+    --cos-star: hsl(232 80% 92% / .75); --cos-orbit: hsl(236 80% 78% / .18); --cos-sat: hsl(190 100% 80%);
+    --cos-p0: #3b2f9a; --cos-p1: #1c1758; --cos-p2: #0b0d22; --cos-rim: hsl(196 100% 70% / .5);
   }
 }
 
@@ -122,8 +132,7 @@ select { background-color: var(--s1); color: var(--fg); }
 .side-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 12px; }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: .02em; color: var(--fg); }
 .brand:hover { text-decoration: none; }
-.brand .mark, .login-brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); position: relative; flex: none; }
-.brand .mark::after, .login-brand .mark::after { content: ""; position: absolute; inset: 6px; border-radius: 2px; border: 2px solid var(--accent-fg); border-right-color: transparent; }
+.brand .mark, .login-brand .mark { width: 24px; height: 24px; border-radius: 6px; flex: none; display: block; }
 .brand-sub { font-size: 12px; color: var(--fg3); font-family: var(--mono); }
 .side-search { margin: 0 12px 8px; position: relative; display: block; }
 .side-search .ic { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg3); width: 15px; height: 15px; pointer-events: none; }
@@ -132,7 +141,7 @@ nav#tree { flex: 1; overflow: auto; padding: 4px 8px 16px; overscroll-behavior: 
 .side-foot { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-top: 1px solid var(--line); font-size: 13px; color: var(--fg2); }
 .side-foot #h-user { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.main-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.main-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; isolation: isolate; overflow: hidden; }
 header.top {
   height: 52px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 28px;
   border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 88%, transparent);
@@ -596,16 +605,15 @@ table.ml tr.ml-more td { background: var(--s2); }
 /* фон: мягкое пятно акцента и точечная сетка, гаснущая к краям */
 .login-wrap::before { content: ""; position: absolute; inset: 0; z-index: -1;
   background: radial-gradient(600px 380px at 50% 30%, var(--accent-soft), transparent 70%); }
-.login-wrap::after { content: ""; position: absolute; inset: 0; z-index: -1; opacity: .55;
-  background-image: radial-gradient(var(--line2) 1px, transparent 1.2px); background-size: 22px 22px;
-  -webkit-mask-image: radial-gradient(520px 420px at 50% 40%, #000 20%, transparent 75%); mask-image: radial-gradient(520px 420px at 50% 40%, #000 20%, transparent 75%); }
+.login-wrap::after { content: ""; position: absolute; inset: 0; z-index: -2; background: var(--cos-star);
+  -webkit-mask: var(--cos-stars) 0 0 / 620px 620px repeat, var(--cos-stars) 230px 170px / 940px 940px repeat;
+  mask: var(--cos-stars) 0 0 / 620px 620px repeat, var(--cos-stars) 230px 170px / 940px 940px repeat; }
 .login-card { width: min(380px, 100%); background: var(--s1); border: 1px solid var(--line); border-radius: var(--r3); padding: 28px; display: grid; gap: 16px;
   box-shadow: var(--shadow-pop); animation: rise 520ms var(--ease-out); transition: opacity 160ms ease, transform 160ms ease; }
 .login-card > * { animation: row-in 420ms var(--ease-out) both; }
 .login-card > :nth-child(2) { animation-delay: 60ms; } .login-card > :nth-child(3) { animation-delay: 100ms; } .login-card > :nth-child(n+4) { animation-delay: 140ms; }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-.login-brand .mark { width: 34px; height: 34px; border-radius: 9px; }
-.login-brand .mark::after { inset: 9px; border-width: 2.5px; }
+.login-brand .mark { width: 40px; height: 40px; border-radius: 10px; box-shadow: 0 6px 18px -6px hsl(250 80% 40% / .55); }
 .login-brand h1 { font-size: 20px; }
 .login-brand .muted { font-size: 12.5px; }
 .login-card label { display: grid; gap: 6px; font-size: 13px; color: var(--fg2); }
@@ -703,3 +711,44 @@ body.teleported .app { height: calc(100% - 40px); }
 .t-gear:hover { background: var(--s2); color: var(--fg); }
 .t-gear .ic { width: 14px; height: 14px; }
 .t-row.t-tele .t-meta::after { content: " ⟶"; color: var(--accent, #8ab4ff); }
+
+/* ── космос: украшения (знак PCS «Орбита» — static/favicon.svg) ──────────────
+   Ничего не значат и ни на что не нажимаются: звёзды в боковой панели, кольца орбит в углу
+   рабочей области (по кольцу изредка проходит спутник), сцена с планетой на входе, рисунок
+   в пустых состояниях. Всё — под содержимым и тонко; при reduce — без движения. */
+.side { position: relative; isolation: isolate; }
+.side::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 240px; z-index: -1; pointer-events: none;
+  background: var(--cos-star);
+  -webkit-mask: var(--cos-stars) 30px -40px / 620px 620px repeat, linear-gradient(#000, transparent);
+  -webkit-mask-composite: source-in;
+  mask: var(--cos-stars) 30px -40px / 620px 620px repeat, linear-gradient(#000, transparent); mask-composite: intersect; }
+.main-col::before, .main-col::after { content: ""; position: absolute; z-index: -1; pointer-events: none;
+  width: 760px; height: 760px; right: -360px; top: -430px; }
+.main-col::before { background: var(--cos-orbit);
+  -webkit-mask: var(--cos-rings) center / 100% 100% no-repeat; mask: var(--cos-rings) center / 100% 100% no-repeat; }
+/* два спутника на внешнем кольце, напротив друг друга; видна только нижняя левая дуга кольца */
+.main-col::after { border-radius: 50%; animation: cos-orbit 150s linear infinite;
+  background: radial-gradient(circle at 50% .4%, var(--cos-sat) 0 2.5px, transparent 3.5px),
+              radial-gradient(circle at 50% 99.6%, var(--cos-sat) 0 2px, transparent 3px); }
+@keyframes cos-orbit { to { transform: rotate(360deg); } }
+body.viewer .main-col::before, body.viewer .main-col::after { display: none; }
+
+/* вход: планета встаёт из-за правого нижнего края, по орбите идёт спутник (login.html) */
+.cosmos { position: absolute; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
+.cosmos .c-planet { fill: url(#c-planet); }
+.cosmos .c-rim { fill: none; stroke: var(--cos-rim); stroke-width: 3; }
+.cosmos .c-band { fill: none; stroke: var(--cos-p0); stroke-width: 26; opacity: .16; }
+.cosmos .c-band.thin { stroke-width: 6; opacity: .22; }
+.cosmos .c-air { fill: none; stroke: var(--cos-rim); stroke-width: 40; opacity: .07; }
+.cosmos .c-p0 { stop-color: var(--cos-p0); } .cosmos .c-p1 { stop-color: var(--cos-p1); } .cosmos .c-p2 { stop-color: var(--cos-p2); }
+.cosmos .c-orbit { fill: none; stroke: var(--cos-orbit); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
+.cosmos .c-far { stroke-dasharray: 2 10; }
+.cosmos .c-sat { fill: var(--cos-sat); }
+.cosmos .c-sat-glow { fill: var(--cos-sat); opacity: .2; }
+
+/* пустые состояния: маленькая планета с орбитой */
+.net-empty::before { content: ""; width: 26px; height: 26px; flex: none; background: var(--fg3); opacity: .7;
+  -webkit-mask: var(--cos-icon) center / contain no-repeat; mask: var(--cos-icon) center / contain no-repeat; }
+.br-empty::before { content: ""; width: 44px; height: 44px; background: var(--accent); opacity: .45;
+  -webkit-mask: var(--cos-icon) center / contain no-repeat; mask: var(--cos-icon) center / contain no-repeat; }
+@media (prefers-reduced-motion: reduce) { .main-col::after { animation: none; } }

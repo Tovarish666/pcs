@@ -1,1 +1,21 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#2563c9"/><path d="M9 23V9h7.5a4.5 4.5 0 0 1 0 9H13v5z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<!-- Знак PCS «Орбита»: хост — планета, модемы — спутники на орбите. Орбита уходит за планету и выходит перед ней. -->
+<defs>
+<linearGradient id="pcs-sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#211a5e"/><stop offset="1" stop-color="#070a1d"/></linearGradient>
+<radialGradient id="pcs-planet" cx=".34" cy=".3" r=".85"><stop offset="0" stop-color="#eef0ff"/><stop offset=".3" stop-color="#9c8cff"/><stop offset=".75" stop-color="#4b2fd0"/><stop offset="1" stop-color="#2a1a86"/></radialGradient>
+<linearGradient id="pcs-orbit" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8f7dff"/><stop offset=".6" stop-color="#4fd8ff"/><stop offset="1" stop-color="#c9f6ff"/></linearGradient>
+</defs>
+<rect width="32" height="32" rx="8" fill="url(#pcs-sky)"/>
+<circle cx="6.5" cy="7" r=".8" fill="#fff" opacity=".85"/>
+<circle cx="25.8" cy="5.6" r=".55" fill="#fff" opacity=".6"/>
+<circle cx="26.5" cy="25.5" r=".5" fill="#fff" opacity=".5"/>
+<g transform="translate(16 16.4) rotate(-24)">
+<path d="M-12.6 0A12.6 4.3 0 0 1 12.6 0" fill="none" stroke="url(#pcs-orbit)" stroke-width="1.4" opacity=".45"/>
+</g>
+<circle cx="16" cy="16.4" r="6.7" fill="url(#pcs-planet)"/>
+<g transform="translate(16 16.4) rotate(-24)">
+<path d="M-12.6 0A12.6 4.3 0 0 0 12.6 0" fill="none" stroke="url(#pcs-orbit)" stroke-width="1.7" stroke-linecap="round"/>
+<circle cx="9.7" cy="2.75" r="2.6" fill="#4fd8ff" opacity=".28"/>
+<circle cx="9.7" cy="2.75" r="1.6" fill="#fff"/>
+</g>
+</svg>
