@@ -1089,7 +1089,8 @@
       el("span", {class: "spacer"}), hl.tools), hl.el);
     const secVirt = el("section", {class: "net-sec"}, el("div", {class: "sec-head"}, el("h2", {text: "Виртуальные модемы"}), virtCount,
       el("span", {class: "spacer"}), el("span", {class: "muted", text: "proxyveth"})), pv.el);
-    const root = el("div", {}, sum, secPhys, secVirt);
+    const md = X.node ? null : mdCard(X, id);
+    const root = el("div", {}, sum, secPhys, secVirt, md ? md.el : null);
     function arrange() {
       virtCount.textContent = cnt.virt == null ? "" : String(cnt.virt);
       const parts = [];
@@ -1109,7 +1110,7 @@
       el: root,
       show() { hl.show(); pv.show(); },
       hide() { hl.hide(); pv.hide(); },
-      dispose() { hl.dispose(); pv.dispose(); },
+      dispose() { hl.dispose(); pv.dispose(); if (md) md.dispose(); },
       update() { pv.update(); },
     };
   }
@@ -1176,7 +1177,7 @@
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             r.dataswitch === 0 && can ? ibtn("bolt", "включить мобильные данные (hivelink dataon " + r.n + ")", (e) => act1(e.currentTarget, "dataon", r.n, "данные включены"), "", "данные") : null,
             can ? ibtn("redo", "переподключить: откл → вкл (hivelink reconnect " + r.n + ")", (e) => act1(e.currentTarget, "reconnect", r.n, "переподключён")) : null,
-            can ? ibtn("link", "веб модема " + r.n + " (192.168." + r.n + ".1) — в отдельном окне", () => openModem(X, id, "192.168." + r.n + ".1")) : null,
+            can ? ibtn("link", "веб модема " + r.n + " (192.168." + r.n + ".1) — в блоке «Веб модема» внизу", () => openModem(X, id, "192.168." + r.n + ".1")) : null,
             r.off ? null : ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
               (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }),
             r.off
@@ -1215,10 +1216,14 @@
     return RFBmod;
   }
 
-  // Веб модема — в отдельном окне: браузер модемов машины, где модем воткнут (хост — сам хаб,
-  // ВМ — через SSH хаба). Одно окно на машину, каждый модем — новая вкладка в нём.
-  function openModem(X, id, ip) {
+  // Веб модема: браузер модемов машины, где модем воткнут (хост — сам хаб, ВМ — через SSH хаба).
+  // На странице есть блок «Веб модема» (modlink, сетевые интерфейсы) — открывается в нём, иначе
+  // (или popup: true) — в отдельном окне. Одно окно на машину, каждый модем — новая вкладка в нём.
+  const MD_CARDS = {};
+  function openModem(X, id, ip, popup) {
     if (X.node) { toast("веб модема присоединённого хоста — в панели того хоста", "warn"); return; }
+    const card = [...(MD_CARDS[id] || [])].find((c) => c.el.isConnected && c.el.offsetParent !== null);  // видимый
+    if (!popup && card) { card.open(ip); return; }
     const name = "pcs-md-" + id;
     const w = window.open("", name, "popup=yes,width=1320,height=860");   // сразу, в нажатии: иначе окно заблокируют
     const view = location.origin + location.pathname + "#/md/" + id;
@@ -1230,13 +1235,9 @@
       w.focus();
     });
   }
-  function pageMd(X, id) {
-    const where = id === "host" ? "хост " + X.title() : "ВМ " + id;
-    document.title = "Модемы · " + where;
-    const res = el("span", {class: "res"});
-    const screen = el("div", {class: "md-screen"});
+  // Экран браузера модемов (md) машины id в элементе screen: noVNC и повторы, пока браузер поднимается.
+  function mdScreen(id, screen, msg) {
     let rfb = null, alive = true, tries = 0;
-    const msg = (t, ...b) => screen.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: t}), b.length ? el("div", {class: "bar"}, b) : null));
     async function connect() {
       if (rfb || !alive) return;
       let RFB;
@@ -1256,11 +1257,83 @@
         msg("Браузер модемов закрыт", btn("Подключиться снова", () => { tries = 0; connect(); }, "primary"));
       });
     }
+    return {
+      connect() { alive = true; tries = 0; connect(); },
+      close() { alive = false; if (rfb) { try { rfb.disconnect(); } catch (x) { /* уже закрыт */ } } rfb = null; },
+      get on() { return !!rfb; },
+    };
+  }
+  // Блок «Веб модема» на странице: адрес → экран браузера модемов тут же. Браузер не установлен —
+  // «Установить браузер» здесь же (раньше — только сообщение, а кнопка — на вкладках mp.space/ЮMoney).
+  function mdCard(X, id) {
+    const where = id === "host" ? "хост" : "ВМ " + id;
+    const res = el("span", {class: "res"});
+    const ip = el("input", {class: "mono md-ip", placeholder: "192.168.N.1", autocomplete: "off", spellcheck: "false", "aria-label": "адрес модема"});
+    const screen = el("div", {class: "md-screen md-inline"});
+    const msg = (t, ...b) => screen.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: t}), b.length ? el("div", {class: "bar"}, b) : null));
+    const view = mdScreen(id, screen, msg);
+    const body = el("div", {class: "md-body", hidden: true}, screen);
+    const bOpen = btn("Открыть", () => open(), "primary", "веб модема здесь, под строкой: вкладка в браузере модемов " + where);
+    const bWin = btn("В отдельном окне", () => { const a = addr(); if (a) openModem(X, id, a, true); }, "ghost", "то же в отдельном окне браузера");
+    const bFull = btn("Во весь экран", () => { if (screen.requestFullscreen) screen.requestFullscreen(); }, "ghost");
+    const bHide = btn("Свернуть", () => { view.close(); body.hidden = true; more.hidden = true; }, "ghost", "спрятать экран; браузер и вход в модемы остаются");
+    const bStop = btn("Закрыть браузер", async (e) => {
+      view.close();
+      await act(e.currentTarget, res, () => POST("/api/browser/md/" + id + "/stop", {}), "закрыт");
+      body.hidden = true; more.hidden = true;
+    }, "ghost", "закрыть браузер модемов " + where + "; вход в веб модемов сохранится");
+    const more = el("span", {class: "md-more", hidden: true}, bFull, bHide, bStop);
+    ip.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
+    function addr() {
+      const a = ip.value.trim();
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) { setRes(res, "err", "адрес модема — например 192.168.40.1"); ip.focus(); return null; }
+      return a;
+    }
+    function install() {
+      const jobs = el("div");
+      screen.replaceChildren(el("div", {class: "br-empty"},
+        el("div", {class: "br-empty-t", text: "Браузер ещё не установлен на этом хосте"}),
+        el("p", {class: "muted", text: "Яндекс Браузер для Linux, экран и шрифты — около 500 МБ, несколько минут. Ставится один раз на хост с панелью: им открываются веб модемов, mp.space и ЮMoney."}),
+        el("div", {class: "bar"}, btn("Установить браузер", async (e) => {
+          const r = await act(e.currentTarget, res, () => POST("/api/browser/install", {}), "ставлю…");
+          if (r && r.ok && r.data && r.data.job) jobs.replaceChildren(jobView(r.data.job, {title: "Установка браузера", onDone: () => open()}));
+        }, "primary")), jobs));
+    }
+    async function open(a0) {
+      if (a0) ip.value = a0;
+      const a = addr();
+      if (!a) return;
+      body.hidden = false;
+      card.scrollIntoView({behavior: "smooth", block: "nearest"});
+      const st = await GET("/api/browser/md/" + id);
+      if (st.ok && st.data && st.data.installed === false) { setRes(res, "", ""); more.hidden = true; install(); return; }
+      if (!view.on) msg("Открываю веб модема " + a + "…");
+      const r = await act(bOpen, res, () => POST("/api/browser/md/" + id + "/modem", {ip: a}), "открыт " + a);
+      if (!r || !r.ok) { msg("Не открылось: " + ((r && r.error) || "неизвестно")); return; }
+      more.hidden = false;
+      if (st.ok && st.data && st.data.fake) { screen.replaceChildren(el("div", {class: "br-fake", text: "Фейковая панель: окна браузера нет. На настоящем хосте здесь веб модема " + a + "."})); return; }
+      view.connect();
+    }
+    const card = el("div", {class: "br-card md-card"},
+      el("div", {class: "br-row"}, el("span", {class: "br-lbl", text: "Веб модема"}), ip, bOpen, bWin,
+        el("span", {class: "muted md-hint", text: "или кнопка «веб модема» в строке"}), el("span", {class: "spacer"}), res, more),
+      body);
+    const self = {el: card, open, dispose() { view.close(); if (MD_CARDS[id]) MD_CARDS[id].delete(self); }};
+    (MD_CARDS[id] = MD_CARDS[id] || new Set()).add(self);   // у машины их два: modlink и сетевые интерфейсы
+    return self;
+  }
+  function pageMd(X, id) {
+    const where = id === "host" ? "хост " + X.title() : "ВМ " + id;
+    document.title = "Модемы · " + where;
+    const res = el("span", {class: "res"});
+    const screen = el("div", {class: "md-screen"});
+    const msg = (t, ...b) => screen.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: t}), b.length ? el("div", {class: "bar"}, b) : null));
+    const view = mdScreen(id, screen, msg);
+    const connect = () => view.connect();
     const bFull = btn("На весь экран", () => { if (screen.requestFullscreen) screen.requestFullscreen(); }, "ghost");
     const bStop = btn("Закрыть браузер", async (e) => {
       if (!window.confirm("Закрыть браузер модемов (" + where + ")? Вход в веб модемов сохранится.")) return;
-      alive = false;
-      if (rfb) { try { rfb.disconnect(); } catch (x) { /* уже закрыт */ } }
+      view.close();
       await act(e.currentTarget, res, () => X.POST("/browser/md/" + id + "/stop", {}), "Закрыт");
       window.close();
     }, "ghost");
@@ -1270,7 +1343,7 @@
     msg("Подключаюсь к браузеру модемов…");
     connect();
     return {kind: "md", id, node: X.node, el: el("div", {class: "md-page"}, bar, screen), show() {},
-      dispose() { alive = false; if (rfb) { try { rfb.disconnect(); } catch (x) { /* уже закрыт */ } } }};
+      dispose() { view.close(); }};
   }
   function browserTab(X, id, kind) {
     const q = X.node ? "?node=" + encodeURIComponent(X.node) : "";
@@ -1612,7 +1685,7 @@
               : ibtn("stop", "остановить модем " + r.n + ": таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")", (e) => updown(e.currentTarget, "down", r.n), "", "остановить"),
             ibtn("redo", "пересоздать модем " + r.n + ": интерфейс снимется и поднимется заново (proxyveth restart " + r.n + ")", (e) => updown(e.currentTarget, "restart", r.n)),
             ibtn("pulse", "диагностика модема " + r.n + ": прокси → логин → модем → SIM → интернет", () => diag(r.n)),
-            ibtn("link", "веб модема " + r.n + ": настоящий модем за прокси (через 192.168." + r.n + ".1 этого сервера) — в отдельном окне",
+            ibtn("link", "веб модема " + r.n + ": настоящий модем за прокси (через 192.168." + r.n + ".1 этого сервера) — в блоке «Веб модема» внизу",
               () => openModem(X, id, "192.168." + r.n + ".1")))));
       });
       const tb = el("tbody", {}, body);
@@ -2077,7 +2150,7 @@
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             ibtn("bolt", "Test: внешний IP через этот прокси + HiLink", () => test(r), "", "test"),
             ibtn("redo", "реконнект: сменить IP", () => rowAct(r, "реконнект", ["reconnect", String(r.id)])),
-            val(r, "modem_ip") ? ibtn("link", "веб модема (" + val(r, "modem_ip") + ") — в отдельном окне", () => openModem(X, id, val(r, "modem_ip"))) : null,
+            val(r, "modem_ip") ? ibtn("link", "веб модема (" + val(r, "modem_ip") + ") — здесь же, в блоке «Веб модема» под таблицей", () => openModem(X, id, val(r, "modem_ip"))) : null,
             ibtn("copy", "копировать строку: прокси и ссылки", () => copyRow(r)),
             ibtn("chev", open ? "свернуть" : "ещё: порты, автореконнект, защита, ребут, скорость", () => { open ? opened.delete(r.id) : opened.add(r.id); draw(); }, open ? "on" : ""),
             ibtn("trash", gone ? "не удалять" : "удалить строку (при «Применить»)", () => { if (gone) deleted.delete(r.id); else deleted.add(r.id); draw(); markDirty(); }, "danger")))));
@@ -2316,20 +2389,21 @@
     }, "журналы служб");
 
     powerBar.hidden = true;
+    const md = X.node ? null : mdCard(X, id);
     const root = el("div", {}, legacyBox,
       el("div", {class: "toolbar"}, powerBar, pill, engineEl, el("span", {class: "spacer"}), dirtyEl, bApply),
       netCard,
       el("div", {class: "sec-head"}, el("h2", {text: "Модемы"}), cnt, el("span", {class: "spacer"}), res),
       el("div", {class: "toolbar"}, bAdd, bRange, bIf, bImp, copyMenu, bTbl, logsMenu, el("span", {class: "spacer"}),
         btn("Обновить", () => load(), "ghost", "перечитать (несохранённое пропадёт)")),
-      tbl, out);
+      tbl, out, md ? md.el : null);
     let loaded = false;
     const pl = poller(15000, pollStatus);
     return {
       el: root,
       show() { if (!loaded) { loaded = true; tbl.replaceChildren(skelRows(6)); load(); } else pollStatus(); pl.start(); },
       hide() { pl.stop(); },
-      dispose() { pl.stop(); },
+      dispose() { pl.stop(); if (md) md.dispose(); },
     };
   }
 
