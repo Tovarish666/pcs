@@ -17,6 +17,7 @@ SYS = "/sys"                                    # подменяется в те
 VIRTUAL = ("/dummy_hcd.", "/vhci_hcd.")         # шины виртуальных модемов proxyveth
 VENDORS = ("12d1",)                             # Huawei; Vodafone K5150/K5160 — тоже 12d1
 HUBS = ("1a40", "05e3", "2109", "0424")         # типовые хабы: автосуспенд роняет всю ветку
+MODELS = {"Vodafone (Huawei)": "K5160", "HUAWEI_MOBILE": "E3372"}
 ZEROCD = ("1f01", "1f02", "1f10", "1f11", "1f12", "1f13", "1f14", "1440")
 UDEV_VIRTUAL = "*/dummy_hcd.*|*/vhci_hcd.*"     # то же для DEVPATH в udev
 NETWORKD_VIRTUAL = "platform-dummy_hcd.* platform-vhci_hcd.*"   # то же для ID_PATH в .network
@@ -82,6 +83,15 @@ def virtual_count(vendors=VENDORS):
 
 def hubs():
     return [d for d in _usb_devs(HUBS) if not is_virtual(d)]
+
+
+def models(devs):
+    """{модель: сколько} по строке USB product («Vodafone (Huawei)» — K5160, «HUAWEI_MOBILE» — E3372)."""
+    out = {}
+    for d in devs:
+        k = MODELS.get(attr(d, "product"), attr(d, "product") or attr(d, "idProduct"))
+        out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
 def find(name):

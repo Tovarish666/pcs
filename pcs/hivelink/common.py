@@ -43,6 +43,7 @@ DEFAULTS = {
     "hilink_every": 4,              # web-API — раз в столько проходов
     "hilink_concurrency": 8,
     "auto_dataswitch": True,
+    "data_grace": 45,               # с: данные выключены дольше — включить (меньше — это реконнект mp.space)
     "auto_reconnect": True,
     "reconnect_cooldown": 180,      # с между попытками починки одного модема
     # лестница починки: дозвон → откл/вкл → перерегистрация в сети → перезагрузка модема
@@ -107,7 +108,7 @@ def load_state():
     st = jload(STATE, {})
     if not isinstance(st, dict):
         st = {}
-    for k in ("cnt", "probe", "msg", "heal"):
+    for k in ("cnt", "probe", "msg", "heal", "hubs"):
         if not isinstance(st.get(k), dict):
             st[k] = {}
     if not isinstance(st.get("cycle"), int):

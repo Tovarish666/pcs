@@ -1193,7 +1193,10 @@
       info.replaceChildren(...[
         el("span", {text: data.net === "on" ? "сеть модемов — своя (DHCP и маршруты)" : "сеть модемов — у mp.space, hivelink: USB и связь"}),
         data.fix ? el("span", {text: "фикс приёма " + (data.fix.active ? "активен" : data.fix.needed ? "НЕ активен" : "не нужен")}) : null,
-        el("span", {class: "muted", text: "чинит сам: дозвон → откл/вкл → перерегистрация → перезагрузка"})].filter(Boolean));
+        el("span", {class: "muted", text: "чинит сам: дозвон → откл/вкл → перерегистрация → перезагрузка"}),
+        ...(data.hubs || []).map((h) => el("span", {class: "problems", title: "хаб пропал и вернулся: все модемы на нём переподключились разом",
+          text: "⚠ хаб " + h.port + " пропадал " + h.drops + " раз за сутки (" + Object.entries(h.models || {}).map(([k, c]) => c + " × " + k).join(", ")
+            + ") — не хватает питания хаба?"}))].filter(Boolean));
       if (!rows.length) {
         box.replaceChildren(el("div", {class: "net-empty", text: "Физических модемов нет — USB-модемов Huawei hivelink не видит."}));
         return;
