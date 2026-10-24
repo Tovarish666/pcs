@@ -671,3 +671,9 @@ body.viewer .page { height: 100vh; }
 .md-inline { height: min(72vh, 760px); border-radius: var(--r2); overflow: hidden; }
 
 .term-bar button.on { background: var(--fg); color: var(--bg); border-color: transparent; }
+
+/* «узнать номер» (proxyveth number) */
+.num-out { margin-top: 12px; display: grid; gap: 6px; }
+.num-big { display: flex; align-items: center; gap: 12px; }
+.num-big b { font-size: 22px; letter-spacing: .02em; }
+.ussd-text { white-space: pre-wrap; margin: 0; padding: 10px 12px; background: var(--s2); border-radius: var(--r1, 8px); font-size: 13px; max-height: 180px; overflow: auto; }

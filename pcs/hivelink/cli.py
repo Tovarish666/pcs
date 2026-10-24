@@ -23,6 +23,10 @@ Zero-CD → USB-конфигурация с rndis_host → DHCP → маршру
   hivelink off ПОРТ|ethN|N    выключить модем: отцепить от USB (authorized=0), и после перезагрузки
                               тоже — например, второй модем с тем же N; без аргумента — список
   hivelink on ПОРТ            включить выключенный
+  hivelink number N [--ussd КОД] [--keep-mode]
+                              номер SIM по USSD (код — по оператору: Yota *103#, Билайн *110*10#,
+                              МТС *111*0887#, МегаФон *205#, Tele2 *201#); на время USSD режим сети —
+                              «авто», потом как был (--keep-mode — оставить «авто»)
 
   N — номер модема (модем 192.168.N.1, машина 192.168.N.100); у reset и recfg можно
   USB-порт (3-1.4.2) — для модема, который до адреса не дошёл. --json — у всех команд.
@@ -243,6 +247,42 @@ def cmd_on(args):
     return 0, {"usb_port": arg, "off": False, "present": bool(d)}
 
 
+def cmd_number(args):
+    """Номер SIM модема N по USSD (pcs.core.simnum)."""
+    from ..core import simnum
+    need_root()
+    ussd, keep = None, False
+    rest = list(args)
+    if "--keep-mode" in rest:
+        rest.remove("--keep-mode")
+        keep = True
+    if "--ussd" in rest:
+        i = rest.index("--ussd")
+        if i + 1 >= len(rest):
+            raise Fail("--ussd КОД: например *103#")
+        ussd = rest[i + 1]
+        del rest[i:i + 2]
+    c = conf()
+    m = with_n(target(one_arg(rest, "number"), c), c)
+    api = hilink.Api(m["n"], src=m["addr"], timeout=10)
+    try:
+        r = simnum.find(api.get, api.post_raw, ussd=ussd, keep_mode=keep, log=lambda t: say("  " + t))
+    except simnum.SimFail as e:
+        raise Fail("N=%d: %s" % (m["n"], e))
+    except hilink.HiFail as e:
+        raise Fail("N=%d: %s" % (m["n"], e))
+    r.update(n=m["n"], usb_port=m["port"], t=int(time.time()))
+    if r["number"]:
+        nums = jload(common.NUMBERS, {}) or {}
+        nums[str(m["n"])] = {k: r[k] for k in ("number", "operator", "plmn", "ussd", "via", "t", "usb_port")}
+        os.makedirs(os.path.dirname(common.NUMBERS), exist_ok=True)
+        jsave(common.NUMBERS, nums, mode=0o644)
+        say("  ✓ N=%d: %s (%s, %s)" % (m["n"], r["number"], r["operator"], "из SMS" if r["via"] == "sms" else r["ussd"]))
+    else:
+        say("  ответ %s: %s\n  номера в ответе нет — попробуй другой код (--ussd)" % (r["ussd"], r["text"] or "—"))
+    return 0, r
+
+
 def cmd_run(args):
     """Служебное: один проход драйвера (зовут hivelink.service, udev и таймер)."""
     need_root()
@@ -263,7 +303,7 @@ def cmd_eth0(args):
 
 CMDS = {"install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status, "doctor": cmd_doctor,
         "reconnect": cmd_reconnect, "reset": cmd_reset, "recfg": cmd_recfg, "dataon": cmd_dataon,
-        "run": cmd_run, "eth0": cmd_eth0, "off": cmd_off, "on": cmd_on}
+        "run": cmd_run, "eth0": cmd_eth0, "off": cmd_off, "on": cmd_on, "number": cmd_number}
 
 
 def main(argv=None):

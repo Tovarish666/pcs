@@ -10,7 +10,7 @@ from ..core.util import Fail, jload, rd, sh
 from . import common, driver, hilink, install, rndis, route, usb
 
 ROW_KEYS = ("n", "iface", "driver", "usb_port", "usb_id", "mode", "cfg", "addr", "conn", "conn_text",
-            "dataswitch", "net", "signal", "ext_ip", "errors", "off")
+            "dataswitch", "net", "signal", "ext_ip", "errors", "off", "number")
 
 
 def local_rows(conf, addr_text=None):
@@ -25,6 +25,7 @@ def local_rows(conf, addr_text=None):
         by_dev.setdefault(m["dev"], []).append(m)
     rows, reach = [], set()
     off = common.load_off()
+    nums = jload(common.NUMBERS, {}) or {}
     for d in usb.devices():
         pid = usb.attr(d, "idProduct").lower()
         mode = usb.pid_mode(pid)
@@ -39,6 +40,9 @@ def local_rows(conf, addr_text=None):
         e = row["errors"]
         n = row["n"]
         row["off"] = row["usb_port"] in off
+        known = nums.get(str(n)) if n is not None else None
+        if known and known.get("usb_port") in (None, row["usb_port"]):    # тот же модем, а не новый на этом N
+            row["number"] = known.get("number")
         if row["off"]:
             was = (off[row["usb_port"]] or {}).get("was")
             e.append("выключен%s — hivelink on %s" % (" (был %s)" % was if was else "", row["usb_port"]))
