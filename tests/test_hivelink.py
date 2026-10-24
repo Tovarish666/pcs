@@ -765,6 +765,13 @@ try:
     calls, st = runs({"conn": 901, "dead": True}, [0, 300, 600, 900, 1200, 2500])
     check("web-API молчит 10 мин — USB заново, повтор не раньше чем через 30 мин",
           reen == ["/sys/bus/usb/devices/1-5", "/sys/bus/usb/devices/1-5"], reen)
+    calls, st = runs({"conn": 902, "data": 0}, [0, 30, 60])
+    check("данные выключены: первые 45 с не трогаем (реконнект mp.space), потом включаем — без лестницы",
+          calls == [[], [], ["data1"]] and "ds0" not in st["heal"]["7"], (calls, st["heal"]))
+    calls, st = runs({"conn": 901, "data": 0}, [0])
+    LadderApi.world["data"] = 1
+    runs(LadderApi.world, [30], st)
+    check("данные включились сами (mp.space) — отсчёт забыт", "ds0" not in st["heal"]["7"], st["heal"])
     conf_l["auto_heal"] = False
     calls, _ = runs({"conn": 902}, [0, 200, 400])
     check("auto_heal выключен — ничего", calls == [[], [], []])
@@ -810,6 +817,37 @@ try:
 finally:
     hilink.Api, hilink.reach, driver.pause, usb.reenumerate = real_hl
     usb.power_cycle = real_pc
+
+print("хаб пропал целиком (питание):")
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-4", devnum="7")
+device(PCI, "1-4.1", "14db", drv="cdc_ether", devnum="21")
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-4.1", product="Vodafone (Huawei)")
+device(PCI, "1-4.2", "14db", drv="cdc_ether", devnum="22")
+mk("devices/pci0000:00/0000:00:14.0/usb1/1-4.2", product="HUAWEI_MOBILE")
+sth = {"cnt": {}, "msg": {}, "heal": {}, "hubs": {}}
+logged = []
+real_log = driver.log
+driver.log = lambda m: logged.append(m)
+try:
+    driver.step_hubs(conf, sth, now=1000)
+    check("первый проход — только запомнить", sth["hubs"]["1-4"]["dev"] == "7" and not sth["hubs"]["1-4"]["drops"] and not logged, sth)
+    check("модели под хабом — по строке USB", sth["hubs"]["1-4"]["models"] == {"K5160": 1, "E3372": 1}, sth["hubs"])
+    driver.step_hubs(conf, sth, now=1015)
+    check("devnum тот же — тишина", not logged)
+    mk("devices/pci0000:00/0000:00:14.0/usb1/1-4", devnum="31")
+    driver.step_hubs(conf, sth, now=1030)
+    check("devnum другой — хаб пропадал: в журнал, с моделями и счётом за сутки",
+          sth["hubs"]["1-4"]["drops"] == [1030] and any("хаб 1-4 пропадал целиком" in m and "1 × K5160" in m and "1 раз" in m for m in logged), logged)
+    real_ls = common.load_state
+    common.load_state = lambda: sth
+    try:
+        hd = status.hub_drops(now=1100)
+        check("status: хаб и сколько раз за сутки", hd == [{"port": "1-4", "drops": 1, "models": {"K5160": 1, "E3372": 1}}], hd)
+        check("через сутки — забыто", status.hub_drops(now=1030 + 86401) == [])
+    finally:
+        common.load_state = real_ls
+finally:
+    driver.log = real_log
 
 print("питание порта:")
 check("родительский хаб и порт; устройство прямо в корневом хабе — не трогаем",

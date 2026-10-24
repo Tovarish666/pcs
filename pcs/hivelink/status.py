@@ -113,7 +113,25 @@ def collect(conf, ext=True):
     except Fail:
         fix = None
     return {"version": VERSION, "installed": install.installed(), "net": common.net_mode(conf),
-            "virtual": usb.virtual_count(), "usb": summary(rows), "fix": fix, "modems": rows}
+            "virtual": usb.virtual_count(), "usb": summary(rows), "fix": fix, "modems": rows, "hubs": hub_drops()}
+
+
+def hub_drops(now=None):
+    """Хабы, пропадавшие целиком за сутки (driver.step_hubs): [{port, drops, models}]."""
+    import time
+    now = time.time() if now is None else now
+    out = []
+    for p, h in sorted((common.load_state().get("hubs") or {}).items()):
+        n = len([t for t in h.get("drops", []) if now - t < 86400])
+        if n:
+            out.append({"port": p, "drops": n, "models": h.get("models") or {}})
+    return out
+
+
+def hub_text(h):
+    return ("хаб %s пропадал целиком %d раз за сутки (%s) — похоже, блоку питания хаба не хватает тока; "
+            "после этого модемы могут зависнуть" % (h["port"], h["drops"],
+                                                    ", ".join("%d × %s" % (c, k) for k, c in h["models"].items())))
 
 
 def fix_text(fix, size):
@@ -145,6 +163,8 @@ def show(data, conf):
     if data["virtual"]:
         print("  виртуальных модемов proxyveth (dummy_hcd): %d — не трогаю" % data["virtual"])
     print("  фикс приёма rndis_host: %s" % fix_text(data["fix"], conf["rx_urb_size"]))
+    for h in data.get("hubs") or []:
+        print("  ⚠ " + hub_text(h))
     if not data["modems"]:
         print("\n  настоящих USB-модемов Huawei нет")
         return

@@ -96,6 +96,41 @@ def step_off(conf, st, devs, off=None):
     return out
 
 
+def step_hubs(conf, st, now=None):
+    """Хаб пропал целиком и вернулся (у него другой devnum, все модемы на нём переподключились
+    разом). Так бывает, когда блоку питания хаба не хватает тока — при регистрации модемов в сети
+    (реконнект mp.space), после чего часть модемов поднимается без радиочасти (SpbVL-2, 24.10:
+    20-портовый хаб с 13 K5160 — 4 раза за ночь, рядом такой же с E3372 — ни разу). Сказать
+    человеку прямо; за сутки — в st["hubs"][порт]["drops"] (hivelink status)."""
+    now = int(time.time()) if now is None else now
+    seen = st.setdefault("hubs", {})
+    hubs = {usb.port(x): x for x in usb.hubs()}
+    mods = usb.devices()
+    changed = []
+    for p, d in hubs.items():
+        below = [m for m in mods if usb.port(m).startswith(p + ".")]
+        if not below:
+            continue
+        dn = usb.attr(d, "devnum")
+        old = seen.get(p) or {}
+        drops = [t for t in old.get("drops", []) if now - t < 86400]
+        if old.get("dev") and old["dev"] != dn:
+            changed.append(p)
+            drops.append(now)
+        seen[p] = {"dev": dn, "drops": drops, "models": usb.models(below)}
+    for p in changed:
+        parent = p.rsplit(".", 1)[0] if "." in p else None
+        if parent in changed:
+            continue                    # пропал вместе с хабом выше — о нём и скажем
+        log("⚠ хаб %s пропадал целиком и вернулся: на нём %d модемов (%s), за сутки — %d раз. Так бывает, "
+            "когда блоку питания хаба не хватает тока; после этого модемы могут зависнуть"
+            % (p, sum(seen[p]["models"].values()), ", ".join("%d × %s" % (c, k) for k, c in seen[p]["models"].items()),
+               len(seen[p]["drops"])))
+    for p in [p for p in seen if p not in hubs]:
+        if not seen[p].get("drops"):
+            seen.pop(p, None)
+
+
 def step_zerocd(conf, st, devs, now=None):
     """Zero-CD (12d1:1f01 и родня) → рабочий режим: usb_modeswitch шлёт HuaweiNewMode в
     mass-storage интерфейс ТЕКУЩЕЙ конфигурации. Конфигурацию не меняем: модем в cfg 2 (MBIM —
@@ -540,16 +575,15 @@ def hilink_worker(m, conf, st, now=None):
         return
     h.pop("api", None)
     try:
-        if conf["auto_dataswitch"] and api.dataswitch() == 0:
-            log("N=%d: мобильные данные выключены — включаю" % n)
-            api.set_data(True)
-            return
+        ds = api.dataswitch() if conf["auto_dataswitch"] else None
         s = api.status()
     except hilink.HiFail as e:
         log_once(st, "N=%d: %s" % (n, e), qr, key="hilink.%d" % n)
         return
     cs = s["conn"]
-    if cs is not None and cs != 901:
+    # Радиочасть ещё не поднялась (только загрузился) или зависла — ничего не пишем модему: запись в
+    # загружающийся модем — лишний риск (K5160 на SpbVL-2 зависали после включения хаба).
+    if ds == 0 or (cs is not None and cs != 901):
         try:
             dead = hilink.radio_dead(api.radio())
         except hilink.HiFail:
@@ -559,6 +593,20 @@ def hilink_worker(m, conf, st, now=None):
             return
         for k in ("dead", "dboot", "ddev", "dpower"):
             h.pop(k, None)
+    if ds == 0:
+        # Реконнект mp.space выключает данные на секунды и включает сам: вклиниться в него — сбить ему
+        # сессию. Включаем, только если выключены дольше data_grace.
+        h.setdefault("ds0", now)
+        if now - h["ds0"] < conf["data_grace"]:
+            return
+        log("N=%d: мобильные данные выключены %s — включаю" % (n, _mins(now - h["ds0"])))
+        try:
+            api.set_data(True)
+        except hilink.HiFail as e:
+            log_once(st, "N=%d: %s" % (n, e), qr, key="hilink.%d" % n)
+        h.pop("ds0", None)
+        return
+    h.pop("ds0", None)
     if cs is None:
         log_once(st, "N=%d: статус не читается (%s)" % (n, hilink.error_text(s["error"]) if s["error"] else "прошивка"),
                  qr, key="hilink.%d" % n)
@@ -644,6 +692,7 @@ def run_pass(conf=None):
             log_once(st, "шаг %s: %s" % (name, e), conf["quiet_repeat"])
 
     guard("питание", step_power, conf, st)
+    guard("хабы", step_hubs, conf, st)
     devs = usb.devices()
     try:
         devs = step_off(conf, st, devs)
