@@ -111,7 +111,9 @@ def lint(text, taken_octets=frozenset(), mp_tables=True):
                 if mp_tables and n in (153, 154, 155):
                     raise Fail("n=%d: у mp.space это системная таблица маршрутов (253–255)" % n)
                 if n in taken_octets:
-                    raise Fail("n=%d: 192.168.%d.0/24 уже занята сетью самого сервера" % (n, n))
+                    problems.append("⚠ %s: n=%d — %s" % (where, n, (
+                        "сеть модема 192.168.%d.0/24 пересекается с сетью самого сервера (роутера): ответы в неё "
+                        "могут уйти в модем — пропадёт связь с сервером" % n)))
                 r = cell(row, "real")
                 if not r:
                     problems.append("⚠ %s: real пуст — считаю real = n = %d" % (where, n))
