@@ -585,8 +585,7 @@ def ensure(rows, st, o, force=False, only=None):
             res["failed"][n] = "ещё работает proxyveth-virt (ns_%d) — перенесёт proxyveth setup" % n
             continue
         if n in taken:
-            res["failed"][n] = "192.168.%d.0/24 занята сетью самого сервера" % n
-            continue
+            log("⚠ модем %d: %s" % (n, net.overlap_note(n)))
         m = st["modems"].get(str(n), {})
         if n not in now:
             todo[n] = ("created", "")
@@ -936,7 +935,8 @@ def doctor():
     old = gw_legacy.find()
     chk("следов proxyveth-virt 3.4 нет", not old, gw_legacy.describe(old) if old else "")
     taken = set(int(k) for k, r in load_state()["desired"].items() if r.get("enabled", True)) & local_octets()
-    chk("номера модемов не заняты сетью сервера", not taken, ", ".join(map(str, sorted(taken))))
+    chk("сети модемов не пересекаются с сетью сервера", True,       # пометка, не отказ (24.10.2026)
+        ("⚠ пересекаются: %s — связь с сервером может пропасть" % ", ".join(map(str, sorted(taken)))) if taken else "")
     return out
 
 

@@ -44,13 +44,21 @@ csv = "﻿N , Real , Proxy ,enabled\n" + "\n".join([
     "212,,%s:modem98:pw98" % good,
 ]) + "\n"
 d, dis, inv, probs = table.lint(csv, taken_octets={88})
-check("годные строки", sorted(d) == [203, 210, 212], sorted(d))
+check("годные строки (88 — с пометкой, не брак)", sorted(d) == [88, 203, 210, 212], sorted(d))
 check("выключенная — не брак", dis == {204}, dis)
-check("брак назван", inv == {1, 88, 154, 201, 202}, sorted(inv))
+check("брак назван", inv == {1, 154, 201, 202}, sorted(inv))
+check("сеть модема пересекается с сетью сервера — пометка", any("n=88" in p and p.startswith("⚠") and "пересекается" in p
+                                                             for p in probs), probs)
 check("двоеточия в пароле целы", d[210]["pw"] == "p:a:s:s")
 check("real адресом → октет", d[203]["real"] == 84)
 d2, _, inv2, _ = table.lint(csv, taken_octets={88}, mp_tables=False)
 check("режим gw без mp.space: N и N+200, 153–155 можно", {1, 154, 201} <= set(d2), (sorted(d2), sorted(inv2)))
+A = ("2: eth0    inet 192.168.88.21/24 brd 192.168.88.255 scope global eth0\n"
+     "5: eth12    inet 192.168.4.100/24 scope global eth12\n1: lo    inet 127.0.0.1/8 scope host lo\n")
+check("пересечение: LAN 192.168.88.0/24 — только 88; модем .100 и lo не в счёт", net.local_octets(A) == {88}, net.local_octets(A))
+check("LAN /16 192.168.0.0 — пересекаются все", len(net.local_octets("inet 192.168.1.5/16 scope global eth0\n")) == 254)
+check("LAN 192.168.88.0/23 — 88 и 89", net.local_octets("inet 192.168.88.5/23 scope global eth0\n") == {88, 89})
+check("LAN 10.0.0.0/8 — никого", net.local_octets("inet 10.1.2.3/8 scope global eth0\n") == set())
 check("ссылка из адресной строки → CSV",
       table.normalize_url("https://docs.google.com/spreadsheets/d/AbC_1/edit#gid=456")
       == "https://docs.google.com/spreadsheets/d/AbC_1/export?format=csv&gid=456")

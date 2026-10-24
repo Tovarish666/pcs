@@ -220,10 +220,14 @@ def rows_of(mod, wan=False):
     """Row режима; остановленные вручную — state "stopped", а не «модема нет»."""
     rows = mod.status(wan=True) if wan else mod.status()
     st = stopped()
+    overlap = net.local_octets()
     for r in rows:
         if r["n"] in st and r["state"] in ("absent", "broken"):
             r.update(state="stopped", ext_ip=None, problems=["остановлен вручную %s — поднять: proxyveth up %d" % (
                 time.strftime("%d.%m %H:%M", time.localtime(st[r["n"]])), r["n"])])
+        if r["n"] in overlap:
+            r["overlap"] = True
+            r["problems"] = list(r.get("problems") or []) + ["⚠ " + net.overlap_note(r["n"])]
     return rows
 
 

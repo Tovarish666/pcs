@@ -13,6 +13,7 @@ modemK), — поэтому на сервере с USB-модемами N и N+2
 Правила iptables — только с -m comment --comment pcs:<часть>; уборка снимает
 только помеченное своей частью.
 """
+import ipaddress
 import os
 import re
 import socket
@@ -71,14 +72,28 @@ def comment(part):
     return "pcs:%s" % part
 
 
-def local_octets():
-    """Третьи октеты 192.168.x.0/24, занятые сетью самой машины (не модемами .100)."""
+def local_octets(addr_text=None):
+    """N, чья сеть модема 192.168.N.0/24 пересекается с сетью самой машины (LAN, роутер) — не
+    только при том же третьем октете: сеть /16 роутера накрывает всех. Адреса модемов (.100) —
+    не в счёт. Такой модем не запрещён (24.10.2026, по просьбе владельца), а помечен:
+    ответы в эту сеть могут уйти в модем — пропадёт связь с сервером."""
+    if addr_text is None:
+        addr_text = sh("ip", "-4", "-o", "addr", check=False).stdout
     out = set()
-    for line in sh("ip", "-4", "-o", "addr", check=False).stdout.splitlines():
-        m = re.search(r"inet (192\.168\.(\d+)\.(\d+))/(\d+)", line)
-        if m and m.group(3) != "100":
-            out.add(int(m.group(2)))
+    for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", addr_text):
+        ip, plen = m.group(1), int(m.group(2))
+        if ip.startswith("127.") or (ip.startswith("192.168.") and ip.endswith(".100")):
+            continue
+        net = ipaddress.ip_network("%s/%d" % (ip, plen), strict=False)
+        if not net.overlaps(ipaddress.ip_network("192.168.0.0/16")):
+            continue
+        out |= {n for n in range(1, 255) if net.overlaps(ipaddress.ip_network("192.168.%d.0/24" % n))}
     return out
+
+
+def overlap_note(n):
+    return ("сеть модема 192.168.%d.0/24 пересекается с сетью самого сервера (роутера): ответы в неё "
+            "могут уйти в модем — пропадёт связь с сервером" % n)
 
 
 def uplink_route(modem_mac="0c:5b:8f:27:9a:64"):
