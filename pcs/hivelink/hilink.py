@@ -169,6 +169,12 @@ class Api:
     def reboot(self):
         self.post("/api/device/control", "<Control>1</Control>")
 
+    def post_raw(self, path, inner):
+        """POST, ответ как есть (и с <error>): USSD и SMS разбирают его сами (pcs.core.simnum)."""
+        self.login()
+        body = '<?xml version="1.0" encoding="UTF-8"?><request>%s</request>' % inner
+        return self._http("POST", path, body=body.encode(), headers=self._headers(post=True))
+
     def radio(self):
         """Жива ли радиочасть: {"imei", "sim"} (SimState 255 — SIM не видна) или None — прошивка
         не говорит. Веб модема может работать, когда сам модем внутри завис: IMEI пуст, SIM «нет»,

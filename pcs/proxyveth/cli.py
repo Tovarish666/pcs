@@ -28,6 +28,7 @@ CONFIG = ETC + "/config.json"
 TABLE = ETC + "/table.csv"
 OLD_GW = ETC + "/env"                  # proxyveth-virt 3.4: режим gw, переезд делает gw.setup
 STOPPED = "/var/lib/proxyveth/stopped.json"   # остановленные вручную (down): sync их не поднимает
+NUMBERS = "/var/lib/proxyveth/numbers.json"   # номера SIM (proxyveth number): {N: {number, operator, t, …}}
 RUN = "/run/proxyveth"
 LOCK = RUN + "/lock"
 ARGV = []                     # аргументы этого запуска: с ними команда уходит в фон
@@ -55,6 +56,10 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
   proxyveth problems                    только проблемные
   proxyveth diag N                      прокси → логин → модем → SIM → интернет
   proxyveth rotate N | reboot N         смена IP / перезагрузка настоящего модема
+  proxyveth number N [--ussd КОД] [--keep-mode]
+                                        номер SIM настоящего модема по USSD (код — по оператору: Yota *103#,
+                                        Билайн *110*10#, МТС *111*0887#, МегаФон *205#, Tele2 *201#);
+                                        на время USSD режим сети — «авто», потом как был (--keep-mode — оставить)
   proxyveth doctor                      окружение
   proxyveth setup                       подготовить сервер (зовёт хаб при create/update)
   proxyveth version
@@ -221,6 +226,7 @@ def rows_of(mod, wan=False):
     rows = mod.status(wan=True) if wan else mod.status()
     st = stopped()
     overlap = net.local_octets()
+    nums = jload(NUMBERS, {}) or {}
     for r in rows:
         if r["n"] in st and r["state"] in ("absent", "broken"):
             r.update(state="stopped", ext_ip=None, problems=["остановлен вручную %s — поднять: proxyveth up %d" % (
@@ -228,6 +234,9 @@ def rows_of(mod, wan=False):
         if r["n"] in overlap:
             r["overlap"] = True
             r["problems"] = list(r.get("problems") or []) + ["⚠ " + net.overlap_note(r["n"])]
+        num = nums.get(str(r["n"])) or {}
+        if num.get("number"):
+            r["number"], r["number_t"] = num["number"], num.get("t")
     return rows
 
 
@@ -703,6 +712,40 @@ def cmd_rotate(a):
     return 0, res
 
 
+def cmd_number(a):
+    """Номер SIM настоящего модема за прокси — USSD через его веб-морду (pcs.core.simnum)."""
+    from pcs.core import simnum
+    n = parse_n(a.n)
+    cfg = load_cfg()
+    mode, _ = need_mode(cfg)
+    p = read_table(cfg, mode, fetch=False)["desired"].get(n)
+    if not p:
+        raise Fail("модема %d нет среди годных строк таблицы (proxyveth lint)" % n)
+
+    def get(path):
+        return usb.hilink(p, path)[2]
+
+    def post(path, inner):
+        return usb.hilink(p, path, inner)[2]
+    try:
+        r = simnum.find(get, post, ussd=a.ussd, keep_mode=a.keep_mode, log=lambda m: say("  " + m))
+    except simnum.SimFail as e:
+        raise Fail("модем %d: %s" % (n, e))
+    except Fail as e:
+        raise Fail("модем %d: веб настоящего модема недоступен (%s)" % (n, str(e).split(" ", 1)[-1]))
+    r.update(n=n, real=p["real"], t=int(time.time()))
+    if r["number"]:
+        nums = jload(NUMBERS, {}) or {}
+        nums[str(n)] = {k: r[k] for k in ("number", "operator", "plmn", "ussd", "via", "t")}
+        os.makedirs(os.path.dirname(NUMBERS), exist_ok=True)
+        jsave(NUMBERS, nums, mode=0o644)
+        say("  ✓ модем %d: %s (%s, %s)" % (n, r["number"], r["operator"], "из SMS" if r["via"] == "sms" else r["ussd"]))
+    else:
+        say("  ответ %s: %s" % (r["ussd"], r["text"] or "—"))
+        say("  номера в ответе нет — попробуй другой код USSD (--ussd)")
+    return 0, r                 # «номера нет» — тоже ответ: панель покажет текст оператора
+
+
 def cmd_doctor(a):
     cfg = load_cfg()
     mode = cur_mode(cfg)
@@ -747,7 +790,7 @@ def cmd_replug(a):
 
 COMMANDS = {"setup": cmd_setup, "on": cmd_on, "off": cmd_off, "mode": cmd_mode, "source": cmd_source, "table": cmd_table, "lint": cmd_lint,
             "sync": cmd_sync, "up": cmd_updown, "down": cmd_updown, "restart": cmd_updown, "status": cmd_status,
-            "problems": cmd_problems, "diag": cmd_diag, "rotate": cmd_rotate, "reboot": cmd_rotate,
+            "problems": cmd_problems, "diag": cmd_diag, "rotate": cmd_rotate, "reboot": cmd_rotate, "number": cmd_number,
             "doctor": cmd_doctor, "version": cmd_version, "routes": cmd_routes, "hostside": cmd_hostside,
             "replug": cmd_replug}
 
@@ -794,6 +837,10 @@ def parser():
     p.add_argument("--udp", action="store_true")
     for c in ("rotate", "reboot", "routes"):
         sub.add_parser(c, add_help=False).add_argument("n")
+    p = sub.add_parser("number", add_help=False)
+    p.add_argument("n")
+    p.add_argument("--ussd")
+    p.add_argument("--keep-mode", dest="keep_mode", action="store_true")
     sub.add_parser("hostside", add_help=False).add_argument("iface")
     p = sub.add_parser("replug", add_help=False)
     p.add_argument("n")

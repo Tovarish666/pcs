@@ -767,6 +767,23 @@ def _pv(srv, a, inp):
         srv["modems"] = sorted(keep + add, key=lambda m: m["n"])
         srv["source"]["synced"] = _now()
         return {"created": new, "recreated": [], "removed": gone, "failed": {}, "problems": probs}
+    if cmd == "number":
+        n = int(a[1]) if len(a) > 1 and a[1].isdigit() else None
+        m = next((m for m in srv["modems"] if m["n"] == n), None)
+        if m is None:
+            raise Fail("модема %s нет среди годных строк таблицы (proxyveth lint)" % (a[1] if len(a) > 1 else "?"))
+        _pause()
+        ops = [("Yota", "*103#"), ("Билайн", "*110*10#"), ("МТС", "*111*0887#")]
+        op, code = ops[n % 3]
+        if "--ussd" in a:
+            code = a[a.index("--ussd") + 1]
+        if code == "*100#":
+            return {"n": n, "number": None, "operator": op, "ussd": code, "via": None,
+                    "text": "Баланс 152.40 р. Пакет: 18.3 ГБ"}
+        num = "+7999%07d" % (n * 7919 % 10000000)
+        m["number"], m["number_t"] = num, _now()
+        return {"n": n, "number": num, "operator": op, "ussd": code, "via": "ussd",
+                "text": "Ваш номер %s" % num, "mode_was": "03", "mode_back": None if "--keep-mode" in a else "03"}
     if cmd == "diag":
         n = int(a[1]) if len(a) > 1 and a[1].isdigit() else None
         m = next((m for m in srv["modems"] if m["n"] == n), None)
@@ -1101,6 +1118,14 @@ def _hl(srv, a, inp):
         if not srv["hivelink"]:
             raise Fail("hivelink не установлен — hivelink install")
         return _hl_act(srv, cmd, a[1])
+    if cmd == "number" and len(a) > 1 and a[1].isdigit():
+        _pause()
+        n = int(a[1])
+        code = a[a.index("--ussd") + 1] if "--ussd" in a else "*103#"
+        if code == "*100#":
+            return {"n": n, "number": None, "operator": "Yota", "ussd": code, "via": None, "text": "Баланс 0 р."}
+        return {"n": n, "number": "+7995%07d" % (n * 104729 % 10000000), "operator": "Yota", "ussd": code,
+                "via": "ussd", "text": "Ваш номер: +7995%07d" % (n * 104729 % 10000000)}
     if cmd == "install":
         srv["hivelink"] = True
         return {"installed": True, "version": VERSION}

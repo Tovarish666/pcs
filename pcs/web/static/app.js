@@ -29,7 +29,8 @@
   const ICONS = {
     play: "M7 5.5v13l11-6.5z", stop: "M7 7h10v10H7z", redo: "M20 11a8 8 0 1 0-2.4 5.7M20 4.5V11h-6.5",
     pulse: "M3 12h4l2.5-6 4 12 2.5-6H21", more: "M5.5 12h.01M12 12h.01M18.5 12h.01", chev: "M6 9l6 6 6-6",
-    term: "M4 6l5 5-5 5M11 18h9", plus: "M12 5v14M5 12h14", search: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM20 20l-4.6-4.6",
+    term: "M4 6l5 5-5 5M11 18h9", plus: "M12 5v14M5 12h14",
+    phone: "M5 4h3.5l2 5-2.5 1.5a11 11 0 0 0 5.5 5.5l1.5-2.5 5 2V19a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z", search: "M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM20 20l-4.6-4.6",
     copy: "M9 9h11v11H9zM5 15V4h11", power: "M12 3v8M6.4 6.6a8 8 0 1 0 11.2 0", bolt: "M13 3 5 14h6l-1 7 8-11h-6z",
     link: "M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1",
     sync: "M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5",
@@ -1115,6 +1116,46 @@
     };
   }
 
+  // «Узнать номер SIM»: USSD к модему (part: proxyveth — настоящий за прокси, hivelink — на USB). Код —
+  // по оператору сам или свой; на время USSD режим сети — «авто»: в «только LTE» (его ставит mp.space)
+  // USSD часто не проходит, потом режим — как был.
+  function simNumberDlg(X, id, part, n, onDone) {
+    const code = el("input", {class: "mono", placeholder: "по оператору", autocomplete: "off", spellcheck: "false", style: "width:150px"});
+    const keep = el("input", {type: "checkbox"});
+    const res = el("span", {class: "res"});
+    const out = el("div", {class: "num-out"});
+    let go = null;
+    const body = el("div", {},
+      el("p", {class: "muted", text: "USSD к модему" + (part === "proxyveth" ? " (настоящему, за прокси)" : "") + ". Код по оператору сам: "
+        + "Yota *103#, Билайн *110*10#, МТС *111*0887#, МегаФон *205#, Tele2 *201# — или впиши свой. На время запроса "
+        + "режим сети — «авто» (в «только LTE» USSD часто не проходит), потом — как был; связь модема на несколько секунд прервётся."}),
+      el("div", {class: "bar"}, el("label", {}, "Код USSD ", code), el("label", {class: "pill"}, keep, "оставить режим «авто»")),
+      out, res);
+    async function run() {
+      if (go) go.disabled = true;
+      out.replaceChildren();
+      setRes(res, "run", "спрашиваю у оператора… (до минуты)");
+      const args = ["number", String(n)];
+      if (code.value.trim()) args.push("--ussd", code.value.trim());
+      if (keep.checked) args.push("--keep-mode");
+      const x = await X.run(id, part, args);
+      if (go) go.disabled = false;
+      if (!x.ok) { setRes(res, "err", "Ошибка: " + x.error); return; }
+      const d = x.data || {};
+      setRes(res, d.number ? "ok" : "err", d.number ? "готово" : "номера в ответе нет — попробуй другой код");
+      out.replaceChildren(
+        d.number ? el("div", {class: "num-big"}, el("b", {class: "mono", text: d.number}),
+          btn("Копировать", async () => toast(await copy(d.number) ? "Скопировано" : "Не вышло скопировать", "ok"), "ghost")) : null,
+        el("p", {class: "muted", text: [d.operator, d.ussd, d.via === "sms" ? "из SMS" : null].filter(Boolean).join(" · ")}),
+        d.text ? el("pre", {class: "ussd-text", text: d.text}) : null);
+      if (d.number && onDone) onDone(d);
+    }
+    code.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+    modal("Номер SIM · модем " + n + " · " + tname(id), body,
+      [{text: "Закрыть"}, {text: "Узнать", cls: "primary", ref: (b) => { go = b; }, onclick: () => run()}]);
+    code.focus();
+  }
+
   // физические USB-модемы (hivelink): связь, сеть, данные; починка — кнопками в строке
   const SIG = (v) => el("span", {class: "sig", title: v == null ? "сигнал неизвестен" : "сигнал " + v + " из 5", "aria-label": "сигнал " + (v ?? "?")},
     [1, 2, 3, 4, 5].map((i) => el("i", {class: v != null && i <= v ? "on" : ""})));
@@ -1166,7 +1207,8 @@
         const can = r.n != null && !r.off;
         const port = r.usb_port || "?";
         return el("tr", {},
-          el("td", {class: "num", text: r.n == null ? "—" : String(r.n)}),
+          el("td", {class: "num", title: r.number ? "номер SIM (USSD)" : null}, r.n == null ? "—" : String(r.n),
+            r.number ? el("div", {class: "sub mono", text: r.number}) : null),
           el("td", {class: "mono", title: (r.usb_id || "") + " · USB " + (r.usb_port || "?") + " · конфигурация " + (r.cfg || "?") + " · " + (r.driver || "без драйвера")},
             el("div", {text: r.iface || "—"}), el("div", {class: "sub", text: "USB " + (r.usb_port || "?") + (r.driver ? " · " + r.driver : "")})),
           el("td", {}, el("span", {class: "pill"}, el("span", {class: "dot " + (r.off ? "off" : cls)}), r.off ? "выключен" : r.conn_text || (r.mode === "cdrom" ? "Zero-CD" : "—"))),
@@ -1177,6 +1219,7 @@
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             r.dataswitch === 0 && can ? ibtn("bolt", "включить мобильные данные (hivelink dataon " + r.n + ")", (e) => act1(e.currentTarget, "dataon", r.n, "данные включены"), "", "данные") : null,
             can ? ibtn("redo", "переподключить: откл → вкл (hivelink reconnect " + r.n + ")", (e) => act1(e.currentTarget, "reconnect", r.n, "переподключён")) : null,
+            can ? ibtn("phone", "узнать номер SIM модема " + r.n + " (USSD)", () => simNumberDlg(X, id, "hivelink", r.n, () => load(false))) : null,
             can ? ibtn("link", "веб модема " + r.n + " (192.168." + r.n + ".1) — в блоке «Веб модема» внизу", () => openModem(X, id, "192.168." + r.n + ".1")) : null,
             r.off ? null : ibtn("sync", "заново подключить USB-устройство (hivelink reset " + (r.n ?? r.usb_port) + ") — питание не снимается",
               (e) => { if (window.confirm("Заново подключить USB-устройство модема " + (r.n ?? r.usb_port) + "? Связь пропадёт на полминуты.")) act1(e.currentTarget, "reset", r.n ?? r.usb_port, "USB подключён заново"); }),
@@ -1672,7 +1715,9 @@
         prevState[r.n] = r.state;
         const stopped = r.state === "stopped";
         return el("tr", {class: changed ? "flash" : ""},
-          el("td", {class: "num", text: String(r.n)}), el("td", {class: "num", text: r.real == null ? "—" : String(r.real)}),
+          el("td", {class: "num", title: r.number ? "номер SIM (USSD " + (r.number_t ? new Date(r.number_t * 1000).toLocaleString("ru-RU") : "") + ")" : null},
+            String(r.n), r.number ? el("div", {class: "sub mono", text: r.number}) : null),
+          el("td", {class: "num", text: r.real == null ? "—" : String(r.real)}),
           el("td", {class: "mono", text: maskProxy(r.proxy)}),
           el("td", {}, el("span", {class: "pill", title: (r.side === "server" ? "беда на стороне сервера, не у прокси: сервер (mp.space) "
               + "ещё не взял модем — адрес, правило маршрутизации, USB. " : "") + (r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : "")},
@@ -1685,6 +1730,7 @@
               : ibtn("stop", "остановить модем " + r.n + ": таймер не поднимет, пока не «поднять» (proxyveth down " + r.n + ")", (e) => updown(e.currentTarget, "down", r.n), "", "остановить"),
             ibtn("redo", "пересоздать модем " + r.n + ": интерфейс снимется и поднимется заново (proxyveth restart " + r.n + ")", (e) => updown(e.currentTarget, "restart", r.n)),
             ibtn("pulse", "диагностика модема " + r.n + ": прокси → логин → модем → SIM → интернет", () => diag(r.n)),
+            ibtn("phone", "узнать номер SIM модема " + r.n + " (USSD)", () => numberDlg(r)),
             ibtn("link", "веб модема " + r.n + ": настоящий модем за прокси (через 192.168." + r.n + ".1 этого сервера) — в блоке «Веб модема» внизу",
               () => openModem(X, id, "192.168." + r.n + ".1")))));
       });
@@ -1709,6 +1755,7 @@
       load(false);
     }
 
+    function numberDlg(r) { simNumberDlg(X, id, "proxyveth", r.n, () => load(false)); }
     async function diag(n) {
       const body = el("div", {}, el("p", {class: "muted", text: "прокси → логин → модем → SIM → интернет…"}));
       modal("Диагностика модема " + n + " · " + tname(id), body);

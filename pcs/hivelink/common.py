@@ -13,6 +13,7 @@ CONF = ETC + "/config.json"
 # лишний отцепляется от USB (authorized=0) и не возвращается после перезагрузки.
 OFF = ETC + "/off.json"
 VAR = "/var/lib/hivelink"
+NUMBERS = VAR + "/numbers.json"     # номера SIM (hivelink number N): {N: {number, operator, t, …}}
 CONFMAP = VAR + "/confmap.json"     # модель → USB-конфигурация, дающая нужный драйвер
 FLAGS = VAR + "/flags.json"         # что установщик поменял в системе — вернуть при снятии
 RUN = "/run/hivelink"
