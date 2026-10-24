@@ -10,6 +10,10 @@
 
   document.getElementById("where").textContent = "вход в панель · " + location.host;
 
+  // спутник на фоне стоит, если просили без движения
+  const sky = document.querySelector(".cosmos");
+  if (sky && sky.pauseAnimations && matchMedia("(prefers-reduced-motion: reduce)").matches) sky.pauseAnimations();
+
   // показать / скрыть пароль
   eye.addEventListener("click", () => {
     const show = f.password.type === "password";

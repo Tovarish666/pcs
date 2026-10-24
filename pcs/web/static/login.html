@@ -13,9 +13,31 @@
 </head>
 <body class="login-body">
 <div class="login-wrap">
+  <svg class="cosmos" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+    <defs>
+      <clipPath id="c-clip"><circle cx="1430" cy="1210" r="560"/></clipPath>
+      <radialGradient id="c-planet" cx="28%" cy="20%" r="90%"><stop offset="0" class="c-p0"/><stop offset=".45" class="c-p1"/><stop offset="1" class="c-p2"/></radialGradient>
+    </defs>
+    <g transform="rotate(-11 800 500)">
+      <ellipse class="c-orbit c-far" cx="800" cy="500" rx="930" ry="310"/>
+      <ellipse class="c-orbit" cx="800" cy="500" rx="660" ry="205"/>
+    </g>
+    <circle class="c-air" cx="1430" cy="1210" r="580"/>
+    <circle class="c-planet" cx="1430" cy="1210" r="560"/>
+    <g clip-path="url(#c-clip)">
+      <path class="c-band" d="M820 840C1060 760 1420 720 1990 760"/>
+      <path class="c-band thin" d="M840 905C1090 836 1440 800 1990 836"/>
+      <path class="c-band" d="M860 1000C1120 935 1460 905 1990 935"/>
+    </g>
+    <circle class="c-rim" cx="1430" cy="1210" r="560" stroke-dasharray="1100 2600" stroke-dashoffset="-1640"/>
+    <g transform="rotate(-11 800 500)">
+      <g><circle class="c-sat-glow" r="9"/><circle class="c-sat" r="3"/>
+        <animateMotion dur="90s" repeatCount="indefinite" path="M140 500a660 205 0 1 0 1320 0a660 205 0 1 0 -1320 0"/></g>
+    </g>
+  </svg>
   <form id="login" class="login-card" autocomplete="on" novalidate>
     <div class="login-brand">
-      <span class="mark" aria-hidden="true"></span>
+      <img class="mark" src="static/favicon.svg" alt="" width="40" height="40">
       <div><h1>PCS</h1><div class="muted" id="where">вход в панель</div></div>
     </div>
     <label>Логин <input name="user" autocomplete="username" required autofocus spellcheck="false" autocapitalize="off"></label>
