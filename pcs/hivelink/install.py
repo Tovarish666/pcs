@@ -66,7 +66,11 @@ UDEV_PORTS_TEXT = """# hivelink: стабильные имена AT-портов
 ACTION!="add", GOTO="hivelink_ports_end"
 SUBSYSTEM!="tty", GOTO="hivelink_ports_end"
 DEVPATH=="%(virtual)s", GOTO="hivelink_ports_end"
-ATTRS{idVendor}!="12d1", GOTO="hivelink_ports_end"
+# Не «ATTRS{idVendor}!="12d1", GOTO=…»: ATTRS ищет по всем родителям, у хаба выше idVendor
+# не 12d1 — условие верно всегда, и правило уходило в конец, ничего не сделав.
+ATTRS{idVendor}=="12d1", GOTO="hivelink_ports_go"
+GOTO="hivelink_ports_end"
+LABEL="hivelink_ports_go"
 
 IMPORT{builtin}="path_id"
 
@@ -96,10 +100,13 @@ UDEV_MS_TEXT = """# hivelink: Zero-CD настоящих модемов пере
 ACTION!="add|change", GOTO="hivelink_ms_end"
 SUBSYSTEM!="usb", GOTO="hivelink_ms_end"
 DEVPATH=="%(virtual)s", GOTO="hivelink_ms_end"
-ATTRS{idVendor}!="12d1", GOTO="hivelink_ms_end"
 # RUN= (не +=) сбрасывает накопленное до этого места, то есть вызов usb_modeswitch из 40-го;
-# правила с номерами больше 41 (загрузка драйверов и наши 70-е) добавятся после.
-ATTRS{idProduct}=="%(zerocd)s", RUN="/bin/true"
+# правила с номерами больше 41 (загрузка драйверов и наши 70-е) добавятся после. Оба ATTRS — на
+# одном устройстве (модеме). Не «ATTRS{idVendor}!="12d1", GOTO=…»: ATTRS ищет по всем родителям,
+# у хаба выше idVendor не 12d1 — и правило всегда уходило в конец. Штатный usb_modeswitch так и
+# переключал модем в первую секунду, а через 3–6 с — ещё и hivelink (SpbVL-2, 24.10: после
+# включения хаба K5160 на двух командах подряд посреди загрузки оставались без радиочасти).
+ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="%(zerocd)s", RUN="/bin/true"
 LABEL="hivelink_ms_end"
 """
 

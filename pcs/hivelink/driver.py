@@ -98,10 +98,9 @@ def step_off(conf, st, devs, off=None):
 
 def step_hubs(conf, st, now=None):
     """Хаб пропал целиком и вернулся (у него другой devnum, все модемы на нём переподключились
-    разом). Так бывает, когда блоку питания хаба не хватает тока — при регистрации модемов в сети
-    (реконнект mp.space), после чего часть модемов поднимается без радиочасти (SpbVL-2, 24.10:
-    20-портовый хаб с 13 K5160 — 4 раза за ночь, рядом такой же с E3372 — ни разу). Сказать
-    человеку прямо; за сутки — в st["hubs"][порт]["drops"] (hivelink status)."""
+    разом): питание выключали или хаб сбросился. После этого все его модемы стартуют разом —
+    сказать человеку одной строкой на всё дерево хабов; за сутки — в st["hubs"][порт]["drops"]
+    (hivelink status, панель)."""
     now = int(time.time()) if now is None else now
     seen = st.setdefault("hubs", {})
     hubs = {usb.port(x): x for x in usb.hubs()}
@@ -114,18 +113,23 @@ def step_hubs(conf, st, now=None):
         dn = usb.attr(d, "devnum")
         old = seen.get(p) or {}
         drops = [t for t in old.get("drops", []) if now - t < 86400]
+        models = usb.models(below)
         if old.get("dev") and old["dev"] != dn:
             changed.append(p)
             drops.append(now)
-        seen[p] = {"dev": dn, "drops": drops, "models": usb.models(below)}
+            models = old.get("models") or models      # как было до провала: после — модемы ещё не все
+        elif old.get("models") and sum(old["models"].values()) > sum(models.values()) and drops \
+                and now - drops[-1] < 300:
+            models = old["models"]                    # модемы ещё возвращаются — помним полный состав
+        seen[p] = {"dev": dn, "drops": drops, "models": models}
     for p in changed:
-        parent = p.rsplit(".", 1)[0] if "." in p else None
-        if parent in changed:
-            continue                    # пропал вместе с хабом выше — о нём и скажем
-        log("⚠ хаб %s пропадал целиком и вернулся: на нём %d модемов (%s), за сутки — %d раз. Так бывает, "
-            "когда блоку питания хаба не хватает тока; после этого модемы могут зависнуть"
-            % (p, sum(seen[p]["models"].values()), ", ".join("%d × %s" % (c, k) for k, c in seen[p]["models"].items()),
-               len(seen[p]["drops"])))
+        up = [a for a in seen if p.startswith(a + ".") and seen[a].get("drops") and now - seen[a]["drops"][-1] < 120]
+        if up:
+            continue                    # пропал вместе с хабом выше (сейчас или проходом раньше)
+        m = seen[p]["models"]
+        log("⚠ хаб %s пропадал целиком и вернулся (выключали питание или хаб сбросился): на нём %d модемов "
+            "(%s), за сутки — %d раз" % (p, sum(m.values()), ", ".join("%d × %s" % (c, k) for k, c in m.items()),
+                                          len(seen[p]["drops"])))
     for p in [p for p in seen if p not in hubs]:
         if not seen[p].get("drops"):
             seen.pop(p, None)
@@ -148,8 +152,12 @@ def step_zerocd(conf, st, devs, now=None):
         p, pid = usb.port(d), usb.attr(d, "idProduct")
         key = "zerocd." + p
         if usb.pid_mode(pid) != "cdrom" or usb.claimed(d):
-            for k in (key, "zcfg." + p, "zerocd_t." + p):
+            for k in (key, "zcfg." + p, "zerocd_t." + p, "zerocd_seen." + p):
                 cnt.pop(k, None)
+            continue
+        # Только что появился (включили хаб) — модем грузится: первые zerocd_delay с не трогаем
+        # (команда посреди загрузки — лишний риск, K5160 на SpbVL-2 оставались без радиочасти).
+        if now - cnt.setdefault("zerocd_seen." + p, now) < conf["zerocd_delay"]:
             continue
         # Команда ушла — модему нужно 5–10 с, чтобы отключиться и прийти в новом режиме. Проходы
         # (udev на каждое событие, таймер) чаще: не повторять раньше zerocd_wait, иначе за секунды
@@ -180,7 +188,7 @@ def step_zerocd(conf, st, devs, now=None):
             cnt[key] = tries + 1
     if not jobs:
         return
-    log("Zero-CD: переключаю %d (usb_modeswitch, по %d разом)" % (len(jobs), conf["zerocd_parallel"]))
+    log("Zero-CD: переключаю %d (по %d, пауза %d с)" % (len(jobs), conf["zerocd_parallel"], conf["zerocd_gap"]))
 
     def switch(j):
         p, pid, bus, num, ms, tries = j
@@ -191,8 +199,12 @@ def step_zerocd(conf, st, devs, now=None):
             last = [ln.strip() for ln in out.splitlines() if ln.strip()][-1:] or ["нет ответа"]
             log("%s 12d1:%s usb_modeswitch не отправил (попытка %d): %s" % (p, pid, tries + 1, last[0][:120]))
 
-    with ThreadPoolExecutor(max_workers=max(1, conf["zerocd_parallel"])) as ex:
-        list(ex.map(switch, jobs))
+    k = max(1, conf["zerocd_parallel"])
+    for i in range(0, len(jobs), k):    # не все сразу: партия, пауза, следующая
+        if i:
+            pause(conf["zerocd_gap"])
+        with ThreadPoolExecutor(max_workers=k) as ex:
+            list(ex.map(switch, jobs[i:i + k]))
 
 
 def load_confmap():

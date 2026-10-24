@@ -33,7 +33,9 @@ DEFAULTS = {
     "bad_drivers": ["huawei_cdc_ncm", "cdc_mbim", "cdc_ncm", "qmi_wwan"],   # raw-IP: без DHCP и web-API
     "cfg_max_tries": 8,             # перебор USB-конфигураций
     "zerocd_max_tries": 3,          # usb_modeswitch до пере-enumerate
-    "zerocd_parallel": 8,           # usb_modeswitch разом (на разные модемы)
+    "zerocd_parallel": 2,           # usb_modeswitch разом (на разные модемы) — «не все сразу»
+    "zerocd_gap": 3,                # с между такими партиями
+    "zerocd_delay": 10,             # с: модем только появился в Zero-CD — даём загрузиться, не трогаем
     "zerocd_wait": 25,              # с: повтор для того же модема не раньше (он переключается)
     "nodrv_grace": 3,               # проходов ждать привязки драйвера
     "dhcp_max_tries": 10,           # подряд; потом — раз в dhcp_retry_every (не бросаем навсегда)

@@ -369,7 +369,7 @@ cfgs = []
 real_set, real_which, real_sh = usb.set_config, shutil.which, driver.sh
 usb.set_config = lambda d, v: cfgs.append((usb.port(d), v))
 st = common.load_state()
-c = dict(common.DEFAULTS, nodrv_grace=0)
+c = dict(common.DEFAULTS, nodrv_grace=0, zerocd_delay=0)
 driver.step_usbcfg(c, st, usb.devices())
 check("NCM на настоящем — следующая конфигурация; виртуальный NCM не тронут", cfgs == [("1-5", 3)], cfgs)
 cfgs.clear()
@@ -419,6 +419,40 @@ try:
     finally:
         usb.reenumerate = real_reen
     check("не переключился за zerocd_max_tries — пере-enumerate", reen == ["1-6"], (reen, st0["cnt"]))
+
+    print("Zero-CD не все сразу:")
+    cd = dict(c, zerocd_delay=10, zerocd_parallel=2, zerocd_gap=3)
+    std = {"cnt": {}, "msg": {}}
+    switched.clear()
+    driver.step_zerocd(cd, std, usb.devices(), now=3000000000)
+    driver.step_zerocd(cd, std, usb.devices(), now=3000000005)
+    check("только появился — первые 10 с не трогаем (модем грузится)", not [a for a in switched if a[0] == "usb_modeswitch"], switched)
+    driver.step_zerocd(cd, std, usb.devices(), now=3000000011)
+    check("через 10 с — переключаем", len([a for a in switched if a[0] == "usb_modeswitch"]) == 1, switched)
+    many = [usb.find("1-6")] * 5
+    pauses, real_pause = [], driver.pause
+    driver.pause = lambda sec: pauses.append(sec)
+    real_ms = usb.ms_iface
+    try:
+        std2 = {"cnt": {}, "msg": {}}
+        ports = ["1-6", "1-7", "1-8", "1-9", "1-10"]
+        real_port = usb.port
+        it = iter(ports * 3)
+        devs5 = [type("D", (), {})() for _ in ports]
+        usb.port = lambda d: ports[devs5.index(d)] if d in devs5 else real_port(d)
+        real_attr = usb.attr
+        usb.attr = lambda d, k: ({"idProduct": "1f01", "busnum": "3", "devnum": str(30 + devs5.index(d))}.get(k, "")
+                                 if d in devs5 else real_attr(d, k))
+        real_claimed = usb.claimed
+        usb.claimed = lambda d: False if d in devs5 else real_claimed(d)
+        usb.ms_iface = lambda d: 2
+        switched.clear()
+        driver.step_zerocd(cd, std2, devs5, now=4000000000)
+        driver.step_zerocd(cd, std2, devs5, now=4000000011)
+        n5 = len([a for a in switched if a[0] == "usb_modeswitch"])
+        check("пять модемов — по 2 с паузой 3 с (2 паузы)", n5 == 5 and pauses == [3, 3], (n5, pauses))
+    finally:
+        driver.pause, usb.ms_iface, usb.port, usb.attr, usb.claimed = real_pause, real_ms, real_port, real_attr, real_claimed
 finally:
     shutil.which, driver.sh = real_which, real_sh2
     shutil.rmtree(os.path.join(S, PCI, "1-6"))
@@ -506,6 +540,11 @@ mt = install.modprobe_text()
 check("modprobe.d: cdc_mbim не грузится вовсе, usb-storage не берёт модемы",
       "blacklist cdc_mbim" in mt and "install cdc_mbim /bin/true" in mt and "options usb-storage quirks=12d1:1f01:i," in mt, mt)
 ut = install.udev_text()
+check("udev: ни одного «ATTRS{…}!=» — по родителям (хабам) оно верно всегда",
+      not [ln for ln in (install.udev_text() + install.udev_ports_text() + install.udev_ms_text()).splitlines()
+           if not ln.lstrip().startswith("#") and "ATTRS{" in ln and "}!=" in ln])
+check("udev: штатный usb_modeswitch для Zero-CD отменён — оба ATTRS в одном правиле, на модеме",
+      'ATTRS{idVendor}=="12d1", ATTRS{idProduct}=="1f01|' in install.udev_ms_text() and 'RUN="/bin/true"' in install.udev_ms_text())
 check("udev: ModemManager не трогает модемы (штатная метка), до фильтра подсистем — и для tty",
       'ATTRS{idVendor}=="12d1", ENV{ID_MM_DEVICE_IGNORE}="1"' in ut
       and ut.index("ID_MM_DEVICE_IGNORE") < ut.index('SUBSYSTEM!="usb|net"') and ut.index("dummy_hcd") < ut.index("ID_MM_DEVICE_IGNORE"), ut)
@@ -836,14 +875,26 @@ try:
     check("devnum тот же — тишина", not logged)
     mk("devices/pci0000:00/0000:00:14.0/usb1/1-4", devnum="31")
     driver.step_hubs(conf, sth, now=1030)
-    check("devnum другой — хаб пропадал: в журнал, с моделями и счётом за сутки",
-          sth["hubs"]["1-4"]["drops"] == [1030] and any("хаб 1-4 пропадал целиком" in m and "1 × K5160" in m and "1 раз" in m for m in logged), logged)
+    check("devnum другой — хаб пропадал: в журнал, с моделями (как до провала) и счётом за сутки",
+          sth["hubs"]["1-4"]["drops"] == [1030] and any("хаб 1-4 пропадал целиком" in m and "1 × K5160" in m and "1 раз" in m
+                                                         and "питани" in m and "не хватает" not in m for m in logged), logged)
+    device(PCI, "1-4.3", "0101", vendor="1a40", ncfg="1", devnum="40")          # вложенный хаб
+    device(PCI, "1-4.3.1", "14db", drv="cdc_ether", devnum="41")
+    driver.step_hubs(conf, sth, now=1100)
+    logged.clear()
+    mk("devices/pci0000:00/0000:00:14.0/usb1/1-4", devnum="50")
+    mk("devices/pci0000:00/0000:00:14.0/usb1/1-4.3", devnum="51")
+    driver.step_hubs(conf, sth, now=1200)
+    mk("devices/pci0000:00/0000:00:14.0/usb1/1-4.3", devnum="52")       # вложенный вернулся проходом позже
+    driver.step_hubs(conf, sth, now=1215)
+    check("пропало дерево хабов — одна строка, про верхний", len(logged) == 1 and "хаб 1-4 " in logged[0], logged)
     real_ls = common.load_state
     common.load_state = lambda: sth
     try:
         hd = status.hub_drops(now=1100)
-        check("status: хаб и сколько раз за сутки", hd == [{"port": "1-4", "drops": 1, "models": {"K5160": 1, "E3372": 1}}], hd)
-        check("через сутки — забыто", status.hub_drops(now=1030 + 86401) == [])
+        check("status: верхний хаб и сколько раз за сутки, вложенные — не отдельно",
+              [(x["port"], x["drops"]) for x in hd] == [("1-4", 2)], hd)
+        check("через сутки — забыто", status.hub_drops(now=1215 + 86401) == [])
     finally:
         common.load_state = real_ls
 finally:
