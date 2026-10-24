@@ -123,15 +123,14 @@ def hub_drops(now=None):
     out = []
     for p, h in sorted((common.load_state().get("hubs") or {}).items()):
         n = len([t for t in h.get("drops", []) if now - t < 86400])
-        if n:
+        if n and not any(p.startswith(x["port"] + ".") for x in out):    # вложенные — вместе с верхним
             out.append({"port": p, "drops": n, "models": h.get("models") or {}})
     return out
 
 
 def hub_text(h):
-    return ("хаб %s пропадал целиком %d раз за сутки (%s) — похоже, блоку питания хаба не хватает тока; "
-            "после этого модемы могут зависнуть" % (h["port"], h["drops"],
-                                                    ", ".join("%d × %s" % (c, k) for k, c in h["models"].items())))
+    return ("хаб %s пропадал целиком %d раз за сутки (%s): все его модемы стартовали разом"
+            % (h["port"], h["drops"], ", ".join("%d × %s" % (c, k) for k, c in h["models"].items())))
 
 
 def fix_text(fix, size):
