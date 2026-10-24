@@ -3,7 +3,19 @@
 "use strict";
 (function () {
 
+  // Телепорт (PCS.md §19.4): панель присоединённого хоста открыта через хаб — /t/<имя>/…. Тогда все
+  // свои адреса — с этим префиксом: запросы, терминал и окна браузера идут тому хосту, выполняет он.
+  const ROOT = (location.pathname.match(/^\/t\/[a-z0-9-]{1,40}\//) || ["/"])[0];
+  const TELE = ROOT === "/" ? null : decodeURIComponent(ROOT.split("/")[2]);
+  const R = (p) => (typeof p === "string" && p.startsWith("/")) ? ROOT + p.slice(1) : p;
+
   // ── DOM ───────────────────────────────────────────────────────────────────
+  // replaceChildren/append/prepend превращают null в текст «null» (так в шапке и было: «ВМ 1/1 null»).
+  // Пустое «нет элемента» в панели — обычное дело: пропускаем его, как это делает el().
+  for (const m of ["replaceChildren", "append", "prepend"]) {
+    const orig = Element.prototype[m];
+    Element.prototype[m] = function (...kids) { return orig.apply(this, kids.filter((k) => k != null && k !== false)); };
+  }
   const $ = (sel, root) => (root || document).querySelector(sel);
 
   function el(tag, attrs, ...kids) {
@@ -150,12 +162,12 @@
     const tries = method === "GET" ? 4 : 1;
     for (let i = 0; ; i++) {
       let r, text;
-      try { r = await fetch(path, opt); } catch (e) {
+      try { r = await fetch(R(path), opt); } catch (e) {
         if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
         return {ok: false, net: true, error: method === "GET" ? "панель не отвечает — сеть или pcs-web остановлена"
           : "связь с панелью прервалась — действие могло выполниться: «Обновить» или «Фоновые задания» на странице хоста"};
       }
-      if (r.status === 401) { location.href = "/login"; return {ok: false, error: "нужен вход"}; }
+      if (r.status === 401) { location.href = R("/login"); return {ok: false, error: "нужен вход"}; }
       try { text = await r.text(); } catch (e) {
         if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
         return {ok: false, net: true, error: "связь оборвалась посреди ответа (HTTP " + r.status + ")" +
@@ -662,10 +674,13 @@
       const vms = (X.ov().servers || []).filter((sv) => !q || (String(sv.id) + " " + (sv.name || "") + " " + (sv.ip || "")).toLowerCase().includes(q));
       if (q && !vms.length) return;
       const closed = !q && TREE.closed[key];
+      // Присоединённый хост — телепортом (/t/<имя>/): его панель, его команды; хаб — только окно.
+      const tp = X.node ? "/t/" + encodeURIComponent(X.node) + "/#" : null;
+      const go = (p) => tp ? tp + p : X.href(p);
       const twist = el("button", {type: "button", class: "t-twist", "aria-label": closed ? "развернуть" : "свернуть", "aria-expanded": String(!closed),
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); treeToggle(key); renderTree(); }}, ic("chev"));
-      const head = el("a", {class: "t-row" + (here && cur.kind === "host" ? " active" : "") + (off ? " off" : ""), href: X.href("/"),
-        title: off ? (n.error || "нет связи") : ""},
+      const head = el("a", {class: "t-row" + (here && cur.kind === "host" ? " active" : "") + (off ? " off" : "") + (tp ? " t-tele" : ""), href: go("/"),
+        title: off ? (n.error || "нет связи") : tp ? "телепорт: панель хоста " + X.node + " — команды выполняет он" : ""},
         twist, el("span", {class: "dot " + (loading && !X.node ? "" : off ? "bad" : hostLevel(X))}),
         el("span", {class: "t-name", text: X.node ? X.node : (h.name || (loading ? "хост" : "хост"))}),
         el("span", {class: "t-meta", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"}));
@@ -674,21 +689,23 @@
         const c = counts(sv);
         inner.append(el("a", {class: "t-row t-vm" + (here && cur.kind === "vm" && String(cur.id) === String(sv.id) ? " active" : "") +
           (sv.state === "stopped" || sv.state === "absent" ? " off" : ""),
-          href: X.href("/vm/" + sv.id), title: levelText(sv), style: "--h:" + hueOf(sv, X)},
+          href: go("/vm/" + sv.id), title: levelText(sv), style: "--h:" + hueOf(sv, X)},
           el("span", {class: "chip"}), el("span", {class: "dot " + level(sv)}),
           el("span", {class: "t-name"}, el("b", {text: String(sv.id)}), sv.name || ""),
           el("span", {class: "t-meta"}, sv.state === "absent" ? "нет в Proxmox" : sv.state === "stopped" ? "выкл"
             : [c.total ? meterOf(c) : null, el("span", {text: c.total ? c.ok + "/" + c.total : modeShort(sv.mode)})])));
       }
       if (loading && !X.node && !vms.length) for (let i = 0; i < 3; i++) inner.append(el("div", {class: "t-row t-vm"}, el("span"), el("span"), el("span", {class: "skel", style: "width:" + (70 - i * 12) + "%"}), el("span")));
-      if (X.isPve() && !off && !q) inner.append(el("a", {class: "t-add" + (here && cur.kind === "create" ? " active" : ""), href: X.href("/create")}, ic("plus"), "Создать ВМ" + (X.node ? " на " + X.node : "")));
-      kids.push(el("div", {class: "t-host" + (closed ? " closed" : "")}, head, el("div", {class: "t-kids"}, inner)));
+      if (X.isPve() && !off && !q) inner.append(el("a", {class: "t-add" + (here && cur.kind === "create" ? " active" : ""), href: go("/create")}, ic("plus"), "Создать ВМ" + (X.node ? " на " + X.node : "")));
+      const gear = X.node ? el("a", {class: "t-gear" + (here && cur.kind === "host" ? " active" : ""), href: X.href("/"),
+        title: "присоединение: цвет, обновить PCS на нём, отсоединить", "aria-label": "присоединение " + X.node}, ic("edit")) : null;
+      kids.push(el("div", {class: "t-host" + (closed ? " closed" : "") + (X.node ? " t-node" : "")}, head, gear, el("div", {class: "t-kids"}, inner)));
     }
     hostBlock(ctx(null));
-    const nodes = S.nodes || [];
+    const nodes = TELE ? [] : (S.nodes || []);          // в телепорте — только этот хост: хосты в вакууме
     if (nodes.length) kids.push(el("div", {class: "t-sec", text: "Присоединённые хосты"}));
     for (const n of nodes) hostBlock(ctx(n.name));
-    if (!q) kids.push(el("a", {class: "t-add" + (cur.kind === "join" ? " active" : ""), href: "#/join", style: "padding-left:8px;margin-top:10px"}, ic("link"), "Присоединить хост"));
+    if (!q && !TELE) kids.push(el("a", {class: "t-add" + (cur.kind === "join" ? " active" : ""), href: "#/join", style: "padding-left:8px;margin-top:10px"}, ic("link"), "Присоединить хост"));
     if (q && !kids.some((k) => k.classList.contains("t-host"))) kids.push(el("div", {class: "t-empty", text: "ничего не нашлось"}));
     nav.replaceChildren(...kids);
   }
@@ -1258,7 +1275,7 @@
   // прокси применился), под ним — кнопки-помогаторы на нужные страницы.
   let RFBmod = null;
   async function loadRFB() {
-    if (!RFBmod) RFBmod = (await import("/static/vendor/novnc/core/rfb.js")).default;
+    if (!RFBmod) RFBmod = (await import(R("/static/vendor/novnc/core/rfb.js"))).default;
     return RFBmod;
   }
 
@@ -1288,7 +1305,7 @@
       if (rfb || !alive) return;
       let RFB;
       try { RFB = await loadRFB(); } catch (e) { msg("noVNC не загрузился: " + e); return; }
-      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/browser?" + new URLSearchParams({kind: "md", target: id});
+      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + R("/ws/browser") + "?" + new URLSearchParams({kind: "md", target: id});
       screen.replaceChildren();
       rfb = new RFB(screen, url, {shared: true});
       rfb.resizeSession = false;
@@ -1526,7 +1543,7 @@
       try { RFB = await loadRFB(); } catch (e) { screenBox.replaceChildren(el("div", {class: "banner", text: "noVNC не загрузился: " + e})); return; }
       const qs = new URLSearchParams({kind, target: id});
       if (X.node) qs.set("node", X.node);
-      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/browser?" + qs;
+      const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + R("/ws/browser") + "?" + qs;
       screenBox.replaceChildren();
       rfb = new RFB(screenBox, url, {shared: true});
       rfb.resizeSession = false;          // экран — обычный 1920×1080, во вкладке — масштаб
@@ -2494,9 +2511,9 @@
   function loadXterm() {
     if (window.Terminal && window.FitAddon) return Promise.resolve();
     if (!xtermP) xtermP = new Promise((resolve, reject) => {
-      const a = el("script", {src: "/static/vendor/xterm/xterm.js"});
+      const a = el("script", {src: R("/static/vendor/xterm/xterm.js")});
       a.onload = () => {
-        const b = el("script", {src: "/static/vendor/xterm/addon-fit.js"});
+        const b = el("script", {src: R("/static/vendor/xterm/addon-fit.js")});
         b.onload = resolve; b.onerror = reject; document.head.append(b);
       };
       a.onerror = reject;
@@ -2529,7 +2546,7 @@
       if (!this.t) return;
       if (this.ws && this.ws.readyState <= 1) return;
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const url = proto + "//" + location.host + this.wsPath + "?target=" + encodeURIComponent(this.target) +
+      const url = proto + "//" + location.host + R(this.wsPath) + "?target=" + encodeURIComponent(this.target) +
         "&cols=" + this.t.cols + "&rows=" + this.t.rows + this.query;
       this.state("подключение…", "run");
       const ws = this.ws = new WebSocket(url);
@@ -2970,6 +2987,25 @@
     b.addEventListener("click", () => set(order[(order.indexOf(t) + 1) % order.length]));
   }
 
+  // Полоса телепорта: где я и куда дальше — домой (хаб) и в другие присоединённые хосты (список — у хаба).
+  async function teleBar() {
+    const hosts = el("span", {class: "tele-hosts"});
+    const bar = el("div", {class: "tele-bar", role: "note"},
+      el("span", {class: "tele-orb", "aria-hidden": "true"}),
+      el("b", {text: "Телепорт"}), el("span", {class: "tele-name", text: TELE}),
+      el("span", {class: "tele-note", text: "здесь всё выполняет этот хост · хаб — только окно"}),
+      el("span", {class: "spacer"}), hosts,
+      el("a", {class: "btn ghost tele-home", href: "/"}, "← домой"));
+    document.body.prepend(bar);
+    document.body.classList.add("teleported");
+    try {
+      const r = await fetch("/api/nodes", {credentials: "same-origin"});       // хаб, а не этот хост
+      const d = await r.json();
+      hosts.replaceChildren(...((d && d.data) || []).filter((x) => x.name !== TELE).map((x) =>
+        el("a", {class: "btn ghost", href: "/t/" + encodeURIComponent(x.name) + "/", title: "телепорт: " + x.name}, "⟶ " + x.name)));
+    } catch (e) { /* список хостов — не обязателен */ }
+  }
+
   async function boot() {
     themeBtn();
     treeSearch();
@@ -2979,7 +3015,11 @@
     const r = await GET("/api/session");
     if (!r.ok) return;
     S.session = r.data;
-    $("#logout").addEventListener("click", async () => { await POST("/api/logout", {}); location.href = "/login"; });
+    $("#logout").addEventListener("click", async () => {
+      if (TELE) { location.href = "/"; return; }           // из телепорта — домой, свой вход не трогаем
+      await POST("/api/logout", {}); location.href = "/login";
+    });
+    if (TELE) teleBar();
     window.addEventListener("hashchange", route);
     route();                                 // страница — сразу, данные дотянутся
     if (S.route.kind === "md") return;       // окно веба модемов: обзор и дерево ему не нужны

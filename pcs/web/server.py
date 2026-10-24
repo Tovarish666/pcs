@@ -12,6 +12,9 @@ CORS нет. Терминал — WebSocket /ws/term?target=<id|host> ↔ pty (a
   /api/v1/<путь> с Authorization: Bearer     — те же адреса, что /api/<путь> у браузера
   POST /api/v1/login-link                     — одноразовая ссылка входа (хаб открывает панель)
   POST /api/v1/leave                          — отозвать свой токен (хаб отсоединяется)
+
+Телепорт (PCS.md §19.4): /t/<имя>/… — панель присоединённого хоста через хаб, как есть
+(страницы, API, терминал, окна браузера). Выполняет всё тот хост; хаб — только окно (teleport.py).
 """
 import argparse
 import getpass
@@ -35,7 +38,7 @@ import urllib.parse
 
 from pcs import VERSION
 from pcs.core.util import Fail
-from pcs.web import auth, tls, tokens, ws
+from pcs.web import auth, teleport, tls, tokens, ws
 from pcs.web.auth import WEB_JSON, set_password  # noqa: F401  (set_password зовёт `pcs web passwd`)
 from pcs.web.panel import Bad, Panel, target
 
@@ -76,6 +79,7 @@ class App:
         self.ott = {}                          # одноразовые ссылки входа: токен → (до, логин)
         self.fingerprint = ""                  # отпечаток своего сертификата (если HTTPS включён)
         self.tokens_path = tokens_path or tokens.PATH
+        self.teleport = teleport.Teleporter(_node_rec)
 
     def log(self, msg):
         line = "%s %s" % (time.strftime("%F %T"), msg)
@@ -119,7 +123,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         if not getattr(self, "_body_done", True) and (self.headers.get("Content-Length") or "0").strip() not in ("", "0"):
-            # Отказ до чтения тела (403, 413): тело осталось в сокете и стало бы «следующим запросом» (501).
+            # Отказ до чтения тела (403, 413): тело осталось в сокете и стало бы «следующим запросом» (501) —
+            # закрываем. Но сначала дочитываем (если не огромное): закрыть сокет с непрочитанным — это сброс
+            # (RST), и по TLS клиент не успевает прочесть сам ответ (так терялся 403 в телепорте).
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if 0 < n <= MAX_BODY:
+                    self.rfile.read(n)
+            except (ValueError, OSError):
+                pass
+            self._body_done = True
             self.close_connection = True
             self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -212,6 +225,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlsplit(self.path)
         path = u.path
         try:
+            m = TELE.fullmatch(path)
+            if m:
+                return self._teleport(self.command, m.group(1), m.group(2) or "", u.query)
             if path == "/ws/term":
                 return self._ws_term(u)
             if path == "/ws/browser":
@@ -247,6 +263,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         u = urllib.parse.urlsplit(self.path)
         try:
+            m = TELE.fullmatch(u.path)
+            if m:
+                return self._teleport("POST", m.group(1), m.group(2) or "", u.query)
             if u.path == "/api/login":
                 return self._login()
             if u.path.startswith("/api/v1/"):
@@ -289,6 +308,70 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.app.log("сбой %s %s: %s\n%s" % (method, path, e, traceback.format_exc()))
             return self._json(500, {"ok": False, "error": "сбой панели (%s) — подробности: journalctl -u pcs-web"
                                     % e.__class__.__name__})
+
+    # ── телепорт: панель присоединённого хоста через хаб ─────────────────────
+
+    def _teleport(self, method, name, rest, query):
+        """/t/<имя>/… → тот хост, как есть. Своя сессия хаба нужна; сессию на том хосте держит хаб."""
+        app = self.app
+        s = self._session()
+        if s is None:
+            if method != "POST" and not rest.startswith("/api/"):
+                return self._redirect("/login")
+            return self._json(401, {"ok": False, "error": "нужен вход", "data": {"auth": False}})
+        if not rest:
+            return self._redirect("/t/%s/" % name)
+        if method == "POST" and not self._origin_ok():
+            return self._json(403, {"ok": False, "error": "чужой Origin"})
+        path = rest + ("?" + query if query else "")
+        app.teleport.forget(lambda sid: app.sessions.get(sid, auth.stamp(app.config)) is not None)
+        if (self.headers.get("Upgrade") or "").lower() == "websocket":
+            return self._teleport_ws(s, name, path)
+        body = b""
+        if method == "POST":
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return self._json(400, {"ok": False, "error": "Content-Length"})
+            if n > MAX_BODY:
+                return self._json(413, {"ok": False, "error": "слишком большой запрос"})
+            body = self.rfile.read(n) if n else b""
+            self._body_done = True
+        try:
+            code, headers, data = app.teleport.request(s["sid"], name, method, path, list(self.headers.items()), body)
+        except Fail as e:
+            if rest.startswith("/api/") or method == "POST":
+                return self._json(502, {"ok": False, "error": str(e)})
+            return self._send(502, TELE_FAIL % (name, e), "text/html; charset=utf-8")
+        self.send_response(code)
+        for k, v in headers:
+            if k.lower() == "location" and v.startswith("/"):
+                v = "/t/%s%s" % (name, v)       # его адреса — внутри телепорта
+            self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if method != "HEAD":
+            self.wfile.write(data)
+
+    def _teleport_ws(self, s, name, path):
+        h = self.headers
+        key = h.get("Sec-WebSocket-Key") or ""
+        if not self._origin_ok(required=True):
+            return self._send(403, "чужой Origin", "text/plain; charset=utf-8")
+        if not ws.key_ok(key):
+            return self._send(400, "нужен WebSocket 13", "text/plain; charset=utf-8")
+        try:
+            far, head = self.app.teleport.websocket(s["sid"], name, path, key, h.get("Sec-WebSocket-Version") or "13",
+                                                    h.get("Sec-WebSocket-Protocol"))
+        except Fail as e:
+            return self._send(502, str(e), "text/plain; charset=utf-8")
+        self.close_connection = True
+        try:
+            self.wfile.write(head)               # его «101 Switching Protocols» и что пришло следом
+            self.wfile.flush()
+            _relay(self.connection, far)
+        finally:
+            far.close()
 
     # ── связь хостов: /api/v1 по токену, только по HTTPS ────────────────────
 
@@ -584,6 +667,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             br.seen(k, -1)
             far.close()
         app.log("%s браузер %s: окно закрыто (%s)" % (s["user"], k, why))
+
+
+TELE = re.compile(r"/t/([a-z0-9-]{1,40})(/.*)?")
+TELE_FAIL = ("<!doctype html><meta charset=utf-8><title>Телепорт</title><body style='font:15px system-ui;padding:40px;"
+             "background:#0b0d11;color:#e6e8ee'><h2>Телепорт к «%s» не открылся</h2><p>%s</p>"
+             "<p><a href='/' style='color:#8ab4ff'>← на свой хост</a></p>")
+
+
+def _node_rec(name):
+    from pcs.hub import nodes
+    return nodes.load(name)
 
 
 def _relay(a, b, chunk=65536):

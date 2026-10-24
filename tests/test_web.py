@@ -251,7 +251,7 @@ check("без сессии / → вход", r.status == 302 and r.getheader("Loc
 r, d = req("GET", "/api/overview")
 check("без сессии API — 401", r.status == 401 and d["ok"] is False)
 r, d = req("GET", "/login", raw=True)
-check("страница входа отдаётся", r.status == 200 and b"/static/login.js" in d)
+check("страница входа отдаётся (статика — относительно: под телепортом тоже)", r.status == 200 and b'src="static/login.js"' in d)
 r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass"}, {"Origin": ORIGIN})
 check("вход без X-CSRF — 403", r.status == 403)
 c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=20)
@@ -289,7 +289,7 @@ r, d = req("OPTIONS", "/api/overview", headers={"Origin": "http://evil.example",
                                                 "Access-Control-Request-Method": "POST"})
 check("на preflight CORS ответа нет", r.getheader("Access-Control-Allow-Origin") is None and r.status >= 400)
 r, d = req("GET", "/", cookie=SID, raw=True)
-check("с сессией / → панель", r.status == 200 and b"/static/app.js" in d)
+check("с сессией / → панель", r.status == 200 and b'src="static/app.js"' in d)
 
 
 def P(path, body=None, csrf=None, origin=ORIGIN, cookie=None):
