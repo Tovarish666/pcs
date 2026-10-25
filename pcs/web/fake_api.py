@@ -1,6 +1,6 @@
 """Фейковый API хаба (те же функции, что pcs.hub.api, §9) — для разработки панели и тестов.
 
-Хост servervolga; ВМ 1000 server1 (USB 20/20), 2000 pcs2000 (USB 5/5),
+Хост mvdx; ВМ 1000 server1 (USB 20/20), 2000 pcs2000 (USB 5/5),
 200 LTEspace (шлюз 89/90). Состояние живёт в памяти процесса; reset() — с нуля.
 Включается PCS_WEB_FAKE=1 или `--fake`.
 """
@@ -19,7 +19,7 @@ from pcs.core.util import Fail
 
 DELAY = 0.15          # «сеть»: пауза на каждый вызов
 STEP = 0.7            # пауза между строками журнала заданий
-HOST = "servervolga"
+HOST = "mvdx"
 KIND = os.environ.get("PCS_WEB_FAKE_KIND", "proxmox")     # ubuntu — хост-VPS: без ВМ, модемы на нём
 
 _lock = threading.RLock()

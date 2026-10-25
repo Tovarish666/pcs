@@ -335,7 +335,7 @@ check("DNS: мусор в адресах — 400", r.status == 400)
 r, d = G("/api/overview")
 ov = d["data"]
 srv = {s["id"]: s for s in ov["servers"]}
-check("обзор: хост servervolga и три ВМ", ov["host"]["name"] == "servervolga" and sorted(srv) == [200, 1000, 2000], ov)
+check("обзор: хост mvdx и три ВМ", ov["host"]["name"] == "mvdx" and sorted(srv) == [200, 1000, 2000], ov)
 check("1000 USB 19/20 (один ждёт сервер), 2000 USB 5/5, 200 шлюз 89/90",
       (srv[1000]["mode"], srv[1000]["modems"]["ok"], srv[1000]["modems"]["total"]) == ("usb", 19, 20)
       and (srv[2000]["modems"]["ok"], srv[2000]["modems"]["total"]) == (5, 5)
