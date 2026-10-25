@@ -916,5 +916,12 @@ check("свой выход у адреса: правило from + default в т�
       == {"192.168.7.100"})
 
 shutil.rmtree(TMP, ignore_errors=True)
+print("сводка для обзора хаба (summary):")
+st = {"heal": {"31": {"conn": 901, "seen": 1000}, "32": {"conn": 902, "seen": 1000}, "33": {"conn": 901, "seen": 600}}}
+mods = [{"n": 31}, {"n": 32}, {"n": 33}, {"n": 34}, {"n": None}]
+sm = driver.summary_of(mods, st, now=1010)
+check("видно 5, в сети 1: 32 не в сети, 33 — давняя проверка, 34 не проверялся, без N — не в счёт «в сети»",
+      sm == {"ts": 1010, "total": 5, "ok": 1}, sm)
+
 print("\nитого: ok %d, fail %d" % (passed, failed))
 sys.exit(1 if failed else 0)
