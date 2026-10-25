@@ -894,5 +894,52 @@ pn2.forget()
 d6 = pn2.overview({}, {})["data"]
 check("после действия (forget) — свежий сразу, не запас", not d6.get("stale") and d6["host"]["n"] >= 4, d6)
 
+print("обзор не отстаёт от таблицы модемов (дерево, шапка ВМ и таблица — одно число):")
+
+
+class LiveApi:
+    """servers() — счёт «как было при сборке»; таблица (run status) — уже другая."""
+
+    def __init__(self):
+        self.rows = [{"n": 1, "state": "ok"}, {"n": 2, "state": "ok"}, {"n": 3, "state": "ok"}]
+        self.built = 3
+        self.delay = 0.0
+
+    def host_info(self):
+        return {"name": "h", "modems": {"ok": 0, "warn": 0, "broken": 0, "total": 0}}
+
+    def servers(self):
+        time.sleep(self.delay)
+        return [{"id": 1000, "name": "a", "state": "running", "modems": {"ok": self.built, "warn": 0, "broken": 0, "total": 3}}]
+
+    def run(self, sid, part, args, input=None):
+        return {"ok": True, "data": {"rows": [dict(r) for r in self.rows]}}
+
+
+la = LiveApi()
+pl = Panel(la)
+pl.OV_FRESH = 60
+d = pl.overview({}, {})["data"]
+check("сначала — счёт сборки 3/3", d["servers"][0]["modems"]["ok"] == 3)
+la.rows[1]["state"] = "broken"
+la.rows[2]["state"] = "disabled"
+pl.handle("GET", "/api/targets/1000/proxyveth", {"only": "status"}, None)
+d = pl.overview({}, {})["data"]
+check("таблица посмотрена — обзор (ещё из запаса) уже с её счётом: 1 из 2, выключенный не в счёт",
+      d["servers"][0]["modems"] == {"ok": 1, "warn": 0, "broken": 1, "total": 2}, d["servers"][0]["modems"])
+la.delay = 0.4
+th = threading.Thread(target=pl._ov_build)
+th.start()
+time.sleep(0.1)
+la.rows[1]["state"] = "ok"
+pl.handle("GET", "/api/targets/1000/proxyveth", {"only": "status"}, None)
+th.join()
+d = pl.overview({}, {})["data"]
+check("сборка обзора шла дольше таблицы — её старый счёт таблицу не перебил", d["servers"][0]["modems"]["ok"] == 2, d["servers"][0]["modems"])
+la.delay = 0
+pl._ov_build()
+d = pl.overview({}, {})["data"]
+check("сборка после таблицы — её счёт (3/3 от servers) снова главный", d["servers"][0]["modems"]["ok"] == 3, d["servers"][0]["modems"])
+
 print("\nитого: ok %d, fail %d" % (passed, failed))
 sys.exit(1 if failed else 0)

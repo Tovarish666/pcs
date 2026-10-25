@@ -18,7 +18,7 @@ from .. import VERSION
 from ..core import dns as dnsfix
 from ..core import util
 from ..core.util import Fail, sh
-from . import node, pve, remote, store, ui
+from . import node, pve, remote, router, store, ui
 
 MODES = ("usb", "gw")
 HOST_BIN = ("pcs", "proxyveth", "modlink", "hivelink", "pcs-node")   # команды в /usr/local/bin хоста
@@ -103,7 +103,7 @@ def host_overview():
             "hivelink": hl.get("data") if hl.get("ok") else {"installed": False, "error": hl.get("error")},
             "proxyveth": pv, "mode": pv.get("mode"), "pv_on": pv.get("on", True), "modems": pv.get("modems"), "mpspace": mp,
             "mpspace_ok": mpspace_allowed()[0], "vms": kind == "proxmox",
-            "modlink": node.modlink_info(), "dns": dnsfix.current(), "dns_use": dnsfix.active()}
+            "modlink": node.modlink_info(), "dns": dnsfix.current(), "dns_use": dnsfix.active(), "router": router.brief()}
 
 
 def mpspace_allowed():

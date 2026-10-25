@@ -13,6 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from pcs.core.util import Fail, jload, jsave
+from pcs.hub.node import summarize
 from pcs.web import browser as br_mod
 
 PARTS = ("proxyveth", "modlink", "hivelink")
@@ -107,6 +108,7 @@ class Panel:
         self._ov = None            # (monotonic, данные)
         self._ov_busy = False
         self._ov_fresh_next = False
+        self._live = {}            # цель → (time, сводка модемов) из последней таблицы: обзор не отстаёт от неё
         self._cache = {}
         self._clock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="pcs-web-api")
@@ -155,6 +157,10 @@ class Panel:
             ("POST", r"/api/browser/md/(host|\d+)/stop", self.br_md_stop),
             ("POST", r"/api/browser/md/(host|\d+)/modem", self.br_modem),
             ("POST", r"/api/browser/install", self.br_install),
+            ("GET", r"/api/router", self.router_get),
+            ("GET", r"/api/router/(ifaces|nat|leases|log|conf)", self.router_list),
+            ("POST", r"/api/router/(save|forget|iface|nat_add|nat_set|nat_del|lease_static|reboot)", self.router_act),
+            ("POST", r"/api/router/webfig", self.router_webfig),
         ]
         self.routes = [(m, re.compile(p + r"\Z"), fn) for m, p, fn in self.routes]
 
@@ -247,11 +253,13 @@ class Panel:
         return ok(dict(hit[1], stale=True, age=max(0, int(time.time()) - int(hit[1].get("ts") or 0))))
 
     def _ov_build(self):
+        t0 = time.time()
         r = self._parallel(host=(self._call, self.api.host_info), servers=(self._call, self.api.servers))
         d = {"host": r["host"].get("data"), "host_error": r["host"].get("error"),
              "servers": r["servers"].get("data") or [], "servers_error": r["servers"].get("error"),
              "ts": int(time.time())}
         with self._clock:
+            self._ov_live(d, since=t0)     # таблицу смотрели, пока обзор собирался, — её сводка новее
             self._ov = (time.monotonic(), d)
             self._ov_fresh_next = False
         if self.ov_path and not d["host_error"] and not d["servers_error"]:
@@ -260,6 +268,30 @@ class Panel:
             except OSError:
                 pass
         return d
+
+    def _ov_live(self, d, since=0.0):
+        """Сводки модемов из таблиц (новее since) → в обзор d. Под self._clock."""
+        for k, (ts, m) in self._live.items():
+            if ts < since:
+                continue
+            if k == "host":
+                h = d.get("host")
+                if isinstance(h, dict):
+                    h["modems"] = m
+                    if isinstance(h.get("proxyveth"), dict):
+                        h["proxyveth"]["modems"] = m
+                continue
+            for s in d.get("servers") or []:
+                if str(s.get("id")) == k and s.get("state") == "running":
+                    s["modems"] = m
+
+    def live(self, t, rows):
+        """Свежая таблица модемов цели t: дерево, шапка ВМ и сводка хоста берут её же счёт —
+        а не тот, что был при последней сборке обзора (до 8 с и больше)."""
+        with self._clock:
+            self._live[str(t)] = (time.time(), summarize(rows))
+            if self._ov:
+                self._ov_live(self._ov[1])
 
     def _ov_refresh(self):
         with self._clock:
@@ -295,7 +327,10 @@ class Panel:
         jobs = {"status": (self._run, sid, "proxyveth", st)}
         if query.get("only") != "status":
             jobs["source"] = (self._run, sid, "proxyveth", ["source"])
-        return ok(self._parallel(**jobs))
+        out = self._parallel(**jobs)
+        if out["status"].get("ok"):
+            self.live(sid, rows_of(out["status"].get("data")))
+        return ok(out)
 
     def pv_table(self, sid, query, body):
         e = self._run(target(sid), "proxyveth", ["table", "show"])
@@ -549,6 +584,60 @@ class Panel:
         if self.browser is None:
             raise Bad("браузер здесь недоступен", 501)
         return ok(self.browser.install_job())
+
+    # ── роутер этого хоста (MikroTik, PCS.md §20) ───────────────────────────
+
+    def _rt(self, action, params=None):
+        fn = getattr(self.api, "router", None)
+        if fn is None:
+            raise Bad("этот хост не умеет роутер — обновите PCS", 501)
+        return fn(action, params or {})
+
+    def router_get(self, query, body):
+        """Доступ (без пароля) и сводка; не подключён или не отвечает — сводки нет, есть ошибка."""
+        conf = self._rt("conf")
+        out = {"conf": conf, "status": None, "error": None}
+        if conf.get("configured"):
+            try:
+                out["status"] = self._rt("status")
+            except Fail as e:
+                out["error"] = str(e)
+        return ok(out)
+
+    def router_list(self, what, query, body):
+        return ok(self._rt(what))
+
+    def router_act(self, what, query, body):
+        p = {}
+        if what == "save":
+            if set(body) <= {"hidden"}:
+                p = {"hidden": bool(body.get("hidden"))}
+            else:
+                p = {"host": _s(body.get("host"), "адрес", 255).strip(), "user": _s(body.get("user"), "логин", 64).strip(),
+                     "password": _s(body.get("password"), "пароль", 200), "https": bool(body.get("https")),
+                     "port": body.get("port") if isinstance(body.get("port"), int) else None,
+                     "hidden": bool(body.get("hidden"))}
+        elif what in ("iface", "nat_set"):
+            p = {"id": _s(body.get("id"), "номер", 12), "disabled": bool(body.get("disabled"))}
+        elif what in ("nat_del", "lease_static"):
+            p = {"id": _s(body.get("id"), "номер", 12)}
+        elif what == "nat_add":
+            p = {k: _s(body.get(k), k, 200) for k in ("proto", "port", "to", "to_port", "comment")}
+        elif what == "reboot" and body.get("confirm") != "reboot":
+            raise Bad("перезагрузка роутера — только с подтверждением")
+        self.forget()
+        return ok(self._rt(what, p))
+
+    def router_webfig(self, query, body):
+        """WebFig роутера — в окне браузера модемов хоста (он ходит в частные сети на порт веба)."""
+        b, k = self._br("md", "host", query)
+        conf = self._rt("conf")
+        host = conf.get("host") or conf.get("default_host") or ""
+        port = conf.get("port") or (443 if conf.get("https") else 80)
+        if not br_mod.modem_addr(host, port):
+            raise Bad("WebFig в окне — для роутера в частной сети (192.168.x.x, 10.x, 172.16–31.x) на порту веба")
+        url = "%s://%s%s/" % ("https" if conf.get("https") else "http", host, "" if port in (80, 443) else ":%d" % port)
+        return ok(b.open_modem(k, {"kind": "local"}, url))
 
     # ── общее: команда части на сервере или хосте ──────────────────────────
 

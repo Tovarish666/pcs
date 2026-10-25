@@ -13,6 +13,7 @@ import threading
 import time
 
 from pcs import VERSION
+from pcs.core import mikrotik
 from pcs.core import table as ptable
 from pcs.core.util import Fail
 
@@ -27,6 +28,23 @@ _jid = itertools.count(1)
 S = {}                # id -> сервер (с модемами, таблицей, modlink)
 H = {}                # хост
 HML = {}              # modlink на самом хосте (настоящие модемы хоста)
+
+
+class _MemConf:
+    """Доступ к роутеру — в памяти (у настоящего хоста — /etc/pcs/router.json)."""
+
+    def __init__(self):
+        self.c = {}
+
+    def load(self):
+        return copy.deepcopy(self.c)
+
+    def save(self, c):
+        self.c = copy.deepcopy(c)
+
+
+RT_CONF = _MemConf()
+RT = {}               # состояние роутера (REST в памяти, mikrotik.Fake)
 
 
 def _now():
@@ -162,6 +180,10 @@ def reset():
             HML.update(_server("host", "vps-msk1", "95.165.83.236", "usb", list(range(41, 49)), bad=(44,), ml=4))
             HML["mpspace"] = None
         HML["ml_applied"] = {r["id"]: dict(r) for r in HML["modlink"]}
+        RT.clear()
+        RT.update(mikrotik.demo_state())
+        RT_CONF.c = {"host": "192.168.88.1", "user": "admin", "password": "fake", "identity": "MikroTik",
+                     "model": "C52iG-5HaxD2HaxD"} if KIND == "proxmox" else {}
 
 
 reset()
@@ -211,7 +233,27 @@ def host_info():
         h = copy.deepcopy(H)
         h.update(mode=HML.get("mode"), modems=_summary(HML), mpspace=HML.get("mpspace"),
                  proxyveth={"installed": True, "mode": HML.get("mode"), "modems": _summary(HML)})
+        from pcs.hub import router as rt
+        h["router"] = rt.brief(RT_CONF)
         return h
+
+
+def router(action, params=None):
+    """Роутер в памяти: тот же разбор (pcs.hub.router + pcs.core.mikrotik), REST — mikrotik.Fake.
+    Пароль «wrong» — «не пустил», адрес 192.168.88.99 — «не отвечает»."""
+    from pcs.hub import router as rt
+    _pause()
+
+    def make(host, user, password, https=False, port=None):
+        if password == "wrong":
+            raise Fail("роутер не пустил: неверный логин или пароль (или у пользователя нет прав на api/rest)")
+        if host == "192.168.88.99":
+            raise Fail("роутер http://192.168.88.99 недоступен: No route to host")
+        f = mikrotik.Fake(RT)
+        f.host = host
+        return f
+    with _lock:
+        return rt.call(action, params or {}, make=make, io=RT_CONF)
 
 
 def target_info(t):
