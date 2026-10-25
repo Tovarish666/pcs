@@ -209,7 +209,7 @@ def demo_state():
             {".id": "*4", "chain": "dstnat", "action": "dst-nat", "protocol": "tcp", "dst-port": "2221", "in-interface-list": "WAN",
              "to-addresses": "192.168.88.254", "to-ports": "22", "disabled": "true", "comment": "ssh хоста"}],
         "/ip/dhcp-server/lease": [
-            {".id": "*1", "address": "192.168.88.254", "mac-address": "BC:24:11:00:00:FE", "host-name": "servervolga", "status": "bound",
+            {".id": "*1", "address": "192.168.88.254", "mac-address": "BC:24:11:00:00:FE", "host-name": "mvdx", "status": "bound",
              "dynamic": "false", "server": "defconf", "comment": "хост", "last-seen": "12s"},
             {".id": "*2", "address": "192.168.88.7", "mac-address": "BC:24:11:00:07:01", "host-name": "pcs2000", "status": "bound",
              "dynamic": "true", "server": "defconf", "last-seen": "40s"},
