@@ -858,6 +858,27 @@ r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass2"}, 
 check("после неудач — пауза 429 даже с верным паролем", r.status == 429 and r.getheader("Retry-After")
       and not r.getheader("Set-Cookie"), (r.status, d))
 
+print("за своим обратным прокси (NPM, pcs.mvdx.ru):")
+LOGIN = {"Origin": ORIGIN, "X-CSRF": "login"}
+for _ in range(3):
+    req("POST", "/api/login", {"user": "admin", "password": "nope-nope"}, dict(LOGIN, **{"X-Real-IP": "203.0.113.9"}))
+r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass2"}, dict(LOGIN, **{"X-Real-IP": "203.0.113.9"}))
+check("бот за прокси (свой X-Real-IP) — пауза ему", r.status == 429, (r.status, d))
+httpd.app.throttle.passed("127.0.0.1")
+r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass2"},
+           dict(LOGIN, **{"X-Real-IP": "198.51.100.7", "X-Forwarded-Proto": "https"}))
+ck = r.getheader("Set-Cookie") or ""
+check("…а другой человек через тот же прокси входит", r.status == 200 and d["ok"], (r.status, d))
+check("за HTTPS-прокси кука — Secure; напрямую по HTTP — без", "; Secure" in ck, ck)
+r, d = req("POST", "/api/login", {"user": "admin", "password": "secret-pass2"}, LOGIN)
+check("напрямую по HTTP — кука без Secure (иначе браузер её не вернёт)", r.status == 200 and "Secure" not in (r.getheader("Set-Cookie") or ""))
+from pcs.web import server  # noqa: E402
+h = server.Handler.__new__(server.Handler)
+h.client_address, h.headers = ("8.8.8.8", 4444), {"X-Real-IP": "1.2.3.4"}
+check("не из своей сети (проброс порта) — X-Real-IP не слушаем: подделка", h.client_ip() == "8.8.8.8")
+h.client_address, h.headers = ("192.168.88.14", 4444), {"X-Real-IP": "не-адрес"}
+check("кривой X-Real-IP от прокси — адрес прокси", h.client_ip() == "192.168.88.14")
+
 httpd.shutdown()
 httpd.app.close_terms()
 httpd.server_close()
