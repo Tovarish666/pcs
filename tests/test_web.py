@@ -565,6 +565,19 @@ r, d = P("/api/jobs/%s/retry" % j["id"])
 check("повторить второй раз то же — отказ; старое знает, кем повторено", not d["ok"]
       and G("/api/jobs/" + j["id"])[1]["data"]["retried"] == j2["id"], d)
 
+print("создание ВМ со своим номером:")
+r, d = G("/api/vms/ids")
+check("номера: свободный «круглый» и занятые (ВМ и контейнеры)", d["ok"] and d["data"]["next"] % 1000 == 0
+      and d["data"]["next"] not in d["data"]["used"] and 1000 in d["data"]["used"], d)
+r, d = P("/api/servers", {"name": "taken-id", "mode": "usb", "id": 1000})
+check("занятый номер — отказ сразу, без задания", not d["ok"] and "занят" in d["error"], d)
+r, d = P("/api/servers", {"name": "low-id", "mode": "usb", "id": 42})
+check("номер меньше 100 — 400", r.status == 400 and "номер ВМ" in d["error"], d)
+r, d = P("/api/servers", {"name": "my-id", "mode": "usb", "id": 777})
+j = wait_job(d["data"]["job"]) if d["ok"] else None
+check("свой номер — ВМ создана под ним", j and j["state"] == "done" and j["result"]["id"] == 777, (d, j))
+check("…и он теперь занят", 777 in G("/api/vms/ids")[1]["data"]["used"])
+
 print("браузер вкладок mp.space и ЮMoney (фейк):")
 r, d = G("/api/browser/mp/2000")
 check("состояние: не установлен, прокси нет, кнопки-помогаторы есть", d["ok"] and d["data"]["installed"] is False

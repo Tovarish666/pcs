@@ -344,7 +344,9 @@ table.t td .sub { font-size: 11.5px; color: var(--fg3); }
 
 /* вкладки mp.space и ЮMoney: прокси сверху, кнопки-помогаторы, окно браузера */
 .br-hint { margin: -4px 0 14px; font-size: 13px; }
-.br-card { background: var(--s1); border: 1px solid var(--line); border-radius: var(--r2); padding: 12px 14px; margin: 0 0 12px; display: grid; gap: 10px; }
+/* колонка — не шире карточки: иначе картинка браузера (её ширина — экран браузера, 1320+ px) растягивает
+   сетку, и экран с кнопками вылезают за край (у элементов сетки по умолчанию min-width: auto) */
+.br-card { background: var(--s1); border: 1px solid var(--line); border-radius: var(--r2); padding: 12px 14px; margin: 0 0 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
 .br-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
 .br-row2 { justify-content: space-between; }
 .br-lbl { font-size: 12.5px; font-weight: 600; color: var(--fg2); min-width: 64px; }
@@ -676,15 +678,15 @@ body.viewer .page { height: 100vh; }
 .md-page { display: flex; flex-direction: column; height: 100vh; }
 .md-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--s1); flex-wrap: wrap; }
 .md-bar .muted { font-size: 12.5px; }
-.md-screen { flex: 1; min-height: 0; background: var(--s2); display: flex; align-items: center; justify-content: center; }
-.md-screen > div:not(.br-empty) { width: 100%; height: 100%; }
+.md-screen { flex: 1; min-height: 0; min-width: 0; background: var(--s2); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.md-screen > div:not(.br-empty) { width: 100%; height: 100%; min-width: 0; }
 .md-card { margin-top: 18px; }
 .md-card .md-ip { width: 160px; }
 .md-card .md-hint { font-size: 12.5px; }
 .md-card .md-more { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .md-card .md-more[hidden] { display: none; }
-.md-body { margin-top: 10px; }
-.md-inline { height: min(72vh, 760px); border-radius: var(--r2); overflow: hidden; }
+.md-body { margin-top: 10px; min-width: 0; }
+.md-inline { width: 100%; height: min(72vh, 760px); border-radius: var(--r2); overflow: hidden; }
 
 .term-bar button.on { background: var(--fg); color: var(--bg); border-color: transparent; }
 
@@ -804,3 +806,11 @@ table.t tr.off td:not(:first-child) { opacity: .5; }
 .srcline .facts-line { flex: 1; }
 .srcline:has(.facts-line) { margin: 0 0 18px; }
 @media (max-width: 700px) { .facts-line dd { white-space: normal; } }
+
+/* создание ВМ: номер рядом с именем, под номером — свободен ли */
+.form .row-id { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 12px; align-items: start; }
+.form .row-id input[type="number"] { font-family: var(--mono); }
+.id-note { font-size: 12px; min-height: 18px; color: var(--fg3); }
+.id-note.ok { color: var(--ok); } .id-note.bad { color: var(--bad); }
+@media (max-width: 560px) { .form .row-id { grid-template-columns: 1fr; } }
+

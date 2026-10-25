@@ -133,6 +133,7 @@ class Panel:
             ("POST", r"/api/servers/(\d+)/hostkey", self.hostkey),
             ("POST", r"/api/servers/(\d+)/reconnect", self.reconnect),
             ("GET", r"/api/vms", self.vms_other),
+            ("GET", r"/api/vms/ids", self.vm_ids),
             ("POST", r"/api/vms/(\d+)/adopt", self.adopt),
             ("GET", r"/api/colors", self.colors),
             ("POST", r"/api/run", self.run),
@@ -714,6 +715,8 @@ class Panel:
              "mode": body.get("mode", "usb"),
              "sheet": _s(body.get("sheet"), "ссылка на таблицу", 2000).strip() or None,
              "mpspace": bool(body.get("mpspace"))}
+        if body.get("id") not in (None, ""):
+            p["id"] = _int(body.get("id"), "номер ВМ", 100, 999999999)
         if p["mode"] not in ("usb", "gw"):
             raise Bad("режим: usb или gw")
         if p["sheet"] and not re.match(r"https://", p["sheet"]):
@@ -783,6 +786,12 @@ class Panel:
     def colors(self, query, body):
         fn = getattr(self.api, "colors", None)
         return ok(fn() if fn else [])
+
+    def vm_ids(self, query, body):
+        fn = getattr(self.api, "vm_ids", None)
+        if fn is None:
+            raise Bad("этот хост не умеет — обновите PCS", 501)
+        return ok(fn())
 
     def vms_other(self, query, body):
         fn = getattr(self.api, "vms_other", None)
