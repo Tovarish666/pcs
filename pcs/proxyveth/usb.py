@@ -1585,6 +1585,21 @@ def status(wan=False):
     return sorted(out, key=lambda r: r["n"])
 
 
+def wan(n):
+    """Только внешний IP одного модема — через его прокси, как ходят клиенты: без своей стороны и
+    без остальных модемов (status --wan — все, минуту-две). Итог — в запас здоровья (его покажет
+    таблица); счёт подряд идущих поломок и оповещения не трогаем — это дело полной проверки."""
+    p = one(n)
+    cls, info, ip = check_up_safe(p)
+    hp = jload(health_path(), {})
+    h = hp.setdefault(str(n), {})
+    h.update(up=cls, up_info=info, t=time.time())
+    if ip:
+        h["ip"] = ip
+    jsave(health_path(), hp, mode=0o644)
+    return {"n": n, "ext_ip": ip or None, "ok": cls == "ok", "problems": [] if cls == "ok" else info}
+
+
 STEPS = ("прокси", "логин", "модем", "SIM", "интернет")
 FAIL_AT = {"proxy-down": 0, "proxy-error": 0, "proxy-auth": 1, "modem-blocked": 2, "modem-unreachable": 2,
            "sim": 3, "no-data": 3, "captive": 4, "no-internet": 4, "ok": 5}

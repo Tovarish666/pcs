@@ -840,6 +840,15 @@ def _pv(srv, a, inp):
         m["number"], m["number_t"] = num, _now()
         return {"n": n, "number": num, "operator": op, "ussd": code, "via": "ussd",
                 "text": "Ваш номер %s" % num, "mode_was": "03", "mode_back": None if "--keep-mode" in a else "03"}
+    if cmd == "wan":
+        n = int(a[1]) if len(a) > 1 and a[1].isdigit() else None
+        m = next((m for m in srv["modems"] if m["n"] == n), None)
+        if m is None:
+            raise Fail("модема %s нет среди годных строк таблицы (proxyveth lint)" % (a[1] if len(a) > 1 else "?"))
+        if m["state"] == "ok":                  # «смена IP» за время с прошлой проверки
+            m["ext_ip"] = "94.25.%d.%d" % (100 + (n * 7 + int(time.time()) // 60) % 150, 2 + (n * 13) % 250)
+            return {"n": n, "ext_ip": m["ext_ip"], "ok": True, "problems": []}
+        return {"n": n, "ext_ip": None, "ok": False, "problems": ["прокси не отвечает за 10 с"]}
     if cmd == "diag":
         n = int(a[1]) if len(a) > 1 and a[1].isdigit() else None
         m = next((m for m in srv["modems"] if m["n"] == n), None)

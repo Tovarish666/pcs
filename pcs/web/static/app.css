@@ -818,3 +818,32 @@ table.t tr.off td:not(:first-child) { opacity: .5; }
 .wm-orbit circle { fill: var(--cos-sat); filter: drop-shadow(0 0 3px var(--cos-sat)); }
 .login-brand h1.wordmark { font-size: 19px; letter-spacing: -.01em; padding-bottom: 9px; }
 
+/* внешний IP в строке модема: рядом — проверить только его */
+table.t td.ip-cell { white-space: nowrap; }
+table.t td.ip-cell button { padding: 2px; min-width: 0; width: 24px; height: 24px; margin-left: 6px; border: 0; background: none;
+  color: var(--fg3); opacity: .55; vertical-align: middle; transition: opacity var(--t-hover) ease, color var(--t-hover) ease; }
+table.t td.ip-cell button .ic { width: 14px; height: 14px; }
+table.t tr:hover td.ip-cell button, table.t td.ip-cell button:focus-visible { opacity: 1; color: var(--accent); }
+table.t td.ip-cell button.spin { opacity: 1; color: var(--accent); }
+table.t td.ip-cell button.spin .ic { animation: spin .9s linear infinite; }
+
+/* «управление» по линеечке: состояние | поле | кнопки — одни колонки во всех строках */
+/* поле растягивается до 420 px (а не по содержимому) — тогда и кнопки во всех строках с одной линии */
+.act .ctl.cols { display: grid; grid-template-columns: 130px minmax(0, 360px) minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+/* окно поуже — подпись строки над колонками, чтобы полям хватило места; колонки те же */
+@media (max-width: 1280px) {
+  .act:has(> .ctl.cols) { grid-template-columns: minmax(0, 1fr); }
+  .act .ctl.cols { grid-template-columns: 120px minmax(0, 280px) minmax(0, 1fr); }
+}
+.act .ctl.cols .c-state { color: var(--fg2); font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.act .ctl.cols .c-field { display: grid; gap: 6px; min-width: 0; }
+.act .ctl.cols .c-field input:not([type="file"]):not([type="checkbox"]), .act .ctl.cols .c-field select,
+.act .ctl.cols .c-field textarea { width: 100%; max-width: none; min-width: 0; }
+.act .ctl.cols .c-field input[type="file"] { font-size: 12.5px; color: var(--fg2); }
+.act .ctl.cols .c-field .mono { font-size: 12.5px; overflow-wrap: anywhere; }
+.act .ctl.cols .c-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+@media (max-width: 1000px) {
+  .act .ctl.cols { grid-template-columns: minmax(0, 1fr); }
+  .act .ctl.cols .c-state:empty, .act .ctl.cols .c-field:empty { display: none; }
+}
+

@@ -53,6 +53,7 @@ HELP = """proxyveth — из прокси сетевой интерфейс (р�
   proxyveth up|down|restart N|all       поднять / остановить (sync не поднимет до up) / пересоздать;
                                         down и restart всех — с --yes
   proxyveth status [--wan]              быстрый тест; с --wan — долгий: внешний IP через каждый модем
+  proxyveth wan N                       внешний IP одного модема (только он, без полного теста) — секунды
   proxyveth problems                    только проблемные
   proxyveth diag N                      прокси → логин → модем → SIM → интернет
   proxyveth rotate N | reboot N         смена IP / перезагрузка настоящего модема
@@ -699,6 +700,18 @@ def cmd_diag(a):
     return (0 if d["verdict"] == "ok" else 1), d
 
 
+def cmd_wan(a):
+    n = parse_n(a.n)
+    cfg = load_cfg()
+    mode, mod = need_mode(cfg)
+    fn = getattr(mod, "wan", None)
+    if not callable(fn):
+        raise Fail("в режиме %s проверки внешнего IP одного модема нет" % mode)
+    d = fn(n)
+    say("  модем %d: %s" % (n, ("внешний IP %s" % d["ext_ip"]) if d["ok"] else "выхода нет — " + "; ".join(d["problems"])))
+    return (0 if d["ok"] else 1), d
+
+
 def cmd_rotate(a):
     n = parse_n(a.n)
     cfg = load_cfg()
@@ -790,7 +803,7 @@ def cmd_replug(a):
 
 COMMANDS = {"setup": cmd_setup, "on": cmd_on, "off": cmd_off, "mode": cmd_mode, "source": cmd_source, "table": cmd_table, "lint": cmd_lint,
             "sync": cmd_sync, "up": cmd_updown, "down": cmd_updown, "restart": cmd_updown, "status": cmd_status,
-            "problems": cmd_problems, "diag": cmd_diag, "rotate": cmd_rotate, "reboot": cmd_rotate, "number": cmd_number,
+            "problems": cmd_problems, "diag": cmd_diag, "wan": cmd_wan, "rotate": cmd_rotate, "reboot": cmd_rotate, "number": cmd_number,
             "doctor": cmd_doctor, "version": cmd_version, "routes": cmd_routes, "hostside": cmd_hostside,
             "replug": cmd_replug}
 
@@ -835,7 +848,7 @@ def parser():
     p = sub.add_parser("diag", add_help=False)
     p.add_argument("n")
     p.add_argument("--udp", action="store_true")
-    for c in ("rotate", "reboot", "routes"):
+    for c in ("rotate", "reboot", "routes", "wan"):
         sub.add_parser(c, add_help=False).add_argument("n")
     p = sub.add_parser("number", add_help=False)
     p.add_argument("n")

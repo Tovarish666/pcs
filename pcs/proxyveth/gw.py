@@ -845,6 +845,27 @@ def status(wan=False):
     return out
 
 
+def wan(n):
+    """Только внешний IP одного модема — тем же путём, что у клиентов (с 192.168.N.100 через его
+    туннель); нет выхода — короткая проверка прокси напрямую: беда за прокси или у нас. Итог — в
+    запас здоровья (его покажет таблица), остальные модемы не трогаем."""
+    from . import gw_probe
+    row = load_state()["desired"].get(str(n))
+    if not row:
+        raise Fail("модема %d нет в таблице (proxyveth lint)" % n)
+    ip = ext_ip(n)
+    why = "" if ip else gw_probe.quick(row)
+    up_ = ("ok", []) if ip else ("warn", [why]) if why else (
+        "broken", ["через туннель нет выхода, а прокси напрямую работает — дело в нашей стороне (маршрут к прокси, NAT)"])
+    hp = util.jload(P(HEALTH), {})
+    hp.setdefault(str(n), {}).update(t=int(time.time()), up=up_[0], up_problems=up_[1], ext_ip=ip)
+    try:
+        util.jsave(P(HEALTH), hp)
+    except OSError:
+        pass
+    return {"n": n, "ext_ip": ip or None, "ok": bool(ip), "problems": up_[1]}
+
+
 def diag(n):
     """Своя сторона → прокси → логин → модем → SIM → интернет → путь клиента через туннель."""
     from . import gw_probe

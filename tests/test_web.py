@@ -371,6 +371,8 @@ r, d = RUN({"target": 2000, "part": "proxyveth", "args": ["sync", "--force"], "c
 check("--force с номером ВМ — выполнено", d["ok"] and d["data"]["created"] == [207], d)
 r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["diag", "207"]})
 check("диагностика модема: шаги и итог", d["ok"] and len(d["data"]["steps"]) == 5 and d["data"]["verdict"])
+r, d = P("/api/run", {"target": 2000, "part": "proxyveth", "args": ["wan", "207"]})
+check("внешний IP одного модема (wan N) — сразу, не заданием", d["ok"] and d["data"]["ok"] and d["data"]["ext_ip"], d)
 
 r, d = G("/api/targets/2000/modlink")
 ml = d["data"]["list"]["data"]["rows"]
