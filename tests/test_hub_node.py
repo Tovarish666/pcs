@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -106,6 +107,20 @@ check("proxyveth с ошибкой — ошибка в сводке, остал�
 os.unlink(os.path.join(root, "home/nodejs/work/auth.mp"))
 d = node.info(root=root, run=World().run)
 check("auth.mp нет — mp.space не в порядке", d["mpspace"]["installed"] and not d["mpspace"]["ok"])
+shutil.rmtree(root)
+print("физические модемы в сводке (hivelink в ВМ):")
+root = tempfile.mkdtemp()
+os.makedirs(os.path.join(root, "etc/hivelink"))
+os.makedirs(os.path.join(root, "run/hivelink"))
+st = os.path.join(root, "run/hivelink/state.json")
+with open(st, "w") as f:
+    json.dump({"summary": {"ts": int(time.time()) - 20, "total": 40, "ok": 38}}, f)
+d = node.info(root=root, run=World().run)["hivelink"]
+check("свежая сводка таймера — 38 из 40", d == {"installed": True, "modems": 40, "ok": 38}, d)
+with open(st, "w") as f:
+    json.dump({"summary": {"ts": int(time.time()) - 3600, "total": 40, "ok": 40}}, f)
+d = node.info(root=root, run=World().run)["hivelink"]
+check("сводка часовой давности — без цифр (таймер стоит — цифры были бы враньём)", d == {"installed": True}, d)
 shutil.rmtree(root)
 root = tempfile.mkdtemp()
 d = node.info(root=root, run=World().run)

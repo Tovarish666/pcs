@@ -593,6 +593,7 @@ def hilink_worker(m, conf, st, now=None):
         log_once(st, "N=%d: %s" % (n, e), qr, key="hilink.%d" % n)
         return
     cs = s["conn"]
+    h["conn"], h["seen"] = cs, now           # для сводки (summary): в сети ли по последней проверке
     # Радиочасть ещё не поднялась (только загрузился) или зависла — ничего не пишем модему: запись в
     # загружающийся модем — лишний риск (K5160 на SpbVL-2 зависали после включения хаба).
     if ds == 0 or (cs is not None and cs != 901):
@@ -725,5 +726,18 @@ def run_pass(conf=None):
     if st["cycle"] % max(1, conf["hilink_every"]) == 0:
         guard("HiLink", step_hilink, conf, st, mods, w)
     guard("фикс приёма", step_fixcheck, conf, st)
+    st["summary"] = summary_of(mods, st)
     common.save_state(st)
     return st
+
+
+def summary_of(mods, st, now=None, fresh=180):
+    """Сводка для обзора хаба (pcs-node info → дерево и обзор хоста): сколько модемов видно и
+    сколько «в сети» (901) по последней проверке HiLink — без своего опроса модемов."""
+    now = int(time.time()) if now is None else now
+    ok = 0
+    for m in mods:
+        h = st["heal"].get(str(m.get("n"))) if m.get("n") is not None else None
+        if isinstance(h, dict) and h.get("conn") == 901 and now - (h.get("seen") or 0) < fresh:
+            ok += 1
+    return {"ts": now, "total": len(mods), "ok": ok}

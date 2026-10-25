@@ -116,7 +116,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # ── ответы ──────────────────────────────────────────────────────────────
 
-    def _send(self, code, body=b"", ctype="application/json", headers=()):
+    def _send(self, code, body=b"", ctype="application/json", headers=(), frame=False):
+        """frame — можно показать в рамке своей же страницы (страница хоста внутри хаба)."""
         if isinstance(body, str):
             body = body.encode("utf-8")
         self.send_response(code)
@@ -136,9 +137,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             self.send_header("Connection", "close")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Frame-Options", "SAMEORIGIN" if frame else "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'") if frame else CSP)
         for k, v in headers:
             self.send_header(k, v)
         self.end_headers()
@@ -342,12 +343,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Fail as e:
             if rest.startswith("/api/") or method == "POST":
                 return self._json(502, {"ok": False, "error": str(e)})
-            return self._send(502, TELE_FAIL % (name, e), "text/html; charset=utf-8")
+            return self._send(502, TELE_FAIL % (name, e), "text/html; charset=utf-8", frame=True)
         self.send_response(code)
         for k, v in headers:
-            if k.lower() == "location" and v.startswith("/"):
+            kl = k.lower()
+            if kl in ("x-frame-options", "content-security-policy"):
+                continue                        # свои — ниже: его панель показывается в рамке хаба
+            if kl == "location" and v.startswith("/"):
                 v = "/t/%s%s" % (name, v)       # его адреса — внутри телепорта
             self.send_header(k, v)
+        # и на 304 тоже: браузер хранит заголовки закэшированной страницы и обновляет их из 304 —
+        # без этого прежний запрет рамки (DENY) остался бы у него навсегда
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Content-Security-Policy", CSP.replace("frame-ancestors 'none'", "frame-ancestors 'self'"))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         if method != "HEAD":
@@ -670,9 +678,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 TELE = re.compile(r"/t/([a-z0-9-]{1,40})(/.*)?")
-TELE_FAIL = ("<!doctype html><meta charset=utf-8><title>Телепорт</title><body style='font:15px system-ui;padding:40px;"
-             "background:#0b0d11;color:#e6e8ee'><h2>Телепорт к «%s» не открылся</h2><p>%s</p>"
-             "<p><a href='/' style='color:#8ab4ff'>← на свой хост</a></p>")
+TELE_FAIL = ("<!doctype html><meta charset=utf-8><title>Хост не отвечает</title><body style='font:15px system-ui;padding:40px;"
+             "background:#0b0d11;color:#e6e8ee'><h2>Панель хоста «%s» не открылась</h2><p>%s</p>"
+             "<p style='color:#8a92a2'>Хост выключен, нет сети до него или на нём старый PCS. Другие хосты это не задевает.</p>")
 
 
 def _node_rec(name):

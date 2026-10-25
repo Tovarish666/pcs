@@ -21,6 +21,7 @@
   /* космос (украшения, не данные): звёзды, орбиты, планета на входе */
   --cos-star: hsl(244 45% 45% / .4); --cos-orbit: hsl(246 60% 50% / .2); --cos-sat: hsl(250 80% 58%);
   --cos-p0: #f3f1ff; --cos-p1: #d6d0fb; --cos-p2: #b9adf1; --cos-rim: hsl(250 90% 72% / .55);
+  --wm-tint: hsl(248 62% 52%); --wm-orbit: hsl(248 70% 55% / .55);
   --cos-stars: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='620' height='620'%3E%3Ccircle cx='202' cy='96' r='0.9' fill='%23fff' fill-opacity='0.52'/%3E%3Ccircle cx='402' cy='48' r='1' fill='%23fff' fill-opacity='0.97'/%3E%3Ccircle cx='332' cy='228' r='1' fill='%23fff' fill-opacity='0.89'/%3E%3Ccircle cx='39' cy='315' r='1.2' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='27' cy='269' r='0.9' fill='%23fff' fill-opacity='0.45'/%3E%3Ccircle cx='47' cy='60' r='0.7' fill='%23fff' fill-opacity='0.54'/%3E%3Ccircle cx='264' cy='510' r='0.8' fill='%23fff' fill-opacity='0.6'/%3E%3Ccircle cx='80' cy='141' r='1' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='388' cy='584' r='1' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='601' cy='33' r='1' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='529' cy='181' r='0.9' fill='%23fff' fill-opacity='0.88'/%3E%3Ccircle cx='92' cy='76' r='0.7' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='193' cy='503' r='0.7' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='115' cy='360' r='1.4' fill='%23fff' fill-opacity='0.83'/%3E%3Ccircle cx='395' cy='232' r='0.8' fill='%23fff' fill-opacity='0.69'/%3E%3Ccircle cx='339' cy='42' r='0.8' fill='%23fff' fill-opacity='0.66'/%3E%3Ccircle cx='40' cy='130' r='1.2' fill='%23fff' fill-opacity='0.6'/%3E%3Ccircle cx='420' cy='266' r='1.4' fill='%23fff' fill-opacity='0.97'/%3E%3Ccircle cx='196' cy='362' r='1.2' fill='%23fff' fill-opacity='0.64'/%3E%3Ccircle cx='281' cy='187' r='1' fill='%23fff' fill-opacity='0.85'/%3E%3Ccircle cx='490' cy='432' r='0.7' fill='%23fff' fill-opacity='0.83'/%3E%3Ccircle cx='153' cy='356' r='0.8' fill='%23fff' fill-opacity='1.0'/%3E%3Ccircle cx='325' cy='540' r='0.7' fill='%23fff' fill-opacity='0.49'/%3E%3Ccircle cx='450' cy='180' r='1' fill='%23fff' fill-opacity='0.88'/%3E%3Ccircle cx='604' cy='76' r='0.8' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='260' cy='467' r='1' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='97' cy='303' r='1.2' fill='%23fff' fill-opacity='0.96'/%3E%3Ccircle cx='28' cy='413' r='0.8' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='472' cy='355' r='0.8' fill='%23fff' fill-opacity='0.41'/%3E%3Ccircle cx='430' cy='368' r='1.4' fill='%23fff' fill-opacity='0.98'/%3E%3Ccircle cx='359' cy='283' r='1.2' fill='%23fff' fill-opacity='0.46'/%3E%3Ccircle cx='518' cy='582' r='1.2' fill='%23fff' fill-opacity='0.96'/%3E%3Ccircle cx='294' cy='410' r='1' fill='%23fff' fill-opacity='0.99'/%3E%3Ccircle cx='240' cy='413' r='0.8' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='40' cy='474' r='0.8' fill='%23fff' fill-opacity='0.42'/%3E%3Ccircle cx='505' cy='533' r='0.8' fill='%23fff' fill-opacity='0.58'/%3E%3Ccircle cx='174' cy='258' r='0.8' fill='%23fff' fill-opacity='0.86'/%3E%3Ccircle cx='224' cy='545' r='0.9' fill='%23fff' fill-opacity='0.56'/%3E%3Ccircle cx='147' cy='301' r='1' fill='%23fff' fill-opacity='0.9'/%3E%3Ccircle cx='365' cy='165' r='0.7' fill='%23fff' fill-opacity='0.95'/%3E%3Ccircle cx='587' cy='427' r='0.9' fill='%23fff' fill-opacity='0.94'/%3E%3Ccircle cx='319' cy='382' r='1.2' fill='%23fff' fill-opacity='0.75'/%3E%3Ccircle cx='555' cy='481' r='1' fill='%23fff' fill-opacity='0.65'/%3E%3Ccircle cx='244' cy='248' r='1' fill='%23fff' fill-opacity='0.48'/%3E%3Ccircle cx='67' cy='392' r='0.8' fill='%23fff' fill-opacity='0.71'/%3E%3Ccircle cx='132' cy='103' r='0.7' fill='%23fff' fill-opacity='0.92'/%3E%3Ccircle cx='212' cy='36' r='1.4' fill='%23fff' fill-opacity='0.51'/%3E%3Ccircle cx='4' cy='97' r='0.7' fill='%23fff' fill-opacity='0.87'/%3E%3Ccircle cx='66' cy='227' r='0.8' fill='%23fff' fill-opacity='0.5'/%3E%3Ccircle cx='20' cy='539' r='1' fill='%23fff' fill-opacity='0.77'/%3E%3Ccircle cx='380' cy='95' r='0.7' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='158' cy='217' r='0.9' fill='%23fff' fill-opacity='0.81'/%3E%3Ccircle cx='289' cy='300' r='1' fill='%23fff' fill-opacity='0.73'/%3E%3Ccircle cx='214' cy='166' r='1.4' fill='%23fff' fill-opacity='0.87'/%3E%3Ccircle cx='511' cy='103' r='1' fill='%23fff' fill-opacity='0.43'/%3E%3Ccircle cx='18' cy='586' r='0.8' fill='%23fff' fill-opacity='0.57'/%3E%3Ccircle cx='327' cy='94' r='1.4' fill='%23fff' fill-opacity='0.46'/%3E%3Ccircle cx='327' cy='603' r='1' fill='%23fff' fill-opacity='0.74'/%3E%3Ccircle cx='532' cy='430' r='1.4' fill='%23fff' fill-opacity='0.94'/%3E%3Ccircle cx='106' cy='476' r='0.7' fill='%23fff' fill-opacity='0.67'/%3E%3Ccircle cx='330' cy='481' r='1' fill='%23fff' fill-opacity='0.98'/%3E%3Ccircle cx='21' cy='175' r='1' fill='%23fff' fill-opacity='0.71'/%3E%3Cpath transform='translate%28112 418%29 scale%281%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28488 96%29 scale%280.8%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28322 262%29 scale%280.55%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3Cpath transform='translate%28560 530%29 scale%280.65%29' d='M0 -5Q.7 -.7 5 0Q.7 .7 0 5Q-.7 .7 -5 0Q-.7 -.7 0 -5Z' fill='%23fff'/%3E%3C/svg%3E");
   --cos-rings: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='760' height='760' fill='none' stroke='%23fff'%3E%3Ccircle cx='380' cy='380' r='378' stroke-width='1.2'/%3E%3Ccircle cx='380' cy='380' r='300' stroke-width='1' stroke-dasharray='2 9'/%3E%3Ccircle cx='380' cy='380' r='216' stroke-width='1' stroke-opacity='.6'/%3E%3C/svg%3E");
   --cos-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%23fff'%3E%3Ccircle cx='16' cy='16' r='6.2' fill='%23fff' stroke='none'/%3E%3Cellipse cx='16' cy='16' rx='13' ry='4.4' stroke-width='1.6' transform='rotate%28-24 16 16%29'/%3E%3Ccircle cx='26.4' cy='10.6' r='1.7' fill='%23fff' stroke='none'/%3E%3C/svg%3E");
@@ -49,6 +50,7 @@
   color-scheme: dark;
   --cos-star: hsl(232 80% 92% / .75); --cos-orbit: hsl(236 80% 78% / .18); --cos-sat: hsl(190 100% 80%);
   --cos-p0: #3b2f9a; --cos-p1: #1c1758; --cos-p2: #0b0d22; --cos-rim: hsl(196 100% 70% / .5);
+  --wm-tint: hsl(214 95% 82%); --wm-orbit: hsl(220 90% 78% / .5);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -64,6 +66,7 @@
     color-scheme: dark;
     --cos-star: hsl(232 80% 92% / .75); --cos-orbit: hsl(236 80% 78% / .18); --cos-sat: hsl(190 100% 80%);
     --cos-p0: #3b2f9a; --cos-p1: #1c1758; --cos-p2: #0b0d22; --cos-rim: hsl(196 100% 70% / .5);
+    --wm-tint: hsl(214 95% 82%); --wm-orbit: hsl(220 90% 78% / .5);
   }
 }
 
@@ -133,10 +136,10 @@ select { background-color: var(--s1); color: var(--fg); }
 .app { display: grid; grid-template-columns: var(--side-w) minmax(0, 1fr); height: 100%; }
 .side { background: var(--side); display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
 .side-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 12px; }
-.brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; letter-spacing: .02em; color: var(--fg); }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 640; font-size: 14px; letter-spacing: -.005em; color: var(--fg); min-width: 0; }
 .brand:hover { text-decoration: none; }
-.brand .mark, .login-brand .mark { width: 24px; height: 24px; border-radius: 6px; flex: none; display: block; }
-.brand-sub { font-size: 12px; color: var(--fg3); font-family: var(--mono); }
+.brand .mark, .login-brand .mark { width: 28px; height: 28px; border-radius: 7px; flex: none; display: block; }
+
 .side-search { margin: 0 12px 8px; position: relative; display: block; }
 .side-search .ic { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--fg3); width: 15px; height: 15px; pointer-events: none; }
 .side-search input { width: 100%; padding-left: 32px; background: var(--s1); border-color: var(--line); }
@@ -696,31 +699,18 @@ body.viewer .page { height: 100vh; }
 .num-big b { font-size: 22px; letter-spacing: .02em; }
 .ussd-text { white-space: pre-wrap; margin: 0; padding: 10px 12px; background: var(--s2); border-radius: var(--r1, 8px); font-size: 13px; max-height: 180px; overflow: auto; }
 
-/* ── телепорт (PCS.md §19.4): панель другого хоста через хаб ───────────────── */
-.tele-bar { position: sticky; top: 0; z-index: 50; height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 14px;
-  font-size: 13px; color: #e8ecff; border-bottom: 1px solid rgba(140, 160, 255, .25);
-  background: radial-gradient(120% 220% at 0% 50%, rgba(120, 90, 255, .35), transparent 55%),
-              radial-gradient(90% 200% at 100% 50%, rgba(0, 200, 255, .22), transparent 60%), #0a0c18; }
-.tele-bar .spacer { flex: 1; }
-.tele-bar .tele-name { font-family: "Geist Mono", ui-monospace, monospace; padding: 2px 8px; border-radius: 999px;
-  background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .14); }
-.tele-bar .tele-note { color: rgba(232, 236, 255, .62); }
-.tele-bar .btn { color: #e8ecff; border-color: rgba(255, 255, 255, .18); padding: 3px 10px; font-size: 12.5px; }
-.tele-bar .tele-hosts { display: inline-flex; gap: 6px; }
-.tele-orb { width: 14px; height: 14px; border-radius: 50%; flex: none;
-  background: radial-gradient(circle at 35% 35%, #fff, #9b8cff 35%, #3d2bd6 70%, transparent 72%);
-  box-shadow: 0 0 10px 2px rgba(150, 130, 255, .7); animation: tele-pulse 2.4s ease-in-out infinite; }
-@keyframes tele-pulse { 50% { box-shadow: 0 0 16px 5px rgba(0, 210, 255, .55); } }
-body.teleported .app { height: calc(100% - 40px); }
-@media (max-width: 720px) { .tele-bar .tele-note { display: none; } }
-@media (prefers-reduced-motion: reduce) { .tele-orb { animation: none; } }
+/* ── присоединённый хост (PCS.md §19.4): его панель в рамке справа, без своего дерева и шапки ── */
+body.node-view main#main { padding: 0; overflow: hidden; }
+body.node-view #main > .page { height: 100%; }
+.node-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--bg); }
+body.embedded .side, body.embedded header.top { display: none !important; }
+body.embedded .app { grid-template-columns: minmax(0, 1fr); }
 .t-host.t-node { position: relative; }
-.t-gear { position: absolute; right: 4px; top: 4px; width: 24px; height: 24px; display: grid; place-items: center;
-  border-radius: 6px; color: var(--fg3); opacity: 0; transition: opacity .15s; }
+.t-gear { position: absolute; right: 4px; top: 5px; width: 24px; height: 24px; min-width: 0; padding: 0; display: grid; place-items: center;
+  border: 0; background: none; border-radius: 6px; color: var(--fg3); opacity: 0; transition: opacity .15s; }
 .t-host.t-node:hover .t-gear, .t-gear:focus-visible, .t-gear.active { opacity: 1; }
 .t-gear:hover { background: var(--s2); color: var(--fg); }
 .t-gear .ic { width: 14px; height: 14px; }
-.t-row.t-tele .t-meta::after { content: " ⟶"; color: var(--accent, #8ab4ff); }
 
 /* ── космос: украшения (знак PCS «Орбита» — static/favicon.svg) ──────────────
    Ничего не значат и ни на что не нажимаются: звёзды в боковой панели, кольца орбит в углу
@@ -813,4 +803,18 @@ table.t tr.off td:not(:first-child) { opacity: .5; }
 .id-note { font-size: 12px; min-height: 18px; color: var(--fg3); }
 .id-note.ok { color: var(--ok); } .id-note.bad { color: var(--bad); }
 @media (max-width: 560px) { .form .row-id { grid-template-columns: 1fr; } }
+
+/* ячейка «модемы»: вирт. / физ. — подпись мелко */
+.vmrow .mod .mod-line { display: block; }
+.vmrow .mod .mod-k { font-size: 11.5px; color: var(--fg3); margin-right: 6px; }
+.vmrow .mod .mod-line + .meter + .mod-line, .vmrow .mod .meter + .mod-line { margin-top: 4px; }
+
+/* ── надпись «Proxy Control Service»: к концу уходит в цвет неба, под ней — орбита со спутником
+   (продолжение кольца планеты из знака) ── */
+.wordmark { position: relative; display: inline-block; padding-bottom: 7px; white-space: nowrap;
+  background: linear-gradient(90deg, var(--fg) 0 52%, var(--wm-tint)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.wm-orbit { position: absolute; left: -14px; bottom: -3px; width: calc(100% + 16px); height: 11px; overflow: visible; pointer-events: none; }
+.wm-orbit path { fill: none; stroke: var(--wm-orbit); stroke-width: 1.1; vector-effect: non-scaling-stroke; }
+.wm-orbit circle { fill: var(--cos-sat); filter: drop-shadow(0 0 3px var(--cos-sat)); }
+.login-brand h1.wordmark { font-size: 19px; letter-spacing: -.01em; padding-bottom: 9px; }
 

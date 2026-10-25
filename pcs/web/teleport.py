@@ -22,7 +22,8 @@ from pcs.web import tls
 FWD = ("content-type", "x-csrf", "accept", "accept-language", "user-agent", "if-none-match",
        "if-modified-since", "cache-control", "pragma")
 # что из ответа того хоста не отдаём: его куки, служебное соединения (длину посчитаем сами)
-DROP = ("set-cookie", "connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding")
+DROP = ("set-cookie", "connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding",
+        "date", "server")
 
 
 def hostport(rec):

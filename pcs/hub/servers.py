@@ -45,7 +45,7 @@ def overview(s, timeout=20, wan=False, pve_row=None):
         vm = "running"
     d = {"id": s["id"], "name": s.get("name", ""), "ip": s.get("ip", ""), "port": s.get("port") or 22,
          "state": vm if vm in ("stopped", "paused", "absent") else "running", "mode": s.get("mode"),
-         "modems": dict(EMPTY), "mpspace": None, "version": None, "error": None, "color": s.get("color")}
+         "modems": dict(EMPTY), "hl": None, "mpspace": None, "version": None, "error": None, "color": s.get("color")}
     if d["state"] != "running":
         return d
     try:
@@ -57,6 +57,9 @@ def overview(s, timeout=20, wan=False, pve_row=None):
     pv = info.get("proxyveth") or {}
     d.update(mode=pv.get("mode"), modems=pv.get("modems") or dict(EMPTY), mpspace=info.get("mpspace"),
              version=info.get("version"), info=info, pv_on=pv.get("on", True))
+    hl = info.get("hivelink") or {}
+    if hl.get("installed") and hl.get("modems") is not None:       # физические модемы в ВМ (проброс USB)
+        d["hl"] = {"ok": int(hl.get("ok") or 0), "total": int(hl["modems"])}
     if pv.get("error"):
         d["error"] = "proxyveth: %s" % pv["error"]
     if d["mode"] and d["mode"] != s.get("mode"):

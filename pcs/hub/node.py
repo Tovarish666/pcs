@@ -178,6 +178,17 @@ def modlink_info(root="/", run=sh):
     return d
 
 
+def hivelink_info(root="/", fresh=600):
+    """Физические модемы: стоит ли hivelink и его сводка за последний проход (/run/hivelink/state.json,
+    раз в 15 с). Сводка старше fresh — не показываем: таймер стоит, цифры были бы враньём."""
+    d = {"installed": os.path.isdir(at(root, "etc/hivelink"))}
+    sm = jload(at(root, "run/hivelink/state.json"), {})
+    sm = sm.get("summary") if isinstance(sm, dict) else None
+    if d["installed"] and isinstance(sm, dict) and time.time() - (sm.get("ts") or 0) < fresh:
+        d.update(modems=int(sm.get("total") or 0), ok=int(sm.get("ok") or 0))
+    return d
+
+
 def info(wan=False, root="/", run=sh):
     up = rd(at(root, "proc/uptime")).split()
     d = {"version": VERSION, "hostname": socket.gethostname(), "ip": primary_ip(run),
@@ -186,7 +197,7 @@ def info(wan=False, root="/", run=sh):
          "ram": mem(root), "disk": disk(root),
          "proxyveth": proxyveth_info(root, run), "mpspace": mpspace_info(root, run),
          "modlink": modlink_info(root, run),
-         "hivelink": {"installed": os.path.isdir(at(root, "etc/hivelink"))},
+         "hivelink": hivelink_info(root),
          "dns": dnsfix.current(root), "dns_use": dnsfix.active(root)}
     if wan:
         d["wan"] = wan_ip(run)

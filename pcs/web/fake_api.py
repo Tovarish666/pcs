@@ -216,9 +216,11 @@ def _summary(srv):
 
 
 def _public(srv):
+    hl = srv.get("hl_modems") if srv.get("hivelink") else None
     return {"id": srv["id"], "name": srv["name"], "ip": srv["ip"], "state": srv["state"], "mode": srv["mode"],
             "color": srv.get("color"),
-            "modems": _summary(srv), "mpspace": srv["mpspace"]}
+            "modems": _summary(srv), "mpspace": srv["mpspace"],
+            "hl": {"ok": sum(1 for m in hl if m["conn"] == 901), "total": len(hl)} if hl else None}
 
 
 def _row(m):

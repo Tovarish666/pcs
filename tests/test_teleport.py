@@ -91,6 +91,15 @@ check("/t/<имя> без слэша — на /t/<имя>/", r.status == 302 and
 r, b = req("GET", "/t/vps1/", cookie=hub_cookie)
 check("страница — панель того хоста (статика относительная)", r.status == 200 and b'src="static/app.js"' in b, (r.status, b[:200]))
 check("куки того хоста в браузер не уходят", not r.getheader("Set-Cookie"))
+check("его страница — в рамке только своей страницы хаба (SAMEORIGIN, frame-ancestors 'self')",
+      r.getheader("X-Frame-Options") == "SAMEORIGIN" and "frame-ancestors 'self'" in r.getheader("Content-Security-Policy", "")
+      and "frame-ancestors 'none'" not in r.getheader("Content-Security-Policy", ""), (r.getheader("X-Frame-Options"), r.getheader("Content-Security-Policy")))
+check("заголовки не задвоены (Date, Server — одни)", len(r.headers.get_all("Date") or []) == 1 and len(r.headers.get_all("Server") or []) == 1)
+r0, _ = req("GET", "/", cookie=hub_cookie)
+check("свои страницы хаба — в рамке нигде (DENY)", r0.getheader("X-Frame-Options") == "DENY")
+r4, b4 = req("GET", "/t/vps1/", cookie=hub_cookie, headers={"If-None-Match": r.getheader("ETag")})
+check("и на 304 — SAMEORIGIN (браузер обновляет из 304 заголовки закэшированной страницы)",
+      r4.status == 304 and r4.getheader("X-Frame-Options") == "SAMEORIGIN", (r4.status, r4.getheader("X-Frame-Options")))
 r, b = req("GET", "/t/vps1/static/app.js", cookie=hub_cookie)
 check("его статика — через хаб", r.status == 200 and b"TELE" in b and r.getheader("Content-Type", "").startswith(("application/javascript", "text/javascript")),
       (r.status, r.getheader("Content-Type")))

@@ -3,11 +3,14 @@
 "use strict";
 (function () {
 
-  // Телепорт (PCS.md §19.4): панель присоединённого хоста открыта через хаб — /t/<имя>/…. Тогда все
-  // свои адреса — с этим префиксом: запросы, терминал и окна браузера идут тому хосту, выполняет он.
+  // Присоединённый хост (PCS.md §19.4): его страницы хаб показывает у себя справа — в рамке с его же
+  // панелью по адресу /t/<имя>/…. Тогда все адреса — с этим префиксом: запросы, терминал и окна
+  // браузера идут тому хосту, выполняет он. EMBED — эта панель и есть такая рамка внутри хаба.
   const ROOT = (location.pathname.match(/^\/t\/[a-z0-9-]{1,40}\//) || ["/"])[0];
   const TELE = ROOT === "/" ? null : decodeURIComponent(ROOT.split("/")[2]);
   const R = (p) => (typeof p === "string" && p.startsWith("/")) ? ROOT + p.slice(1) : p;
+  let EMBED = false;
+  try { EMBED = !!TELE && window.parent !== window && window.parent.location.origin === location.origin; } catch (e) { EMBED = false; }
 
   // ── DOM ───────────────────────────────────────────────────────────────────
   // replaceChildren/append/prepend превращают null в текст «null» (так в шапке и было: «ВМ 1/1 null»).
@@ -168,7 +171,7 @@
         return {ok: false, net: true, error: method === "GET" ? "панель не отвечает — сеть или pcs-web остановлена"
           : "связь с панелью прервалась — действие могло выполниться: «Обновить» или «Фоновые задания» на странице хоста"};
       }
-      if (r.status === 401) { location.href = R("/login"); return {ok: false, error: "нужен вход"}; }
+      if (r.status === 401) { if (EMBED) window.top.location.href = "/login"; else location.href = R("/login"); return {ok: false, error: "нужен вход"}; }
       try { text = await r.text(); } catch (e) {
         if (i + 1 < tries) { await sleep(1000 * (i + 1)); continue; }
         return {ok: false, net: true, error: "связь оборвалась посреди ответа (HTTP " + r.status + ")" +
@@ -231,6 +234,14 @@
     if (v === "stopped" || v === "inactive" || v === "failed") return "mp.space не работает";
     if (!v || v === "absent" || v === "none") return "без mp.space";
     return "mp.space: " + v;
+  }
+  // Физические модемы (hivelink): у ВМ — s.hl {ok, total} из сводки hivelink; у хоста — его hivelink status
+  function hlCounts(x) {
+    if (!x) return {ok: 0, total: 0};
+    if (x.hl) return {ok: +x.hl.ok || 0, total: +x.hl.total || 0};
+    const h = x.hivelink || {};
+    if (Array.isArray(h.modems)) return {ok: h.modems.filter((m) => m.conn === 901 && !(m.errors || []).length).length, total: h.modems.length};
+    return {ok: +h.ok || 0, total: +h.modems || 0};
   }
   function counts(s) {
     const m = (s && s.modems) || {};
@@ -613,7 +624,7 @@
   const TAB_NAMES = {"": "обзор", net: "сетевые интерфейсы", modlink: "modlink", term: "терминал", settings: "управление",
     mp: "mp.space", ym: "ЮMoney"};
   function renderHeader() {
-    $("#h-port").textContent = S.session ? ":" + S.session.port : "";
+    $("#brand").title = "Proxy Control Service — обзор хоста" + (S.session ? " · " + location.hostname + ", порт " + S.session.port : "");
     $("#h-user").textContent = S.session ? S.session.user : "";
     $("#h-fake").hidden = !(S.session && S.session.fake);
     const cur = S.route || {};
@@ -639,9 +650,9 @@
     // сводка: ВМ и модемы на своём хосте
     const ov = S.ov || {}, list = ov.servers || [];
     let ok = 0, total = 0, up = 0;
-    for (const sv of list) { const c = counts(sv); ok += c.ok; total += c.total; if (!BAD_VM.includes(String(sv.state || "").toLowerCase())) up++; }
-    const hc = counts(ov.host || {});
-    ok += hc.ok; total += hc.total;
+    for (const sv of list) { const c = counts(sv), p = hlCounts(sv); ok += c.ok + p.ok; total += c.total + p.total; if (!BAD_VM.includes(String(sv.state || "").toLowerCase())) up++; }
+    const hc = counts(ov.host || {}), hp = hlCounts(ov.host);
+    ok += hc.ok + hp.ok; total += hc.total + hp.total;
     const lv = S.ov ? hostLevel() : "";
     $("#h-sum").replaceChildren(
       S.ov ? el("span", {}, el("span", {class: "dot " + lv}), lv === "ok" ? "всё в порядке" : lv === "warn" ? "есть замечания" : "есть проблемы") : el("span", {class: "muted", text: "загрузка…"}),
@@ -680,13 +691,12 @@
       const vms = (X.ov().servers || []).filter((sv) => !q || (String(sv.id) + " " + (sv.name || "") + " " + (sv.ip || "")).toLowerCase().includes(q));
       if (q && !vms.length) return;
       const closed = !q && TREE.closed[key];
-      // Присоединённый хост — телепортом (/t/<имя>/): его панель, его команды; хаб — только окно.
-      const tp = X.node ? "/t/" + encodeURIComponent(X.node) + "/#" : null;
-      const go = (p) => tp ? tp + p : X.href(p);
+      // Присоединённый хост — здесь же (#/n/<имя>/…): справа его страница, команды выполняет он.
+      const go = (p) => X.href(p);
       const twist = el("button", {type: "button", class: "t-twist", "aria-label": closed ? "развернуть" : "свернуть", "aria-expanded": String(!closed),
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); treeToggle(key); renderTree(); }}, ic("chev"));
-      const head = el("a", {class: "t-row" + (here && cur.kind === "host" ? " active" : "") + (off ? " off" : "") + (tp ? " t-tele" : ""), href: go("/"),
-        title: off ? (n.error || "нет связи") : tp ? "телепорт: панель хоста " + X.node + " — команды выполняет он" : ""},
+      const head = el("a", {class: "t-row" + (here && cur.kind === "host" ? " active" : "") + (off ? " off" : ""), href: go("/"),
+        title: off ? (n.error || "нет связи") : X.node ? "хост " + X.node + ": команды выполняет он сам" : ""},
         twist, el("span", {class: "dot " + (loading && !X.node ? "" : off ? "bad" : hostLevel(X))}),
         el("span", {class: "t-name", text: X.node ? X.node : (h.name || (loading ? "хост" : "хост"))}),
         el("span", {class: "t-meta", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"}));
@@ -705,12 +715,13 @@
           el("span", {class: "chip"}), el("span", {class: "dot " + level(sv)}),
           el("span", {class: "t-name"}, el("b", {text: String(sv.id)}), sv.name || ""),
           el("span", {class: "t-meta"}, sv.state === "absent" ? "нет в Proxmox" : sv.state === "stopped" ? "выкл"
-            : [c.total ? meterOf(c) : null, el("span", {text: c.total ? c.ok + "/" + c.total : modeShort(sv.mode)})])));
+            : (() => { const p = hlCounts(sv), x = c.total ? c : p.total ? {ok: p.ok, total: p.total} : null;
+              return [x ? meterOf(x) : null, el("span", {text: x ? x.ok + "/" + x.total : modeShort(sv.mode), title: !c.total && p.total ? "физические модемы (hivelink)" : null})]; })())));
       }
       if (loading && !X.node && !vms.length) for (let i = 0; i < 3; i++) inner.append(el("div", {class: "t-row t-vm"}, el("span"), el("span"), el("span", {class: "skel", style: "width:" + (70 - i * 12) + "%"}), el("span")));
       if (X.isPve() && !off && !q) inner.append(el("a", {class: "t-add" + (here && cur.kind === "create" ? " active" : ""), href: go("/create")}, ic("plus"), "Создать ВМ" + (X.node ? " на " + X.node : "")));
-      const gear = X.node ? el("a", {class: "t-gear" + (here && cur.kind === "host" ? " active" : ""), href: X.href("/"),
-        title: "присоединение: цвет, обновить PCS на нём, отсоединить", "aria-label": "присоединение " + X.node}, ic("edit")) : null;
+      const gear = X.node ? el("button", {type: "button", class: "t-gear", title: "присоединение: цвет, обновить PCS на нём, отсоединить",
+        "aria-label": "присоединение " + X.node, onclick: (e) => { e.preventDefault(); e.stopPropagation(); nodeDlg(X); }}, ic("edit")) : null;
       kids.push(el("div", {class: "t-host" + (closed ? " closed" : "") + (X.node ? " t-node" : "")}, head, gear, el("div", {class: "t-kids"}, inner)));
     }
     hostBlock(ctx(null));
@@ -921,21 +932,29 @@
         return;
       }
       vmHead.hidden = false; list.hidden = false;
-      let ok = 0, total = 0, probs = 0, up = 0, broken = 0;
+      // модемы — по виду, а не по месту: виртуальные (proxyveth) и физические (hivelink), в ВМ и на самом хосте
+      let ok = hc.ok, total = hc.total, probs = hc.warn + hc.broken, up = 0, broken = hc.broken;
+      const hh = hlCounts(host);
+      let hlOk = hh.ok, hlTotal = hh.total, hlAny = (host.hivelink || {}).installed !== false;
       for (const s of list_) {
-        const c = counts(s);
+        const c = counts(s), p = hlCounts(s);
         ok += c.ok; total += c.total; probs += c.warn + c.broken; broken += c.broken;
+        hlOk += p.ok; hlTotal += p.total; if (s.hl) hlAny = true;
+        probs += p.total - p.ok;
         if (!BAD_VM.includes(String(s.state || "").toLowerCase())) up += 1; else probs += 1;
       }
-      const h = host.hivelink || {};
-      const real = Array.isArray(h.modems) ? h.modems.length : (+h.modems || 0);
+      probs += hh.total - hh.ok;
       const ram = host.ram || {};
+      const where = (vm, h) => vm && h ? "в ВМ и на хосте" : h ? "на самом хосте" : "в ВМ";
+      const vKpi = kpi("Виртуальные модемы", ok, total, ok < total ? "warn" : "", {ok, total, broken});
+      vKpi.title = "proxyveth: " + where(list_.some((s) => counts(s).total), hc.total);
+      const pKpi = hlAny ? kpi("Физические модемы", hlOk, hlTotal, hlOk < hlTotal ? "warn" : "", hlTotal ? {ok: hlOk, total: hlTotal} : null)
+        : el("div", {class: "kpi"}, el("div", {class: "k", text: "Физические модемы"}), el("div", {class: "v", style: "font-size:18px", text: "hivelink не стоит"}));
+      pKpi.title = "hivelink, USB-модемы Huawei: " + where(list_.some((s) => s.hl && s.hl.total), hh.total);
       kpis.replaceChildren(
         kpi("ВМ работают", up, list_.length, up < list_.length ? "bad" : ""),
-        kpi("Модемы в ВМ", ok, total, ok < total ? "warn" : "", {ok, total, broken}),
+        vKpi, pKpi,
         kpi("Требуют внимания", probs, null, probs ? "warn" : ""),
-        h.installed === false ? el("div", {class: "kpi"}, el("div", {class: "k", text: "Физические модемы"}), el("div", {class: "v", style: "font-size:18px", text: "hivelink не стоит"}))
-          : kpi("Настоящие модемы", real),
         el("div", {class: "kpi"}, el("div", {class: "k", text: "ОЗУ хоста"}), el("div", {class: "v", style: "font-size:18px;margin-top:8px", text: gb(host.ram)}),
           ram.total_gb ? el("span", {class: "meter lg" + ((ram.used_gb / ram.total_gb) > .85 ? " warn" : ""), style: "--v:" + Math.min(1, (ram.used_gb || 0) / ram.total_gb).toFixed(3)}) : null));
       vmHead.children[1].textContent = String(list_.length);
@@ -952,7 +971,7 @@
           el("div", {class: "who"}, el("a", {href: X.href("/vm/" + s.id)}, el("span", {class: "id", text: String(s.id)}), s.name || ""),
             el("div", {class: "sub", text: (s.ip || "—") + (st !== "running" ? "  ·  " + (VM_STATE[st] || st) : "")})),
           el("span", {class: "cell", text: modeShort(s.mode)}),
-          el("div", {class: "cell mod"}, el("span", {}, el("b", {text: c.ok + " / " + c.total}), c.warn + c.broken ? el("span", {class: "problems", text: "  ·  " + (c.warn + c.broken) + " с бедой"}) : null), meterOf(c)),
+          modCell(c, hlCounts(s)),
           el("span", {class: "cell", text: mpText(s.mpspace).replace("mp.space ", "")}),
           vmButtons(X, s)));
       }
@@ -962,6 +981,14 @@
     return {el: root, update};
   }
 
+  // Ячейка «модемы» в строке ВМ: виртуальные; физические — второй строкой, если они есть
+  function modCell(c, p) {
+    const line = (k, x, bad) => el("span", {class: "mod-line"}, k ? el("span", {class: "mod-k", text: k}) : null, el("b", {text: x.ok + " / " + x.total}),
+      bad ? el("span", {class: "problems", text: "  ·  " + bad + " с бедой"}) : null);
+    if (!c.total && p.total) return el("div", {class: "cell mod"}, line("физ.", p, p.total - p.ok), meterOf({ok: p.ok, total: p.total}));
+    return el("div", {class: "cell mod"}, line(p.total ? "вирт." : null, c, c.warn + c.broken), meterOf(c),
+      p.total ? line("физ.", p, p.total - p.ok) : null);
+  }
   // Действия с ВМ в строке хоста: «Открыть», «Терминал» и меню ⋯ (питание, убрать из PCS, удалить)
   function vmButtons(X, s) {
     const st = String(s.state || "").toLowerCase();
@@ -2684,28 +2711,28 @@
 
   // ── вкладка «настройка и управление» ─────────────────────────────────────
   function setTab(X, id) {
-    const T = "/api/targets/" + id;
+    const T = "/targets/" + id;              // через X: у присоединённого хоста — к нему, не к хабу
     const H = String(id) === "host";
     const facts = el("div", {class: "facts"}, el("span", {class: "skel", style: "width:320px"}));
     const fact = (list) => facts.replaceChildren(...list.filter(Boolean).map((t) => el("span", {text: t})));
     const dns = el("input", {placeholder: "1.1.1.1 8.8.8.8 (необязательно)"});
     const rDns = actRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space; теряющий запросы сервер — заменить рабочим", dns,
-      btn("Починить", (e) => act(e.target, rDns.res, () => POST(T + "/dns", {dns: dns.value}), dnsDone)));
+      btn("Починить", (e) => act(e.target, rDns.res, () => X.POST(T + "/dns", {dns: dns.value}), dnsDone)));
     const pw = el("input", {type: "password", autocomplete: "new-password", placeholder: "новый пароль root"});
     const rPw = actRow("Пароль root", H ? "пароль root этого хоста (вход по SSH)" : "пароль root этой ВМ (вход по SSH и в консоль Proxmox)", pw,
       btn("Сохранить", async (e) => {
-        const r = await act(e.target, rPw.res, () => POST(T + "/passwd", {password: pw.value}), "Сохранено");
+        const r = await act(e.target, rPw.res, () => X.POST(T + "/passwd", {password: pw.value}), "Сохранено");
         if (r && r.ok) pw.value = "";
       }));
     const key = el("input", {placeholder: "ssh-ed25519 AAAA… имя"});
     const rKey = actRow("Ключ SSH", H ? "добавить свой открытый ключ root" : "добавить свой открытый ключ root или сменить ключ, которым ходит хаб", key,
       btn("Добавить", async (e) => {
-        const r = await act(e.target, rKey.res, () => POST(T + "/key", {pubkey: key.value}), "Сохранено");
+        const r = await act(e.target, rKey.res, () => X.POST(T + "/key", {pubkey: key.value}), "Сохранено");
         if (r && r.ok) key.value = "";
       }),
       H ? null : btn("Сменить ключ хаба", (e) => {
         if (!window.confirm("Сменить ключ, которым хаб ходит на ВМ " + id + "?")) return;
-        act(e.target, rKey.res, () => POST(T + "/key", {rotate: true}), (d) => "Применено" + (d && d.fingerprint ? ": " + d.fingerprint : ""));
+        act(e.target, rKey.res, () => X.POST(T + "/key", {rotate: true}), (d) => "Применено" + (d && d.fingerprint ? ": " + d.fingerprint : ""));
       }));
     // Ключ, по которому хаб узнаёт ВМ. Меняется, когда cloud-init считает ВМ новой машиной: тогда
     // «Host key verification failed». Новый сверяется через guest agent Proxmox (мимо сети).
@@ -2733,11 +2760,11 @@
     const file = el("input", {type: "file", onchange: async (e) => { const f = e.target.files[0]; if (f) auth.value = (await f.text()).trim(); }});
     const rMp = actRow("mobileproxy.space", H ? "софт агрегатора прямо на этом хосте (только Ubuntu): установка и ключ auth.mp; в конце хост перезагрузится"
       : "софт агрегатора на этой ВМ: установка и ключ auth.mp", mpState,
-      btn("Установить", (e) => act(e.target, rMp.res, () => POST(T + "/mpspace", {action: "install"}), "Применено", rMp.jobs)),
-      btn("Проверить", (e) => act(e.target, rMp.res, () => POST(T + "/mpspace", {action: "check"}), (d) => summary(d && d.result !== undefined ? d.result : d))),
+      btn("Установить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "install"}), "Применено", rMp.jobs)),
+      btn("Проверить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "check"}), (d) => summary(d && d.result !== undefined ? d.result : d))),
       auth, file,
       btn("Сохранить auth.mp", async (e) => {
-        const r = await act(e.target, rMp.res, () => POST(T + "/mpspace", {action: "auth", auth: auth.value}), "Сохранено", rMp.jobs);
+        const r = await act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "auth", auth: auth.value}), "Сохранено", rMp.jobs);
         if (r && r.ok) auth.value = "";
       }));
     const hlState = el("span", {class: "muted", text: "—"});
@@ -2762,7 +2789,7 @@
       }, "danger"));
     const rUp = actRow(H ? "Обновить PCS" : "Обновить агентов", H ? "код PCS с GitHub — на хост" + (X.isPve() ? " и все его ВМ" : "")
       : "код PCS и части на этой ВМ — той же версии, что на хосте", el("span", {class: "muted", text: ""}),
-      btn("Обновить", (e) => act(e.target, rUp.res, () => POST(T + "/update", {}), "Применено", rUp.jobs)));
+      btn("Обновить", (e) => act(e.target, rUp.res, () => X.POST(T + "/update", {}), "Применено", rUp.jobs)));
 
     async function loadHl() {
       const r = await X.run(id, "hivelink", ["status"]);
@@ -3349,7 +3376,7 @@
       const v = await confirmNumber("Отсоединить хост " + name, "Хаб забудет хост " + name + ", а тот отзовёт наш токен. Модемы, ВМ и софт на нём не тронутся.", name, "Отсоединить");
       if (v == null) return;
       const r = await act(null, res, () => POST("/api/nodes/" + encodeURIComponent(name) + "/remove", {confirm: v}), "Отсоединён");
-      if (r && r.ok) { await refreshNodes(); location.hash = "#/"; }
+      if (r && r.ok) { if (self.onGone) self.onGone(); await refreshNodes(); location.hash = "#/"; }
     }, "danger");
     const colors = colorPick(n0.color, async (c) => {
       const r = await POST("/api/nodes/" + encodeURIComponent(name) + "/color", {color: c});
@@ -3358,10 +3385,18 @@
     });
     const el_ = el("div", {class: "node-bar"}, el("span", {class: "muted", text: "присоединённый хост · цвет "}), colors,
       el("span", {class: "spacer"}), bOpen, bUp, bDel, res, jobs);
-    return {el: el("div", {}, el_, fp), update() {
+    const self = {el: el("div", {}, el_, fp), onGone: null, update() {
       const n = (S.nodes || []).find((x) => x.name === name) || {};
       fp.textContent = n.host ? n.host + ":" + n.port + " · сертификат " + (n.fingerprint || "—") : "";
     }};
+    return self;
+  }
+
+  function nodeDlg(X) {
+    const t = nodeTools(X);
+    t.update();
+    const close = modal("Присоединение · " + X.node, t.el, [{text: "Закрыть", cls: "primary"}]);
+    t.onGone = close;
   }
 
   async function refreshNodes() {
@@ -3384,10 +3419,38 @@
     if (p[0] === "host") return {node, kind: "host", tab: tabOf(p[1] || "")};
     return {node, kind: "host", tab: ""};
   }
+  // Присоединённый хост справа: его собственная панель в рамке (/t/<имя>/#…) — без своего дерева и
+  // шапки. Она рисует страницы и выполняет команды сама; хаб — дерево, шапка, адрес в строке браузера.
+  function pageNode(node, inner) {
+    const base = "/t/" + encodeURIComponent(node) + "/";
+    const frame = el("iframe", {class: "node-frame", src: base + inner, title: "хост " + node});
+    const pg = {kind: "node", node, cur: inner, el: frame,
+      go(h) {
+        if (h === pg.cur) return;
+        pg.cur = h;
+        try { frame.contentWindow.location.hash = h; } catch (e) { frame.src = base + h; }
+      },
+      dispose() { document.body.classList.remove("node-view"); }};
+    document.body.classList.add("node-view");
+    return pg;
+  }
   function route() {
     const r = parse();
     S.route = r;
+    // в рамке хаба: сказать хабу, где мы — его адрес и шапка идут за нами
+    if (EMBED) window.parent.postMessage({pcs: "route", node: TELE, hash: location.hash || "#/"}, location.origin);
     document.body.classList.remove("side-open");
+    const nm = !TELE && location.hash.match(/^#\/n\/([^/]+)(\/.*)?$/);
+    if (nm) {
+      const node = decodeURIComponent(nm[1]), inner = "#" + (nm[2] || "/");
+      if (S.page && S.page.kind === "node" && S.page.node === node) { S.page.go(inner); renderTree(); renderHeader(); return; }
+      if (S.page && S.page.dispose) S.page.dispose();
+      document.body.classList.remove("viewer");
+      S.page = pageNode(node, inner);
+      $("#main").replaceChildren(el("div", {class: "page"}, S.page.el));
+      renderTree(); renderHeader();
+      return;
+    }
     const same = S.page && (S.page.node || null) === (r.node || null) && S.page.kind === r.kind &&
       (r.kind === "host" || r.kind === "router" || (r.kind === "vm" && S.page.id === r.id));
     if (same) { S.page.show(r.tab); renderTree(); renderHeader(); return; }
@@ -3407,7 +3470,7 @@
 
   // Обзор хаба. Последний удачный — в localStorage: при входе дерево и шапки рисуются сразу,
   // а свежие данные приходят следом (раньше экран ждал опрос всех ВМ — до 20 с).
-  const OV_KEY = "pcs-ov";
+  const OV_KEY = "pcs-ov" + (TELE ? "@" + TELE : "");      // у рамки хоста — свой: хаб и хост в одном браузере
   function ovCache(v) {
     try {
       if (v === undefined) { const x = JSON.parse(localStorage.getItem(OV_KEY) || "null"); return x && x.host ? x : null; }
@@ -3476,28 +3539,28 @@
     };
     set(t);
     b.addEventListener("click", () => set(order[(order.indexOf(t) + 1) % order.length]));
-  }
-
-  // Полоса телепорта: где я и куда дальше — домой (хаб) и в другие присоединённые хосты (список — у хаба).
-  async function teleBar() {
-    const hosts = el("span", {class: "tele-hosts"});
-    const bar = el("div", {class: "tele-bar", role: "note"},
-      el("span", {class: "tele-orb", "aria-hidden": "true"}),
-      el("b", {text: "Телепорт"}), el("span", {class: "tele-name", text: TELE}),
-      el("span", {class: "tele-note", text: "здесь всё выполняет этот хост · хаб — только окно"}),
-      el("span", {class: "spacer"}), hosts,
-      el("a", {class: "btn ghost tele-home", href: "/"}, "← домой"));
-    document.body.prepend(bar);
-    document.body.classList.add("teleported");
-    try {
-      const r = await fetch("/api/nodes", {credentials: "same-origin"});       // хаб, а не этот хост
-      const d = await r.json();
-      hosts.replaceChildren(...((d && d.data) || []).filter((x) => x.name !== TELE).map((x) =>
-        el("a", {class: "btn ghost", href: "/t/" + encodeURIComponent(x.name) + "/", title: "телепорт: " + x.name}, "⟶ " + x.name)));
-    } catch (e) { /* список хостов — не обязателен */ }
+    // сменили тему в хабе — рамка хоста (и наоборот) подхватывает без перезагрузки
+    window.addEventListener("storage", (e) => { if (e.key === "pcs-theme" && e.newValue && e.newValue !== t) set(e.newValue); });
   }
 
   async function boot() {
+    // панель хоста открыта не в рамке (по ссылке) — в общую панель хаба, на то же место;
+    // окна веба модемов (#/md/…) остаются отдельными окнами
+    if (TELE && !EMBED && !/^#\/md\//.test(location.hash)) {
+      location.replace("/#/n/" + encodeURIComponent(TELE) + (location.hash.replace(/^#/, "") || "/"));
+      return;
+    }
+    if (EMBED) document.body.classList.add("embedded");
+    if (!TELE) window.addEventListener("message", (e) => {
+      const d = e.data;
+      if (e.origin !== location.origin || !d || d.pcs !== "route" || !S.page || S.page.kind !== "node" || S.page.node !== d.node) return;
+      S.page.cur = d.hash;
+      const want = "#/n/" + encodeURIComponent(d.node) + "/" + String(d.hash).replace(/^#\/?/, "");
+      if (location.hash !== want) history.replaceState(null, "", want);
+      S.route = parse();
+      renderTree(); renderHeader();
+      document.title = d.node + " — PCS";
+    });
     themeBtn();
     treeSearch();
     const cached = ovCache();
@@ -3506,14 +3569,11 @@
     const r = await GET("/api/session");
     if (!r.ok) return;
     S.session = r.data;
-    $("#logout").addEventListener("click", async () => {
-      if (TELE) { location.href = "/"; return; }           // из телепорта — домой, свой вход не трогаем
-      await POST("/api/logout", {}); location.href = "/login";
-    });
-    if (TELE) teleBar();
+    $("#logout").addEventListener("click", async () => { await POST("/api/logout", {}); location.href = "/login"; });
     window.addEventListener("hashchange", route);
     route();                                 // страница — сразу, данные дотянутся
     if (S.route.kind === "md") return;       // окно веба модемов: обзор и дерево ему не нужны
+    if (EMBED) { refresh(); poller(10000, refresh).start(); return; }     // в рамке: дерево и хосты — у хаба
     refresh();
     poller(10000, refresh).start();
     refreshNodes();
