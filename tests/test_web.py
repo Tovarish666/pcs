@@ -348,7 +348,8 @@ r, d = G("/api/targets/200/proxyveth")
 rows = d["data"]["status"]["data"]
 check("proxyveth: строки Row и источник таблицы", len(rows) == 90 and {"n", "real", "proxy", "state", "problems",
                                                                          "ext_ip", "since"} <= set(rows[0])
-      and d["data"]["source"]["data"]["source"] == "google")
+      and d["data"]["source"]["data"]["source"].startswith("https://docs.google.com/")
+      and d["data"]["source"]["data"]["copy_time"])        # как proxyveth source --json: ссылка и время копии
 check("proxyveth: одна проблемная", [x["n"] for x in rows if x["state"] != "ok"] == [57])
 r, d = G("/api/targets/2000/proxyveth?only=status")
 check("опрос статуса — без источника", "source" not in d["data"] and d["data"]["status"]["ok"])
