@@ -611,6 +611,19 @@
   }
 
   // строка «название + пояснение + управление + результат»
+  // Строка «управления» по линеечке: подпись | состояние | поле | кнопки. Колонки одинаковые во всех
+  // строках: пустая колонка место держит — поля начинаются с одной линии, кнопки тоже.
+  function setRow(name, hint, cols) {
+    const res = el("span", {class: "res"});
+    const jobs = el("div", {class: "joblog-slot"});
+    const ctl = el("div", {class: "ctl cols"},
+      el("div", {class: "c-state"}, cols.state || null),
+      el("div", {class: "c-field"}, cols.field || null),
+      el("div", {class: "c-btns"}, cols.buttons || null, res));
+    const row = el("div", {class: "act"}, el("div", {}, el("div", {class: "name", text: name}), el("div", {class: "hint", text: hint})),
+      ctl, el("div", {class: "joblog"}, jobs));
+    return {el: row, res, jobs, ctl};
+  }
   function actRow(name, hint, ...ctl) {
     const res = el("span", {class: "res"});
     const jobs = el("div", {class: "joblog-slot"});
@@ -1798,6 +1811,25 @@
           onclick: () => { flt = k; renderRows(); }}, dot ? el("span", {class: "dot " + dot}) : null, t, el("span", {class: "n", text: String(c[k] || 0)}))));
       chips.hidden = !rows.length;
     }
+    // внешний IP одного модема: только выход в интернет через него, секунды — а не «Долгий тест» всех
+    async function wanOne(b, r) {
+      b.disabled = true;
+      b.classList.add("spin");
+      const res2 = await X.run(id, "proxyveth", ["wan", String(r.n)]);
+      b.classList.remove("spin");
+      b.disabled = false;
+      const d = res2.ok ? res2.data || {} : null;
+      if (!d) { toast("Модем " + r.n + ": " + res2.error, "bad"); return; }
+      if (d.ok) {
+        toast("Модем " + r.n + ": внешний IP " + d.ext_ip + (r.ext_ip && r.ext_ip !== d.ext_ip ? " (был " + r.ext_ip + ")" : r.ext_ip ? " — тот же" : ""));
+        r.ext_ip = d.ext_ip;
+      } else {
+        toast("Модем " + r.n + ": выхода в интернет нет — " + (d.problems || []).join("; "), "bad");
+        r.ext_ip = null;
+      }
+      renderRows();
+      pollStatus();
+    }
     function renderRows() {
       const unset = !!(statusErr && /режим[^.]*не задан/i.test(statusErr));
       info.hidden = bar.hidden = unset;          // не настроен — одна строка, без кнопок
@@ -1827,7 +1859,9 @@
           el("td", {}, el("span", {class: "pill", title: (r.side === "server" ? "беда на стороне сервера, не у прокси: сервер (mp.space) "
               + "ещё не взял модем — адрес, правило маршрутизации, USB. " : "") + (r.since ? "с " + new Date(r.since * 1000).toLocaleString("ru-RU") : "")},
             el("span", {class: "dot " + cls}), txt)),
-          el("td", {class: "mono", text: r.ext_ip || "—"}),
+          el("td", {class: "mono ip-cell"}, el("span", {text: r.ext_ip || "—"}),
+            r.state === "disabled" ? null : ibtn("sync", "проверить внешний IP модема " + r.n + " — только его, без полного теста (proxyveth wan " + r.n + ")",
+              (e) => wanOne(e.currentTarget, r))),
           el("td", {class: "clip " + ((r.problems || []).length ? "problems" : "note"), title: note}, el("span", {text: note})),
           el("td", {class: "acts-cell"}, el("span", {class: "ia"},
             stopped
@@ -2716,30 +2750,30 @@
     const facts = el("div", {class: "facts"}, el("span", {class: "skel", style: "width:320px"}));
     const fact = (list) => facts.replaceChildren(...list.filter(Boolean).map((t) => el("span", {text: t})));
     const dns = el("input", {placeholder: "1.1.1.1 8.8.8.8 (необязательно)"});
-    const rDns = actRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space; теряющий запросы сервер — заменить рабочим", dns,
-      btn("Починить", (e) => act(e.target, rDns.res, () => X.POST(T + "/dns", {dns: dns.value}), dnsDone)));
+    const rDns = setRow("Починить DNS", "resolved, netplan без DNS от DHCP, проверка github, Google, mp.space; теряющий запросы сервер — заменить рабочим", {field: dns,
+      buttons: btn("Починить", (e) => act(e.target, rDns.res, () => X.POST(T + "/dns", {dns: dns.value}), dnsDone))});
     const pw = el("input", {type: "password", autocomplete: "new-password", placeholder: "новый пароль root"});
-    const rPw = actRow("Пароль root", H ? "пароль root этого хоста (вход по SSH)" : "пароль root этой ВМ (вход по SSH и в консоль Proxmox)", pw,
-      btn("Сохранить", async (e) => {
+    const rPw = setRow("Пароль root", H ? "пароль root этого хоста (вход по SSH)" : "пароль root этой ВМ (вход по SSH и в консоль Proxmox)", {field: pw,
+      buttons: btn("Сохранить", async (e) => {
         const r = await act(e.target, rPw.res, () => X.POST(T + "/passwd", {password: pw.value}), "Сохранено");
         if (r && r.ok) pw.value = "";
-      }));
+      })});
     const key = el("input", {placeholder: "ssh-ed25519 AAAA… имя"});
-    const rKey = actRow("Ключ SSH", H ? "добавить свой открытый ключ root" : "добавить свой открытый ключ root или сменить ключ, которым ходит хаб", key,
-      btn("Добавить", async (e) => {
+    const rKey = setRow("Ключ SSH", H ? "добавить свой открытый ключ root" : "добавить свой открытый ключ root или сменить ключ, которым ходит хаб", {field: key,
+      buttons: [btn("Добавить", async (e) => {
         const r = await act(e.target, rKey.res, () => X.POST(T + "/key", {pubkey: key.value}), "Сохранено");
         if (r && r.ok) key.value = "";
       }),
       H ? null : btn("Сменить ключ хаба", (e) => {
         if (!window.confirm("Сменить ключ, которым хаб ходит на ВМ " + id + "?")) return;
         act(e.target, rKey.res, () => X.POST(T + "/key", {rotate: true}), (d) => "Применено" + (d && d.fingerprint ? ": " + d.fingerprint : ""));
-      }));
+      })]});
     // Ключ, по которому хаб узнаёт ВМ. Меняется, когда cloud-init считает ВМ новой машиной: тогда
     // «Host key verification failed». Новый сверяется через guest agent Proxmox (мимо сети).
     const hkText = el("span", {class: "mono muted"});
     const hkAccept = el("span");
-    const rHk = H ? null : actRow("Ключ SSH сервера", "по нему хаб узнаёт ВМ; сменился (переустановка, cloud-init) — сверить через guest agent Proxmox и принять",
-      hkText, btn("Проверить", (e) => checkHk(e.target)), hkAccept);
+    const rHk = H ? null : setRow("Ключ SSH сервера", "по нему хаб узнаёт ВМ; сменился (переустановка, cloud-init) — сверить через guest agent Proxmox и принять",
+      {field: hkText, buttons: [btn("Проверить", (e) => checkHk(e.target)), hkAccept]});
     async function checkHk(b) {
       hkAccept.replaceChildren();
       const r = await act(b, rHk.res, () => X.POST("/servers/" + id + "/hostkey", {}),
@@ -2755,29 +2789,30 @@
         if (a && a.ok) { hkAccept.replaceChildren(); (X.node ? refreshNodes() : refresh()); }
       }, d.agent_ok ? "" : "danger"));
     }
+    // mp.space — две строки: сам софт (установить, проверить) и его ключ auth.mp (поле — и сохранить)
     const mpState = el("span", {class: "muted"});
-    const auth = el("textarea", {rows: 2, placeholder: "содержимое auth.mp из ЛК mobileproxy.space (или выберите файл)", style: "max-width:420px"});
-    const file = el("input", {type: "file", onchange: async (e) => { const f = e.target.files[0]; if (f) auth.value = (await f.text()).trim(); }});
-    const rMp = actRow("mobileproxy.space", H ? "софт агрегатора прямо на этом хосте (только Ubuntu): установка и ключ auth.mp; в конце хост перезагрузится"
-      : "софт агрегатора на этой ВМ: установка и ключ auth.mp", mpState,
-      btn("Установить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "install"}), "Применено", rMp.jobs)),
-      btn("Проверить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "check"}), (d) => summary(d && d.result !== undefined ? d.result : d))),
-      auth, file,
-      btn("Сохранить auth.mp", async (e) => {
-        const r = await act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "auth", auth: auth.value}), "Сохранено", rMp.jobs);
-        if (r && r.ok) auth.value = "";
-      }));
+    const auth = el("textarea", {rows: 2, placeholder: "содержимое auth.mp из ЛК mobileproxy.space"});
+    const file = el("input", {type: "file", "aria-label": "файл auth.mp", onchange: async (e) => { const f = e.target.files[0]; if (f) auth.value = (await f.text()).trim(); }});
+    const rMp = setRow("mobileproxy.space", H ? "софт агрегатора прямо на этом хосте (только Ubuntu); в конце хост перезагрузится"
+      : "софт агрегатора на этой ВМ; в конце ВМ перезагрузится", {state: mpState,
+      buttons: [btn("Установить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "install"}), "Применено", rMp.jobs)),
+        btn("Проверить", (e) => act(e.target, rMp.res, () => X.POST(T + "/mpspace", {action: "check"}), (d) => summary(d && d.result !== undefined ? d.result : d)))]});
+    const rAuth = setRow("Ключ auth.mp", "из личного кабинета mobileproxy.space: вставь содержимое или выбери файл", {field: [auth, file],
+      buttons: btn("Сохранить auth.mp", async (e) => {
+        const r = await act(e.target, rAuth.res, () => X.POST(T + "/mpspace", {action: "auth", auth: auth.value}), "Сохранено", rAuth.jobs);
+        if (r && r.ok) { auth.value = ""; file.value = ""; }
+      })});
     const hlState = el("span", {class: "muted", text: "—"});
-    const rHl = actRow(H ? "hivelink на хост" : "hivelink в эту ВМ", H ? "драйвер настоящих модемов, воткнутых в этот хост"
-      : "драйвер настоящих модемов — если они воткнуты прямо в ВМ (проброс USB)", hlState,
-      btn("Установить / обновить", async (e) => {
+    const rHl = setRow(H ? "hivelink на хост" : "hivelink в эту ВМ", H ? "драйвер настоящих модемов, воткнутых в этот хост"
+      : "драйвер настоящих модемов — если они воткнуты прямо в ВМ (проброс USB)", {state: hlState,
+      buttons: btn("Установить / обновить", async (e) => {
         const r = await act(e.target, rHl.res, () => X.run(id, "hivelink", ["install"]), "Применено");
         if (r && r.ok) loadHl();
-      }));
+      })});
     const modeSel = el("select", {}, el("option", {value: "usb", text: "USB — до 40 модемов"}), el("option", {value: "gw", text: "шлюз — без USB"}));
     const modeCur = el("span", {class: "muted"});
-    const rMode = actRow("Режим proxyveth", "смена снимает все модемы и поднимает их в новом режиме — подтверждение " + (H ? "словом host" : "номером ВМ"), modeCur, modeSel,
-      btn("Сменить…", async (e) => {
+    const rMode = setRow("Режим proxyveth", "смена снимает все модемы и поднимает их в новом режиме — подтверждение " + (H ? "словом host" : "номером ВМ"), {state: modeCur, field: modeSel,
+      buttons: btn("Сменить…", async (e) => {
         const s = X.ent(id) || {};
         const m = modeSel.value;
         if (m === s.mode) { setRes(rMode.res, "ok", "уже " + modeShort(m)); return; }
@@ -2786,10 +2821,10 @@
         if (v == null) return;
         await act(e.target, rMode.res, () => X.run(id, "proxyveth", ["mode", m, "--yes"], {confirm: v}), "Применено");
         refresh();
-      }, "danger"));
-    const rUp = actRow(H ? "Обновить PCS" : "Обновить агентов", H ? "код PCS с GitHub — на хост" + (X.isPve() ? " и все его ВМ" : "")
-      : "код PCS и части на этой ВМ — той же версии, что на хосте", el("span", {class: "muted", text: ""}),
-      btn("Обновить", (e) => act(e.target, rUp.res, () => X.POST(T + "/update", {}), "Применено", rUp.jobs)));
+      }, "danger")});
+    const rUp = setRow(H ? "Обновить PCS" : "Обновить агентов", H ? "код PCS с GitHub — на хост" + (X.isPve() ? " и все его ВМ" : "")
+      : "код PCS и части на этой ВМ — той же версии, что на хосте", {
+      buttons: btn("Обновить", (e) => act(e.target, rUp.res, () => X.POST(T + "/update", {}), "Применено", rUp.jobs))});
 
     async function loadHl() {
       const r = await X.run(id, "hivelink", ["status"]);
@@ -2811,34 +2846,36 @@
     function update() {
       const s = X.ent(id) || {};
       const h = s.host || {};
-      mpState.textContent = H && h.mpspace_ok === false ? "на хосте Proxmox mp.space не ставится — он меняет GRUB и ядро и"
-        + " перезагружает машину, легли бы все ВМ; ставь в ВМ" : mpText(s.mpspace);
-      for (const b of rMp.ctl.querySelectorAll("button, textarea, input")) b.disabled = H && h.mpspace_ok === false;
+      const noMp = H && h.mpspace_ok === false;
+      mpState.textContent = noMp ? "не для Proxmox" : mpFact(s.mpspace)[1];
+      mpState.title = noMp ? "на хосте Proxmox mp.space не ставится — он меняет GRUB и ядро и перезагружает машину, легли бы все ВМ; ставь в ВМ" : "";
+      for (const b of [...rMp.ctl.querySelectorAll("button"), ...rAuth.ctl.querySelectorAll("button, textarea, input")]) b.disabled = noMp;
+      rAuth.el.hidden = noMp;
       modeCur.textContent = "сейчас: " + modeShort(s.mode);
       if (s.mode && s.mode !== shownMode) { shownMode = s.mode; modeSel.value = s.mode === "usb" ? "gw" : "usb"; }
     }
     let shownMode = null;
-    if (X.node) for (const r of [rMp, rUp]) r.jobs.dataset.base = X.base;
+    if (X.node) for (const r of [rMp, rAuth, rUp]) r.jobs.dataset.base = X.base;
     const power = (action, text, ask, cls) => btn(text, async (e) => {
       const b = e.currentTarget;               // клик мог прийти в иконку внутри кнопки
       if (ask && !window.confirm(ask)) return;
       const r = await act(b, rPower.res, () => X.POST("/servers/" + id + "/power", {action}), (d) => "ВМ: " + (d && d.state || "готово"));
       if (r && r.ok) (X.node ? refreshNodes() : refresh());
     }, cls);
-    const rPower = actRow("Питание ВМ", "через Proxmox: включить, выключить штатно (до 2 мин), перезагрузить, остановить жёстко", el("span"),
-      power("start", [ic("play"), "Включить"]), power("shutdown", [ic("power"), "Выключить"], "Выключить ВМ " + id + "? Модемы на ней пропадут."),
-      power("reboot", [ic("redo"), "Перезагрузить"], "Перезагрузить ВМ " + id + "?"),
-      power("stop", [ic("stop"), "Стоп"], "Жёстко остановить ВМ " + id + "? Как выдернуть питание.", "danger"));
-    const rColor = actRow("Цвет", "цвет ВМ в дереве и на плашке — один из семи", colorPick((X.srv(id) || {}).color, async (c) => {
+    const rPower = setRow("Питание ВМ", "через Proxmox: включить, выключить штатно (до 2 мин), перезагрузить, остановить жёстко", {
+      buttons: [power("start", [ic("play"), "Включить"]), power("shutdown", [ic("power"), "Выключить"], "Выключить ВМ " + id + "? Модемы на ней пропадут."),
+        power("reboot", [ic("redo"), "Перезагрузить"], "Перезагрузить ВМ " + id + "?"),
+        power("stop", [ic("stop"), "Стоп"], "Жёстко остановить ВМ " + id + "? Как выдернуть питание.", "danger")]});
+    const rColor = setRow("Цвет", "цвет ВМ в дереве и на плашке — один из семи", {field: colorPick((X.srv(id) || {}).color, async (c) => {
       const r = await X.POST("/servers/" + id + "/color", {color: c});
       if (r.ok) (X.node ? refreshNodes() : refresh());
       return r.ok;
-    }));
-    const rForget = actRow("Убрать из PCS", "PCS перестанет управлять ВМ; сама ВМ, её диски и модемы останутся (вернуть — «Добавить в PCS» на обзоре хоста)",
-      el("span"), btn("Убрать из PCS…", () => forgetVm(X, X.srv(id) || {id}), "danger"));
+    })});
+    const rForget = setRow("Убрать из PCS", "PCS перестанет управлять ВМ; сама ВМ, её диски и модемы останутся (вернуть — «Добавить в PCS» на обзоре хоста)",
+      {buttons: btn("Убрать из PCS…", () => forgetVm(X, X.srv(id) || {id}), "danger")});
     const fpText = el("span", {class: "mono", text: "…"});
-    const rLink = actRow("Связь хостов", "чтобы управлять этим хостом с хоста Proxmox: там «+ Присоединить хост» → адрес этого хоста, логин и пароль"
-      + " этой панели; отпечаток — сверить (хаб ходит сюда только по HTTPS к этому сертификату)", fpText);
+    const rLink = setRow("Связь хостов", "чтобы управлять этим хостом с хоста Proxmox: там «+ Присоединить хост» → адрес этого хоста, логин и пароль"
+      + " этой панели; отпечаток — сверить (хаб ходит сюда только по HTTPS к этому сертификату)", {field: fpText});
     // разделы: что с машиной, как на неё попасть, сеть и софт; опасное — в конце
     const sec = (title, ...rows) => {
       rows = rows.filter(Boolean);
@@ -2847,7 +2884,7 @@
     const root = el("div", {class: "stagger-sec"}, facts,
       sec(H ? "Хост" : "Машина", H ? null : rPower.el, H ? null : rColor.el, rUp.el),
       sec("Доступ", rPw.el, rKey.el, rHk && rHk.el, H && !X.node ? rLink.el : null),
-      sec("Сеть и софт", rDns.el, rMp.el, rHl.el),
+      sec("Сеть и софт", rDns.el, rMp.el, rAuth.el, rHl.el),
       sec("Осторожно", rMode.el, H ? null : rForget.el));
     let loaded = false;
     async function loadFp() {
@@ -3290,12 +3327,14 @@
       });
       const intro = el("div", {class: "banner info"});
       const rows = el("div", {class: "list"},
-        actRow("Адрес", "обычно это шлюз хоста; пусто — шлюз маршрута по умолчанию", host).el,
-        actRow("Пользователь RouterOS", "группа full или своя с правами read, write, api, rest-api, reboot", user).el,
-        actRow("Пароль", "хранится только на этом хосте, в /etc/pcs/router.json (root, 0600)", pw).el,
-        actRow("HTTPS", "если на роутере включена служба www-ssl; иначе — HTTP по своей сети, как WebFig", el("label", {}, https, " по HTTPS"), port).el,
-        actRow("В дереве", "роутер этого хоста не MikroTik или его нет — спрятать строку «Роутер»", el("label", {}, hidden, " не показывать")).el,
-        el("div", {class: "act"}, el("div"), el("div", {class: "ctl"}, save, forget, res)));
+        setRow("Адрес", "обычно это шлюз хоста; пусто — шлюз маршрута по умолчанию", {field: host}).el,
+        setRow("Пользователь RouterOS", "группа full или своя с правами read, write, api, rest-api, reboot", {field: user}).el,
+        setRow("Пароль", "хранится только на этом хосте, в /etc/pcs/router.json (root, 0600)", {field: pw}).el,
+        setRow("HTTPS", "если на роутере включена служба www-ssl; иначе — HTTP по своей сети, как WebFig; порт — если не 80/443",
+          {state: el("label", {}, https, " по HTTPS"), field: port}).el,
+        setRow("В дереве", "роутер этого хоста не MikroTik или его нет — спрятать строку «Роутер»", {state: el("label", {}, hidden, " не показывать")}).el,
+        el("div", {class: "act"}, el("div"), el("div", {class: "ctl cols"}, el("div", {class: "c-state"}), el("div", {class: "c-field"}),
+          el("div", {class: "c-btns"}, save, forget, res))));
       function update() {
         errBanner();
         const c = conf();

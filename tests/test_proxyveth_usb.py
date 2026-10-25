@@ -257,6 +257,30 @@ def test_diag():
     vm.socks_connect = orig
 
 
+def test_wan_one():
+    print("внешний IP одного модема (proxyveth wan N):")
+    vm.LIB = tempfile.mkdtemp()
+    p = {"n": 201, "real": 81, "host": "10.0.0.1", "port": 1080, "user": "u", "pw": "p"}
+    hp0 = {"201": {"verdict": "ok", "streak": 3, "told": "ok", "up": "ok", "ip": "1.1.1.1", "t": 1},
+           "202": {"verdict": "warn", "streak": 1, "told": "ok", "up": "no-internet", "ip": "", "t": 1}}
+    vm.jsave(vm.health_path(), hp0)
+    calls = []
+    undo = patch(vm, one=lambda n: dict(p, n=n), check_up_safe=lambda q, udp=False: (calls.append(q["n"]) or ("ok", [], "5.6.7.8")))
+    try:
+        d = vm.wan(201)
+        hp = vm.jload(vm.health_path(), {})
+        check("только этот модем, через его прокси — новый IP", d == {"n": 201, "ext_ip": "5.6.7.8", "ok": True, "problems": []} and calls == [201], (d, calls))
+        check("итог — в запас здоровья (таблица покажет), счёт поломок и оповещений не тронут",
+              hp["201"]["ip"] == "5.6.7.8" and hp["201"]["streak"] == 3 and hp["201"]["told"] == "ok" and hp["202"] == hp0["202"], hp)
+        vm.check_up_safe = lambda q, udp=False: ("no-internet", ["SIM без интернета"], "")
+        d = vm.wan(201)
+        hp = vm.jload(vm.health_path(), {})
+        check("нет выхода — причина, прежний IP в запасе не стирается", not d["ok"] and d["problems"] == ["SIM без интернета"]
+              and hp["201"]["up"] == "no-internet" and hp["201"]["ip"] == "5.6.7.8", (d, hp["201"]))
+    finally:
+        undo()
+
+
 def test_notify():
     print("оповещения:")
     vm.LIB = tempfile.mkdtemp()
@@ -671,6 +695,7 @@ if __name__ == "__main__":
     test_lint()
     test_create_serial()
     test_diag()
+    test_wan_one()
     test_notify()
     test_proxy_conf()
     test_layout()
