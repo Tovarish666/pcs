@@ -21,6 +21,7 @@ import getpass
 import hmac
 import http.server
 import importlib
+import ipaddress
 import json
 import mimetypes
 import re
@@ -153,16 +154,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _redirect(self, where):
         self._send(302, b"", "text/plain", (("Location", where), ("Cache-Control", "no-store")))
 
+    # ── адрес клиента: за своим обратным прокси (NPM на pcs.mvdx.ru) — из X-Real-IP ──────────
+    # Прокси в своей сети (частный адрес или localhost) ставит X-Real-IP сам — его и берём: иначе все
+    # приходили бы с адреса прокси и чужой перебор пароля блокировал бы вход всем (Throttle по IP).
+    # Пришёл не из своей сети (проброс порта сохраняет адрес) — заголовок не слушаем: его подделали бы.
+    def _via_proxy(self):
+        try:
+            a = ipaddress.ip_address(self.client_address[0])
+        except ValueError:
+            return False
+        return a.is_private or a.is_loopback
+
+    def client_ip(self):
+        peer = self.client_address[0]
+        real = (self.headers.get("X-Real-IP") or "").strip() if self.headers else ""
+        if real and self._via_proxy():
+            try:
+                return str(ipaddress.ip_address(real))
+            except ValueError:
+                pass
+        return peer
+
+    def _https(self):
+        """Браузер на HTTPS: сами по TLS или свой прокси сказал X-Forwarded-Proto: https."""
+        return self._tls() or (self._via_proxy() and (self.headers.get("X-Forwarded-Proto") or "").lower() == "https")
+
     def log_request(self, code="-", size="-"):
         try:
             c = int(code)
         except (TypeError, ValueError):
             c = 0
         if c >= 400 and c not in (401, 404):
-            self.app.log("%s %s %s → %s" % (self.client_address[0], self.command, self.path.split("?")[0], code))
+            self.app.log("%s %s %s → %s" % (self.client_ip(), self.command, self.path.split("?")[0], code))
 
     def log_error(self, fmt, *args):
-        self.app.log("%s %s" % (self.client_address[0], fmt % args))
+        self.app.log("%s %s" % (self.client_ip() if getattr(self, "headers", None) else self.client_address[0], fmt % args))
 
     # ── сессия и проверки ───────────────────────────────────────────────────
 
@@ -384,7 +410,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # ── связь хостов: /api/v1 по токену, только по HTTPS ────────────────────
 
     def _v1(self, method, path, query):
-        app, ip = self.app, self.client_address[0]
+        app, ip = self.app, self.client_ip()
         if not self._tls():
             return self._json(403, {"ok": False, "error": "связь хостов — только по HTTPS: https://<адрес>:%d" % app.port})
         if self.headers.get("Origin"):
@@ -428,7 +454,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _join(self):
         """Хаб другого хоста присоединяет этот: логин и пароль панели → токен (пароль не хранится)."""
-        app, ip = self.app, self.client_address[0]
+        app, ip = self.app, self.client_ip()
         wait = app.throttle.wait(ip)
         if wait:
             return self._json(429, {"ok": False, "error": "много неудачных попыток — подождите %d с" % wait})
@@ -460,16 +486,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not rec or rec[0] < time.time():
             return self._redirect("/login")
         s = app.sessions.new(rec[1], auth.stamp(app.config))
-        app.log("%s вход по ссылке хаба (%s)" % (self.client_address[0], rec[1]))
+        app.log("%s вход по ссылке хаба (%s)" % (self.client_ip(), rec[1]))
         return self._send(302, b"", "text/plain", (("Location", "/"), ("Cache-Control", "no-store"))
                           + self._cookie_hdr(s["sid"], int(app.sessions.ttl)))
 
     def _cookie_hdr(self, sid, max_age):
-        return (("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d"
-                 % (self.app.cookie, sid, max_age)),)
+        return (("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+                 % (self.app.cookie, sid, max_age, "; Secure" if self._https() else "")),)
 
     def _login(self):
-        app, ip = self.app, self.client_address[0]
+        app, ip = self.app, self.client_ip()
         if not self._origin_ok() or not self.headers.get("X-CSRF"):
             return self._json(403, {"ok": False, "error": "вход только со страницы панели"})
         wait = app.throttle.wait(ip)
@@ -527,7 +553,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _v1_ws(self, u):
         """Терминал по токену — для хаба другого хоста (только по HTTPS)."""
-        app, ip = self.app, self.client_address[0]
+        app, ip = self.app, self.client_ip()
         if not self._tls():
             return self._send(403, "только по HTTPS", "text/plain; charset=utf-8")
         rec = tokens.check(self._bearer(), ip, app.tokens_path)
