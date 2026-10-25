@@ -1,21 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-<!-- Знак PCS «Орбита»: хост — планета, модемы — спутники на орбите. Орбита уходит за планету и выходит перед ней. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<!-- Знак PCS (по эскизу пользователя, 26.10.2026): планета с кольцом, звезда и две точки — белым на тёмно-синем.
+     Кольцо — полоса между двумя эллипсами, наклон −24°; задняя половина уходит за планету, передняя
+     проходит перед ней с тёмным зазором (зазор — только поверх планеты, по краям кольца швов нет). -->
 <defs>
-<linearGradient id="pcs-sky" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#211a5e"/><stop offset="1" stop-color="#070a1d"/></linearGradient>
-<radialGradient id="pcs-planet" cx=".34" cy=".3" r=".85"><stop offset="0" stop-color="#eef0ff"/><stop offset=".3" stop-color="#9c8cff"/><stop offset=".75" stop-color="#4b2fd0"/><stop offset="1" stop-color="#2a1a86"/></radialGradient>
-<linearGradient id="pcs-orbit" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#8f7dff"/><stop offset=".6" stop-color="#4fd8ff"/><stop offset="1" stop-color="#c9f6ff"/></linearGradient>
+<clipPath id="pcs-on-planet"><circle cx="50" cy="56" r="21.5"/></clipPath>
 </defs>
-<rect width="32" height="32" rx="8" fill="url(#pcs-sky)"/>
-<circle cx="6.5" cy="7" r=".8" fill="#fff" opacity=".85"/>
-<circle cx="25.8" cy="5.6" r=".55" fill="#fff" opacity=".6"/>
-<circle cx="26.5" cy="25.5" r=".5" fill="#fff" opacity=".5"/>
-<g transform="translate(16 16.4) rotate(-24)">
-<path d="M-12.6 0A12.6 4.3 0 0 1 12.6 0" fill="none" stroke="url(#pcs-orbit)" stroke-width="1.4" opacity=".45"/>
+<rect width="100" height="100" rx="22" fill="#0b1022"/>
+<g fill="#f3f2ee">
+<path d="M30.6 18.2Q31.5 26.3 39.4 27.2Q31.5 28.1 30.6 36.2Q29.7 28.1 21.8 27.2Q29.7 26.3 30.6 18.2Z"/>
+<circle cx="65" cy="26.4" r="1.6"/>
+<circle cx="72.6" cy="75" r="1.4"/>
+<g transform="translate(50 56) rotate(-24)">
+<path fill-rule="evenodd" d="M-42 0A42 9 0 1 0 42 0A42 9 0 1 0 -42 0ZM-35 0A35 3.3 0 1 0 35 0A35 3.3 0 1 0 -35 0Z"/>
 </g>
-<circle cx="16" cy="16.4" r="6.7" fill="url(#pcs-planet)"/>
-<g transform="translate(16 16.4) rotate(-24)">
-<path d="M-12.6 0A12.6 4.3 0 0 0 12.6 0" fill="none" stroke="url(#pcs-orbit)" stroke-width="1.7" stroke-linecap="round"/>
-<circle cx="9.7" cy="2.75" r="2.6" fill="#4fd8ff" opacity=".28"/>
-<circle cx="9.7" cy="2.75" r="1.6" fill="#fff"/>
+<circle cx="50" cy="56" r="20" stroke="#0b1022" stroke-width="2.6" paint-order="stroke"/>
+<g clip-path="url(#pcs-on-planet)">
+<g transform="translate(50 56) rotate(-24)">
+<path d="M-42 0A42 9 0 0 0 42 0L35 0A35 3.3 0 0 1 -35 0Z" fill="none" stroke="#0b1022" stroke-width="2.6" stroke-linejoin="round"/>
+</g>
+</g>
+<g transform="translate(50 56) rotate(-24)">
+<path d="M-42 0A42 9 0 0 0 42 0L35 0A35 3.3 0 0 1 -35 0Z"/>
+</g>
 </g>
 </svg>

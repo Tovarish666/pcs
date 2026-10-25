@@ -2842,6 +2842,7 @@
   }
   function pageCreate(X) {
     const f = {
+      id: el("input", {type: "number", min: 100, max: 999999999, step: 1, inputmode: "numeric", placeholder: "1000", autocomplete: "off"}),
       name: el("input", {placeholder: "pcs3000", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9\\-]*", title: "латиница, цифры и дефис; с буквы или цифры", autocomplete: "off", spellcheck: "false"}),
       cores: el("input", {type: "number", min: 1, max: 256, value: "4"}),
       ram: el("input", {type: "number", min: 1, max: 4096, value: "8"}),
@@ -2854,9 +2855,36 @@
     const res = el("span", {class: "res"});
     const submit = el("button", {type: "submit", class: "primary"}, "Создать ВМ");
     const plan = el("div");
+    // Номер ВМ — свой; подставлен свободный «круглый». Занятый (ВМ или контейнер Proxmox) — видно сразу.
+    const idNote = el("span", {class: "id-note"});
+    let ids = null;
+    function idState() {
+      const v = f.id.value.trim();
+      if (!v) return ["", ids ? "пусто — возьму " + ids.next : ""];
+      const n = +v;
+      if (!Number.isInteger(n) || n < 100 || n > 999999999) return ["bad", "от 100 до 999999999"];
+      if (ids && ids.used.includes(n)) {
+        const s = X.srv(n), o = (otherIds || []).find((x) => x.id === n);
+        return ["bad", "занят" + (s ? ": ВМ " + n + " " + (s.name || "") : o ? ": " + (o.name || "ВМ " + n) : " — ВМ или контейнер Proxmox")];
+      }
+      return ["ok", ids ? "свободен" : ""];
+    }
+    function drawId() {
+      const [cls, t] = idState();
+      idNote.className = "id-note " + cls;
+      idNote.textContent = t;
+      submit.disabled = cls === "bad";
+    }
+    let otherIds = null;
+    (async () => {
+      const [r, o] = await Promise.all([X.GET("/vms/ids"), X.GET("/vms")]);
+      if (r.ok) { ids = r.data; if (!f.id.value) f.id.value = String(ids.next); }
+      if (o.ok) otherIds = o.data || [];
+      drawId(); drawPlan();
+    })();
     const form = el("form", {class: "form"},
       el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Машина"}),
-        el("label", {}, "Имя ВМ — оно же имя хоста", f.name),
+        el("div", {class: "row-id"}, el("label", {}, "Номер ВМ", f.id, idNote), el("label", {}, "Имя ВМ — оно же имя хоста", f.name)),
         el("div", {class: "row3"}, el("label", {}, "Ядра", f.cores), el("label", {}, "ОЗУ, ГБ", f.ram), el("label", {}, "Диск, ГБ", f.disk))),
       el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Режим proxyveth"}), el("div", {class: "opts"}, usb.el, gw.el)),
       el("div", {class: "fs"}, el("div", {class: "fs-t", text: "Модемы"}),
@@ -2866,7 +2894,7 @@
     function drawPlan() {
       const n = f.name.value.trim() || "…";
       plan.replaceChildren(el("div", {class: "aside-t", text: "Что будет"}), planList([
-        ["ВМ «" + n + "» в Proxmox", true, (+f.cores.value || "?") + " ядер · " + (+f.ram.value || "?") + " ГБ ОЗУ · диск " + (+f.disk.value || "?") + " ГБ"],
+        ["ВМ " + (f.id.value.trim() || (ids ? ids.next : "…")) + " «" + n + "» в Proxmox", true, (+f.cores.value || "?") + " ядер · " + (+f.ram.value || "?") + " ГБ ОЗУ · диск " + (+f.disk.value || "?") + " ГБ"],
         ["Ubuntu 24.04 и обновления", true, usb.input.checked ? "и ядро с USB-модулями — одна перезагрузка" : null],
         ["PCS, proxyveth и modlink", true, "proxyveth — " + (usb.input.checked ? "USB" : "шлюз")],
         ["Модемы по таблице", !!f.sheet.value.trim(), f.sheet.value.trim() ? null : "таблицы нет — добавишь потом во вкладке proxyveth"],
@@ -2874,12 +2902,14 @@
       ]), el("p", {class: "aside-note", text: "Идёт в фоне: страницу можно закрыть, задание доработает. Журнал откроется сам."}));
     }
     form.addEventListener("input", drawPlan);
+    f.id.addEventListener("input", drawId);
     form.addEventListener("change", drawPlan);
     drawPlan();
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const body = {name: f.name.value.trim(), cores: +f.cores.value, ram_gb: +f.ram.value, disk_gb: +f.disk.value,
         mode: gw.input.checked ? "gw" : "usb", sheet: f.sheet.value.trim(), mpspace: f.mp.checked};
+      if (f.id.value.trim()) body.id = +f.id.value.trim();
       const r = await act(submit, res, () => X.POST("/servers", body), "Запущено");
       if (r && r.ok && r.data && r.data.job != null) location.hash = X.href("/job/" + encodeURIComponent(r.data.job));
     });

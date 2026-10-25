@@ -310,7 +310,13 @@ def create_server(params):
     with _lock:
         if any(s and s["name"] == name for s in S.values()):
             raise Fail("ВМ с именем %s уже есть — другое имя" % name)
-        sid = next(i for i in itertools.count(1000, 1000) if i not in S)
+        used = set(S) | set(OTHER) | {101, 10000}
+        if params.get("id"):
+            sid = int(params["id"])
+            if sid in used:
+                raise Fail("номер %d занят: ВМ или контейнер %d уже есть в Proxmox — выбери другой" % (sid, sid))
+        else:
+            sid = next(i for i in itertools.count(1000, 1000) if i not in used)
         S[sid] = None                    # номер занят, пока идёт задание
     mode = params.get("mode") or "usb"
     ip = "192.168.88.%d" % (30 + sid // 1000)
@@ -518,6 +524,12 @@ def host_key(id, accept=None):
             old, srv["known_fp"] = list(known), list(shown)
             return {"old": old, "new": shown, "via": "agent" if accept == "agent" else "человек", "accepted": True}
         return {"known": known, "shown": shown, "agent": shown, "same": known == shown, "agent_ok": True}
+
+
+def vm_ids():
+    with _lock:
+        used = set(S) | set(OTHER) | {101, 10000}          # 101 и 10000 — контейнеры, как на стенде
+        return {"next": next(i for i in itertools.count(1000, 1000) if i not in used), "used": sorted(used)}
 
 
 def vms_other():

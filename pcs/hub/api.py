@@ -14,7 +14,7 @@ import os
 
 from .. import VERSION
 from ..core.util import Fail
-from . import jobs, node, ops, remote, router as rt, servers as srv, store
+from . import jobs, node, ops, pve, remote, router as rt, servers as srv, store
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 
@@ -66,9 +66,12 @@ def server(id):
 
 def create_server(params):
     """params: name, cores, ram_gb, disk_gb, mode, sheet, mpspace(bool)
-    (+ необязательные id, ip "A.B.C.D/M", gw, dns, password, auth, proxy, storage, bridge). → job_id."""
+    (+ необязательные id, ip "A.B.C.D/M", gw, dns, password, auth, proxy, storage, bridge). → job_id.
+    Занятый номер — отказ сразу, а не в середине задания."""
     p = srv.normalize(params)
     p.pop("replace", None)
+    if p.get("id") and p["id"] in pve.used_ids():
+        raise Fail("номер %d занят: ВМ или контейнер %d уже есть в Proxmox — выбери другой" % (p["id"], p["id"]))
     return jobs.start("create_server", p, title="Создание ВМ %s" % (p.get("name") or p.get("id") or ""),
                       target=p.get("id") or "new")
 
@@ -244,6 +247,11 @@ def host_key(id, accept=None):
     if accept:
         return dict(remote.rekey(s, accept=str(accept).strip()), accepted=True)
     return remote.host_key(s)
+
+
+def vm_ids():
+    """Номера ВМ и контейнеров Proxmox: {"next": свободный (круглый, 1000, 2000…), "used": [...]}."""
+    return {"next": pve.next_id(), "used": sorted(pve.used_ids())}
 
 
 def vms_other():
