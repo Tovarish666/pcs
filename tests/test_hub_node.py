@@ -228,5 +228,64 @@ if os.geteuid() != 0:
     check("info --json без root — конверт с ошибкой", json.loads(r.stdout) == {"ok": False, "error": "нужен root"},
           r.stdout + r.stderr)
 
+print("архив сервера mobileproxy.space — с докачкой (связь рвётся посреди загрузки):")
+import http.server as _hs, io as _io, subprocess as _sp, threading as _th, zipfile as _zf  # noqa: E402
+_buf = _io.BytesIO()
+with _zf.ZipFile(_buf, "w", _zf.ZIP_DEFLATED) as z:
+    z.writestr("nodejs/work/server.js", os.urandom(200000).hex())
+    z.writestr("mproxy/index.js", "// mproxy")
+ZIP = _buf.getvalue()
+SEEN = {"n": 0, "ranges": []}
+
+
+class Flaky(_hs.BaseHTTPRequestHandler):
+    """Как резервный сервер mobileproxy: Range умеет, первые два раза рвёт соединение на трети файла."""
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        SEEN["n"] += 1
+        rng = self.headers.get("Range")
+        start = int(rng.split("=")[1].split("-")[0]) if rng else 0
+        SEEN["ranges"].append(start)
+        body = ZIP[start:]
+        self.send_response(206 if rng else 200)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        if rng:
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, len(ZIP) - 1, len(ZIP)))
+        self.end_headers()
+        cut = len(body) if SEEN["n"] > 2 else len(ZIP) // 3
+        self.wfile.write(body[:cut])
+        self.wfile.flush()
+        if SEEN["n"] <= 2:
+            self.connection.shutdown(2)
+
+
+srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), Flaky)
+_th.Thread(target=srv.serve_forever, daemon=True).start()
+url_ok = "http://127.0.0.1:%d/download.php?download_server_file" % srv.server_address[1]
+tmpd = tempfile.mkdtemp()
+zp = os.path.join(tmpd, "server_files.zip")
+got = node.mp_server_zip(zp, urls=("https://127.0.0.1:1/proxy_tools.html?download_server_file", url_ok), tries=5)
+check("основной не открывается, резервный рвётся дважды — докачан и целый", got == zp and node.zip_ok(zp)
+      and open(zp, "rb").read() == ZIP, (got, SEEN))
+check("докачка с места обрыва (Range), а не заново", any(r > 0 for r in SEEN["ranges"]), SEEN["ranges"])
+check("битый/недокачанный файл — не «целый»", (open(os.path.join(tmpd, "half.zip"), "wb").write(ZIP[:len(ZIP) // 2]) and
+      not node.zip_ok(os.path.join(tmpd, "half.zip"))))
+SEEN["n"] = 0
+check("совсем не скачался — None (тогда install.sh качает сам)",
+      node.mp_server_zip(os.path.join(tmpd, "x.zip"), urls=("https://127.0.0.1:1/x?download_server_file",), tries=2) is None
+      and not os.path.exists(os.path.join(tmpd, "x.zip")))
+shim = node.wget_shim(zp, os.path.join(tmpd, "bin"))
+out = os.path.join(tmpd, "from-shim.zip")
+r = _sp.run([os.path.join(shim, "wget"), "-q", "--timeout=30", "--tries=3", "-O", out,
+             "http://81.200.155.214/download.php?download_server_file"], capture_output=True)
+check("wget для install.sh: архив сервера — наш проверенный, без сети", r.returncode == 0 and open(out, "rb").read() == ZIP, r)
+txt = open(os.path.join(shim, "wget")).read()
+check("…остальные адреса — настоящий wget", 'exec ' in txt and "download_server_file" in txt)
+srv.shutdown()
+shutil.rmtree(tmpd)
+
 print("\nитого: ok %d, fail %d" % (passed, failed))
 sys.exit(1 if failed else 0)

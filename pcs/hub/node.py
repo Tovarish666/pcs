@@ -18,22 +18,27 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 
 from .. import VERSION
 from ..core import dns as dnsfix
 from ..core import util
-from ..core.util import Fail, jload, rd, sh
+from ..core.util import Fail, jload, rd, sh, wr
 
 MP_SETUP = "usr/local/bin/modem-interface-setup.sh"
 MP_WORK = "home/nodejs/work"
 MP_UNITS = ("mproxy", "nodejs-server")
 MP_HOSTS = ("mobileproxy.rent", "mobileproxy.space", "proxeon.net")
+# архив файлов сервера, который install.sh mobileproxy.space качает сам (основной и резервный адрес)
+MP_ZIP_URLS = ("https://mobileproxy.space/proxy_tools.html?download_server_file",
+               "http://81.200.155.214/download.php?download_server_file")
 PV_CONFIG = "etc/proxyveth/config.json"
 LOGD = "/var/log/pcs"
 KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ssh-dss", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384",
@@ -373,6 +378,52 @@ def run_logged(cmd, env=None, logname="mpspace"):
         return p.wait()
 
 
+def zip_ok(path):
+    try:
+        with zipfile.ZipFile(path) as z:
+            return z.testzip() is None and bool(z.namelist())
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def mp_server_zip(path, proxy="", run=sh, tries=8, urls=MP_ZIP_URLS):
+    """Архив файлов сервера mobileproxy.space — заранее и с докачкой. До их серверов связь рвётся
+    посреди загрузки (стенд, 26.10.2026: 135 из 457 КБ, через раз; основной адрес — сбой TLS),
+    а install.sh берёт и недокачанный файл и падает на распаковке. Сервер умеет докачку (Range):
+    рвётся — докачиваем с места обрыва. → path (zip целый) или None."""
+    for url in urls:
+        if os.path.exists(path):
+            os.unlink(path)
+        for _ in range(tries):
+            r = run("curl", "-sS", "-L", "-m", "60", "-C", "-", *(["--proxy", proxy] if proxy else []),
+                    "-o", path, url, check=False, timeout=90)
+            if zip_ok(path):
+                return path
+            if r.returncode in (0, 33, 36) and os.path.exists(path):
+                os.unlink(path)          # пришёл целиком, но не zip, или докачка не годится — заново
+        say("  архив сервера с %s не скачался за %d попыток" % (url.split("/")[2], tries))
+    if os.path.exists(path):
+        os.unlink(path)
+    return None
+
+
+def wget_shim(zip_path, bin_dir):
+    """wget для install.sh: архив сервера — наш, уже проверенный; всё остальное — настоящий wget."""
+    os.makedirs(bin_dir, exist_ok=True)
+    real = shutil.which("wget") or "/usr/bin/wget"
+    wr(os.path.join(bin_dir, "wget"), """#!/bin/sh
+# PCS: архив сервера mobileproxy.space скачан заранее (с докачкой) и проверен — отдаём его.
+case "$*" in
+  *download_server_file*)
+    out=""; prev=""
+    for a in "$@"; do [ "$prev" = "-O" ] && out="$a"; prev="$a"; done
+    if [ -n "$out" ] && cp -f %s "$out"; then exit 0; fi ;;
+esac
+exec %s "$@"
+""" % (shlex.quote(zip_path), shlex.quote(real)), 0o755)
+    return bin_dir
+
+
 def mp_install(params, no_reboot=False, run=sh):
     """Софт mobileproxy.space: install.sh, auth.mp, setup-modem-management.sh, перезагрузка.
     Секреты (auth.mp, прокси с паролем) приходят файлом 600 и сразу удаляются."""
@@ -388,6 +439,13 @@ def mp_install(params, no_reboot=False, run=sh):
     run("systemctl", "disable", "--now", "unattended-upgrades", "apt-daily.timer", "apt-daily-upgrade.timer", check=False)
     work = "/root/pcs-soft"
     os.makedirs(work, exist_ok=True)
+    say("архив сервера mobileproxy.space — заранее, с докачкой")
+    got = mp_server_zip(os.path.join(work, "server_files.zip"), proxy, run)
+    if got:
+        say("  архив целый — install.sh возьмёт его")
+        env["PATH"] = wget_shim(got, os.path.join(work, "bin")) + ":" + env.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+    else:
+        say("  ⚠ архив сервера не скачался — install.sh попробует сам")
     for script in ("install.sh", "setup-modem-management.sh"):
         path = os.path.join(work, script)
         run("curl", "-fsSL", "-m", "120", *(["--proxy", proxy] if proxy else []),
@@ -399,7 +457,8 @@ def mp_install(params, no_reboot=False, run=sh):
         say("── %s (mobileproxy.space)" % script)
         rc = run_logged(["bash", path], env=env)
         if rc != 0:
-            raise Fail("%s завершился с кодом %d (лог: %s/mpspace.log)" % (script, rc, LOGD))
+            raise Fail("%s завершился с кодом %d (лог: %s/mpspace.log)%s" % (script, rc, LOGD, "" if got else
+                       " — архив сервера mobileproxy.space не скачался: связь до их серверов рвётся; «Повторить» или HTTP-прокси"))
     if no_reboot:
         dnsfix.fix(log=say)                 # софт агрегатора трогает сеть — DNS перепроверить
     else:
