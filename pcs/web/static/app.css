@@ -752,3 +752,25 @@ body.viewer .main-col::before, body.viewer .main-col::after { display: none; }
 .br-empty::before { content: ""; width: 44px; height: 44px; background: var(--accent); opacity: .45;
   -webkit-mask: var(--cos-icon) center / contain no-repeat; mask: var(--cos-icon) center / contain no-repeat; }
 @media (prefers-reduced-motion: reduce) { .main-col::after { animation: none; } }
+
+/* ── роутер хоста (MikroTik, PCS.md §20) ─────────────────────────────────── */
+.t-router { grid-template-columns: 16px minmax(0, 1fr) auto; padding-left: 14px; color: var(--fg2); }
+.t-router .ic { width: 15px; height: 15px; color: var(--fg3); }
+.t-router.active, .t-router:hover { color: var(--fg); }
+.t-router.active .ic { color: var(--accent); }
+.rt-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 14px 16px; background: var(--s1); border: 1px solid var(--line); border-radius: var(--r2); }
+.rt-form input:not([type]) { min-width: 0; }
+.rt-form .w-port, .act .ctl input.w-port { width: 150px; min-width: 0; flex: none; }
+.rt-form .w-ip { width: 150px; }
+.rt-form input[aria-label="подпись"] { flex: 1; min-width: 180px; max-width: 320px; }
+.rt-note { font-size: 12.5px; margin: 8px 2px 0; }
+table.t tr.off td:not(:first-child) { opacity: .5; }
+.rt-other { margin-top: 18px; }
+.rt-other summary { cursor: pointer; color: var(--fg2); font-size: 13px; margin-bottom: 10px; }
+.rt-log .item { align-items: baseline; gap: 12px; padding: 7px 16px; font-size: 13px; }
+.rt-log .rt-time { color: var(--fg3); font-size: 12px; white-space: nowrap; }
+.rt-log .rt-topics { color: var(--fg3); font-size: 12px; min-width: 150px; }
+.rt-log .rt-line.bad { background: var(--bad-bg); } .rt-log .rt-line.bad .grow { color: var(--bad); }
+.rt-log .rt-line.warn .grow { color: var(--warn); }
+.rt-webfig { height: min(78vh, 900px); }
+@media (max-width: 700px) { .rt-log .rt-topics { display: none; } .rt-form .w-port, .rt-form .w-ip { width: 120px; } }

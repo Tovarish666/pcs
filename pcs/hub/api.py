@@ -14,7 +14,7 @@ import os
 
 from .. import VERSION
 from ..core.util import Fail
-from . import jobs, node, ops, remote, servers as srv, store
+from . import jobs, node, ops, remote, router as rt, servers as srv, store
 
 PARTS = ("proxyveth", "modlink", "hivelink")
 
@@ -264,6 +264,12 @@ def server_adopt(id, ip=None, password=None):
 
 def _job_adopt(p):
     return srv.adopt(p["id"], ip=p.get("ip") or "", password=p.get("password") or "", select=False)
+
+
+def router(action, params=None):
+    """Роутер этого хоста (MikroTik, REST — PCS.md §20). action: conf | save | forget | status | ifaces | iface |
+    nat | nat_add | nat_set | nat_del | leases | lease_static | log | reboot. Роутер другого хоста — его панелью."""
+    return rt.call(action, params or {})
 
 
 def colors():

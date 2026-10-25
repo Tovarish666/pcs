@@ -50,6 +50,7 @@
     out: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
     menu: "M4 7h16M4 12h16M4 17h16", list: "M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01",
     gauge: "M12 14l4-4M4.9 19a9 9 0 1 1 14.2 0", wand: "M15 4V2M15 10V8M11 6H9M21 6h-2M5 21l10-10M17.8 3.8l1.4 1.4",
+    router: "M3 14h18v6H3zM7 17h.01M10.5 17h.01M17 14V9M14 6.5a4 4 0 0 1 6 0M12 4a7 7 0 0 1 10 0",
   };
   function ic(name) {
     const NS = "http://www.w3.org/2000/svg";
@@ -623,6 +624,11 @@
       crumbs.push(el("span", {class: "sep", text: "/"}), el("a", {href: X.href("/vm/" + cur.id), text: "ВМ " + cur.id + (s && s.name ? " · " + s.name : "")}));
     }
     if (cur.kind === "create") crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: "новая ВМ"}));
+    if (cur.kind === "router") {
+      crumbs.push(el("span", {class: "sep", text: "/"}), el("a", {href: X.href("/router"), text: "роутер"}));
+      const rt = RTABS.find(([k]) => k === (cur.tab || ""));
+      if (rt && rt[0]) crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: rt[1]}));
+    }
     if (cur.kind === "job") crumbs.push(el("span", {class: "sep", text: "/"}), el("b", {text: "задание"}));
     if (cur.kind === "join") crumbs.splice(0, 1, el("b", {text: "присоединить хост"}));
     const tab = cur.tab != null ? cur.tab : "";
@@ -685,6 +691,12 @@
         el("span", {class: "t-name", text: X.node ? X.node : (h.name || (loading ? "хост" : "хост"))}),
         el("span", {class: "t-meta", text: off ? "нет связи" : (h.kind || (X.node ? "?" : "proxmox")) === "proxmox" ? "Proxmox" : "VPS"}));
       const inner = el("div");
+      const rt = h.router || null;
+      if (!q && !off && rt && !rt.hidden && (rt.configured || X.isPve())) {
+        inner.append(el("a", {class: "t-row t-router" + (here && cur.kind === "router" ? " active" : ""), href: go("/router"),
+          title: rt.configured ? "роутер " + (rt.name || "MikroTik") + (rt.host ? " · " + rt.host : "") + (X.node ? " — в панели " + X.node : "") : "подключить MikroTik этого хоста"},
+          ic("router"), el("span", {class: "t-name", text: "Роутер"}), el("span", {class: "t-meta", text: rt.configured ? (rt.name || "MikroTik") : "подключить"})));
+      }
       for (const sv of vms) {
         const c = counts(sv);
         inner.append(el("a", {class: "t-row t-vm" + (here && cur.kind === "vm" && String(cur.id) === String(sv.id) ? " active" : "") +
@@ -1800,6 +1812,7 @@
       statusErr = st && !st.ok ? st.error : null;
       rows = st && st.ok ? rowsOf(st.data) : statusErr && /режим[^.]*не задан/i.test(statusErr) ? [] : rows;
       renderInfo(); renderRows();
+      if (st && st.ok) liveCounts(X, id, rows);
       if (opts.onCount) opts.onCount(rows.length, rows.filter((r) => r.state === "ok").length);
     }
 
@@ -2838,6 +2851,374 @@
     return {kind: "job", el: el("div", {}, ph.el, jv), update() { document.title = "Задание — PCS"; }};
   }
 
+  // ── роутер хоста: MikroTik по REST (PCS.md §20) ───────────────────────────
+  // У каждого хоста свой роутер и свой доступ к нему: роутер другого хоста — телепортом в его панель.
+  const RTABS = [["", "обзор"], ["nat", "пробросы портов"], ["leases", "устройства"], ["ifaces", "интерфейсы"],
+    ["log", "журнал"], ["webfig", "WebFig"], ["conf", "подключение"]];
+  function bsize(n) {
+    n = +n || 0;
+    const u = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i ? (n >= 100 ? Math.round(n) : Math.round(n * 10) / 10) : n) + " " + u[i];
+  }
+  function dur(s) {
+    s = Math.max(0, +s || 0);
+    const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return d ? d + " д " + h + " ч" : h ? h + " ч " + m + " мин" : m + " мин";
+  }
+  function swOf(on, title, onclick) {
+    return el("button", {type: "button", class: "switch", role: "switch", "aria-checked": String(!!on), "aria-label": title, title, onclick},
+      el("span", {class: "knob", "aria-hidden": "true"}));
+  }
+  function pageRouter(X) {
+    const ph = pageHead({});
+    if (X.node) {               // в дереве хаба присоединённый хост — телепортом; сюда попадают только по старой ссылке
+      ph.set("Роутер " + X.node, []);
+      return {kind: "router", node: X.node, el: el("div", {}, ph.el, el("div", {class: "banner info"}, "Роутер хоста " + X.node + " — в его панели: ",
+        el("a", {href: "/t/" + encodeURIComponent(X.node) + "/#/router", text: "телепорт"}))), show() {}};
+    }
+    const tb = tabsBar(), body = el("div"), panes = {};
+    let cur = null, info = null, loading = null;
+    const RG = (p) => X.GET("/router" + (p ? "/" + p : "")), RP = (p, b) => X.POST("/router/" + p, b || {});
+    async function load() {
+      if (loading) return loading;
+      loading = (async () => {
+        const r = await RG();
+        info = r.ok ? r.data : {conf: {}, status: null, error: r.error};
+        head();
+        if (cur !== null) drawTabs();
+        for (const x of Object.values(panes)) if (x.update) x.update();
+      })().finally(() => { loading = null; });
+      return loading;
+    }
+    const conf = () => (info && info.conf) || {};
+    function head() {
+      const st = info && info.status, c = conf();
+      ph.set([st ? st.identity || "MikroTik" : "Роутер", el("span", {class: "id", text: st ? st.board || st.model || "MikroTik" : "MikroTik"})],
+        st ? [el("span", {class: "mono", text: (st.where || "").replace(/^https?:\/\//, "")}), "RouterOS " + st.version,
+          "работает " + dur(st.uptime), st.public_ip ? el("span", {class: "mono", text: "снаружи " + st.public_ip}) : null]
+          : [info ? (c.configured ? (c.host || c.default_host || "") : "не подключён") : "…"],
+        st ? "ok" : info && info.error ? "bad" : "", st ? "на связи" : info && info.error ? "нет связи" : "");
+      document.title = "Роутер · " + X.title() + " — PCS";
+    }
+    const make = {"": () => rtOverview(), nat: () => rtNat(), leases: () => rtLeases(), ifaces: () => rtIfaces(),
+      log: () => rtLog(), webfig: () => rtWebfig(), conf: () => rtConf()};
+    function show(tab) {
+      if (!make[tab]) tab = "";
+      if (info && !conf().configured && tab !== "conf") { location.replace(X.href("/router/conf")); return; }
+      if (cur === tab) return;
+      if (cur !== null && panes[cur].hide) panes[cur].hide();
+      if (cur !== null) panes[cur].el.hidden = true;
+      if (!panes[tab]) { panes[tab] = make[tab](); body.append(panes[tab].el); }
+      panes[tab].el.hidden = false;
+      panes[tab].el.classList.remove("pane-in"); void panes[tab].el.offsetWidth; panes[tab].el.classList.add("pane-in");
+      cur = tab;
+      drawTabs();
+      if (panes[tab].show) panes[tab].show();
+    }
+    function drawTabs() {
+      const on = conf().configured || !info;
+      tb.set(RTABS.filter(([k]) => on || k === "conf").map(([k, t]) => [X.href("/router" + (k ? "/" + k : "")), t, k === cur]));
+    }
+    const errBox = el("div");
+    function errBanner() {
+      const e = info && info.error;
+      errBox.replaceChildren(e ? el("div", {class: "banner"}, e, " · ", el("a", {href: X.href("/router/conf"), text: "подключение"})) : null);
+    }
+
+    // обзор: нагрузка, память, адреса, выход в интернет; перезагрузка
+    function rtOverview() {
+      const kpis = el("div", {class: "kpis"}), facts = el("div", {class: "facts"}), res = el("span", {class: "res"});
+      const reboot = btn("Перезагрузить роутер", () => {
+        const st = (info && info.status) || {};
+        modal("Перезагрузить роутер?", el("p", {text: "«" + (st.identity || "MikroTik") + "» уйдёт в перезагрузку примерно на минуту: на это время пропадут интернет у всех модемов и ВМ, прокси снаружи и доступ к этой панели снаружи."}), [
+          {text: "Отмена"},
+          {text: "Перезагрузить", cls: "danger solid", onclick: async (close) => {
+            close();
+            const r = await act(null, res, () => RP("reboot", {confirm: "reboot"}), "ушёл в перезагрузку — вернётся через минуту");
+            if (r && r.ok) setTimeout(load, 60000);
+          }}]);
+      }, "danger");
+      const box = el("div", {}, errBox, kpis, el("div", {class: "sec-head"}, el("h2", {text: "Адреса и выход в интернет"})), facts,
+        el("div", {class: "bar"}, reboot, btn("Обновить", () => load(), "ghost"), res));
+      function update() {
+        errBanner();
+        const st = info && info.status;
+        if (!st) { kpis.replaceChildren(); facts.replaceChildren(info ? el("span", {text: "нет данных"}) : el("span", {class: "skel", style: "width:280px"})); return; }
+        const used = (u, t) => el("span", {class: "meter" + (t && u / t > .85 ? " warn" : ""), style: "--v:" + (t ? u / t : 0).toFixed(3), "aria-hidden": "true"});
+        const kpi = (k, v, sub, meter) => el("div", {class: "kpi"}, el("div", {class: "k", text: k}),
+          el("div", {class: "v"}, v, sub ? el("small", {text: sub}) : null), meter || null);
+        const ram = st.ram || [0, 0], disk = st.disk || [0, 0];
+        kpis.replaceChildren(
+          kpi("Процессор", String(st.cpu) + "%", st.cores > 1 ? " · " + st.cores + " ядра" : null),
+          kpi("Память", ram[1] ? Math.round(ram[0] / ram[1] * 100) + "%" : "—", " из " + bsize(ram[1]), used(ram[0], ram[1])),
+          kpi("Работает", dur(st.uptime)),
+          st.temp != null ? kpi("Температура", st.temp + "°", st.voltage ? " · " + st.voltage + " В" : null)
+            : kpi("Диск", disk[1] ? Math.round(disk[0] / disk[1] * 100) + "%" : "—", " из " + bsize(disk[1]), used(disk[0], disk[1])));
+        const w = st.wan;
+        facts.replaceChildren(...[
+          w ? "интернет: " + (w.interface || "?") + " → " + w.gateway : "маршрута по умолчанию нет",
+          st.public_ip ? "внешний IP " + st.public_ip : null,
+          ...(st.addresses || []).filter((a) => !a.disabled).map((a) => a.address + " · " + a.interface + (a.dynamic ? " (DHCP)" : "")),
+          st.firmware ? "прошивка " + st.firmware + (st.firmware_new ? " → есть " + st.firmware_new : "") : null,
+          st.arch ? st.arch : null].filter(Boolean).map((t) => el("span", {class: "mono", text: t})));
+      }
+      return {el: box, update, show: update};
+    }
+
+    // пробросы портов: снаружи (WAN) → адрес в своей сети
+    function rtNat() {
+      const proto = el("select", {"aria-label": "протокол"}, ["tcp", "udp", "tcp+udp"].map((p) => el("option", {value: p, text: p})));
+      const port = el("input", {class: "mono w-port", placeholder: "16021 или 16000-16100", "aria-label": "внешний порт", inputmode: "numeric"});
+      const to = el("input", {class: "mono w-ip", placeholder: "192.168.88.7", "aria-label": "адрес внутри", list: "rt-to-list"});
+      const toPort = el("input", {class: "mono w-port", placeholder: "тот же", "aria-label": "порт внутри", inputmode: "numeric"});
+      const comment = el("input", {placeholder: "подпись: прокси pcs2000", "aria-label": "подпись", maxlength: 120});
+      const dl = el("datalist", {id: "rt-to-list"});
+      const res = el("span", {class: "res"});
+      const add = btn("Пробросить", async (e) => {
+        const r = await act(e.currentTarget, res, () => RP("nat_add", {proto: proto.value, port: port.value, to: to.value, to_port: toPort.value, comment: comment.value}),
+          (d) => "проброшен " + d.proto + " " + d.port + " → " + d.to + ":" + d.to_port);
+        if (r && r.ok) { port.value = toPort.value = comment.value = ""; loadNat(); }
+      }, "primary");
+      for (const x of [port, to, toPort, comment]) x.addEventListener("keydown", (e) => { if (e.key === "Enter") add.click(); });
+      const wanNote = el("div", {class: "muted rt-note"});
+      const form = el("div", {class: "rt-form"}, proto, port, el("span", {class: "muted", text: "→"}), to, el("span", {class: "muted", text: ":"}), toPort, comment, add, res);
+      const tbl = el("div", {class: "tbl-wrap"}, skelRows(3));
+      const other = el("div");
+      async function loadNat() {
+        const r = await RG("nat");
+        if (!r.ok) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: r.error})); return; }
+        const d = r.data || {}, rows = d.rules || [];
+        const w = d.wan || {};
+        wanNote.textContent = "Снаружи — " + (w.list ? "список интерфейсов " + w.list + (w.interfaces && w.interfaces.length ? " (" + w.interfaces.join(", ") + ")" : "")
+          : w.interfaces && w.interfaces.length ? "интерфейс " + w.interfaces[0] : "интерфейс интернета не найден") +
+          ". Внутри — сети роутера: " + ((d.lan || []).join(", ") || "—") + ".";
+        const ips = new Map();
+        const h = X.ov().host || {};
+        if (h.ip) ips.set(h.ip, "этот хост");
+        for (const s of X.ov().servers || []) if (s.ip) ips.set(s.ip, "ВМ " + s.id + (s.name ? " " + s.name : ""));
+        dl.replaceChildren(...[...ips].map(([ip, t]) => el("option", {value: ip, label: t})));
+        const fw = rows.filter((x) => x.forward);
+        tbl.replaceChildren(el("table", {class: "t"},
+          el("thead", {}, el("tr", {}, ["", "протокол", "снаружи", "куда", "подпись", "трафик", ""].map((t, i) => el("th", {text: t, class: i === 6 ? "acts-cell" : null})))),
+          el("tbody", {}, fw.length ? fw.map((x) => el("tr", {class: x.disabled ? "off" : ""},
+            el("td", {}, x.dynamic ? el("span", {class: "muted", text: "авто"}) : swOf(!x.disabled, x.disabled ? "включить проброс" : "выключить проброс", async (e) => {
+              const b = e.currentTarget;
+              b.disabled = true;
+              const r2 = await RP("nat_set", {id: x.id, disabled: !x.disabled});
+              b.disabled = false;
+              if (!r2.ok) { toast(r2.error, "bad"); return; }
+              toast("проброс " + x.port + (x.disabled ? " включён" : " выключен"));
+              loadNat();
+            })),
+            el("td", {class: "mono", text: x.proto || "любой"}),
+            el("td", {class: "mono"}, x.port || "все", x.dst ? el("div", {class: "sub", text: "на " + x.dst}) : null),
+            el("td", {class: "mono"}, (x.to || "—") + (x.to_port ? ":" + x.to_port : ""), ips.get(x.to) ? el("div", {class: "sub", text: ips.get(x.to)}) : null),
+            el("td", {text: x.comment || ""}, x.invalid ? el("div", {class: "sub", text: "роутер считает правило ошибочным"}) : null),
+            el("td", {class: "num", text: x.bytes ? bsize(x.bytes) : "—"}),
+            el("td", {class: "acts-cell"}, x.dynamic ? null : el("span", {class: "ia"}, ibtn("trash", "удалить проброс " + x.port, () => {
+              modal("Удалить проброс " + x.proto + " " + x.port + "?", el("p", {text: "Снаружи порт " + x.port + " перестанет вести на " + x.to + (x.to_port ? ":" + x.to_port : "") + "."}), [
+                {text: "Отмена"},
+                {text: "Удалить", cls: "danger solid", onclick: async (close) => {
+                  close();
+                  const r2 = await RP("nat_del", {id: x.id});
+                  if (!r2.ok) { toast(r2.error, "bad"); return; }
+                  toast("проброс " + x.port + " удалён");
+                  loadNat();
+                }}]);
+            }, "danger"))))) : el("tr", {}, el("td", {colspan: 7, class: "muted", text: "пробросов нет"})))));
+        const rest = rows.filter((x) => !x.forward);
+        other.replaceChildren(rest.length ? el("details", {class: "rt-other"}, el("summary", {text: "Остальные правила NAT — " + rest.length + " (только смотреть: выход в интернет и прочее меняются в WebFig)"}),
+          el("div", {class: "tbl-wrap"}, el("table", {class: "t"}, el("thead", {}, el("tr", {}, ["цепочка", "действие", "интерфейс", "подпись", "трафик"].map((t) => el("th", {text: t})))),
+            el("tbody", {}, rest.map((x) => el("tr", {class: x.disabled ? "off" : ""}, el("td", {class: "mono", text: x.chain}), el("td", {class: "mono", text: x.action + (x.disabled ? " (выкл)" : "")}),
+              el("td", {class: "mono", text: x.in || ""}), el("td", {text: x.comment}), el("td", {class: "num", text: x.bytes ? bsize(x.bytes) : "—"}))))))) : null);
+        stagger(tbl.querySelector("tbody"));
+      }
+      return {el: el("div", {}, errBox, el("div", {class: "sec-head"}, el("h2", {text: "Новый проброс"})), form, dl, wanNote,
+        el("div", {class: "sec-head"}, el("h2", {text: "Пробросы портов"})), tbl, other), show: loadNat, update: errBanner};
+    }
+
+    // устройства: аренды DHCP — кто в сети роутера, закрепить адрес
+    function rtLeases() {
+      const tbl = el("div", {class: "tbl-wrap"}, skelRows(4)), q = el("input", {type: "search", placeholder: "адрес, MAC или имя", "aria-label": "поиск устройства"});
+      let rows = [];
+      q.addEventListener("input", () => draw());
+      async function loadL() {
+        const r = await RG("leases");
+        if (!r.ok) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: r.error})); return; }
+        rows = r.data || [];
+        draw();
+      }
+      function draw() {
+        const who = new Map();
+        const h = X.ov().host || {};
+        if (h.ip) who.set(h.ip, "этот хост");
+        for (const s of X.ov().servers || []) if (s.ip) who.set(s.ip, "ВМ " + s.id + (s.name ? " " + s.name : ""));
+        const f = q.value.trim().toLowerCase();
+        const list = rows.filter((x) => !f || (x.address + " " + x.mac + " " + x.host + " " + x.comment).toLowerCase().includes(f));
+        tbl.replaceChildren(el("table", {class: "t"},
+          el("thead", {}, el("tr", {}, ["адрес", "устройство", "MAC", "состояние", "адрес закреплён", ""].map((t, i) => el("th", {text: t, class: i === 5 ? "acts-cell" : null})))),
+          el("tbody", {}, list.length ? list.map((x) => el("tr", {class: x.disabled ? "off" : ""},
+            el("td", {class: "mono", text: x.address}),
+            el("td", {}, x.host || x.comment || el("span", {class: "muted", text: "—"}), who.get(x.address) ? el("div", {class: "sub", text: who.get(x.address)}) : x.comment && x.host ? el("div", {class: "sub", text: x.comment}) : null),
+            el("td", {class: "mono", text: x.mac}),
+            el("td", {}, el("span", {class: "tag " + (x.status === "bound" ? "ok" : ""), text: x.status === "bound" ? "в сети" : x.status === "waiting" ? "не в сети" : x.status || "—"}),
+              x.last_seen ? el("div", {class: "sub", text: "видели " + x.last_seen + " назад"}) : null),
+            el("td", {text: x.dynamic ? "нет — выдан на время" : "да"}),
+            el("td", {class: "acts-cell"}, x.dynamic ? btn("Закрепить", async (e) => {
+              const b = e.currentTarget;
+              b.disabled = true;
+              const r2 = await RP("lease_static", {id: x.id});
+              b.disabled = false;
+              if (!r2.ok) { toast(r2.error, "bad"); return; }
+              toast(x.address + " закреплён за " + x.mac);
+              loadL();
+            }, "", "этот адрес всегда будет выдаваться этому устройству") : null))) : el("tr", {}, el("td", {colspan: 6, class: "muted", text: rows.length ? "ничего не нашлось" : "аренд нет"})))));
+      }
+      return {el: el("div", {}, errBox, el("div", {class: "bar"}, q, btn("Обновить", () => loadL(), "ghost")), tbl), show: loadL, update: errBanner};
+    }
+
+    // интерфейсы: связь, трафик, включить/выключить (свою связь с хостом — нельзя)
+    function rtIfaces() {
+      const tbl = el("div", {class: "tbl-wrap"}, skelRows(5));
+      async function loadI() {
+        const r = await RG("ifaces");
+        if (!r.ok) { tbl.replaceChildren(el("div", {class: "banner", style: "margin:0", text: r.error})); return; }
+        const rows = r.data || [];
+        tbl.replaceChildren(el("table", {class: "t"},
+          el("thead", {}, el("tr", {}, ["", "интерфейс", "связь", "принято", "отдано", "MAC"].map((t) => el("th", {text: t})))),
+          el("tbody", {}, rows.map((x) => el("tr", {class: x.disabled ? "off" : ""},
+            el("td", {}, swOf(!x.disabled, x.ours ? "через него хост видит роутер — выключать нельзя" : x.disabled ? "включить " + x.name : "выключить " + x.name, async (e) => {
+              const b = e.currentTarget;
+              if (x.ours && !x.disabled) { toast(x.name + ": через него этот хост видит роутер — выключить нельзя", "warn"); return; }
+              const go = async () => {
+                b.disabled = true;
+                const r2 = await RP("iface", {id: x.id, disabled: !x.disabled});
+                b.disabled = false;
+                if (!r2.ok) { toast(r2.error, "bad"); return; }
+                toast(x.name + (x.disabled ? " включён" : " выключен"));
+                loadI();
+              };
+              if (x.disabled) { go(); return; }
+              modal("Выключить " + x.name + "?", el("p", {text: x.wan ? "Это выход в интернет: пропадут интернет у модемов и ВМ, прокси снаружи и доступ к панели снаружи. Включить обратно можно отсюда же — изнутри сети."
+                : "Устройства на этом порту потеряют связь с роутером."}), [{text: "Отмена"}, {text: "Выключить", cls: "danger solid", onclick: (close) => { close(); go(); }}]);
+            })),
+            el("td", {}, el("b", {text: x.name}), " ", x.wan ? el("span", {class: "tag info", text: "интернет"}) : null, x.ours ? el("span", {class: "tag", text: "связь с хостом"}) : null,
+              el("div", {class: "sub", text: [x.type, x.comment].filter(Boolean).join(" · ")})),
+            el("td", {}, el("span", {class: "dot " + (x.disabled ? "off" : x.running ? "ok" : "bad")}), " ", x.disabled ? "выключен" : x.running ? "есть" : "нет"),
+            el("td", {class: "num", text: bsize(x.rx)}), el("td", {class: "num", text: bsize(x.tx)}),
+            el("td", {class: "mono", text: x.mac}))))));
+      }
+      return {el: el("div", {}, errBox, el("div", {class: "bar"}, btn("Обновить", () => loadI(), "ghost")), tbl), show: loadI, update: errBanner};
+    }
+
+    // журнал роутера: свежее сверху, ошибки — заметно
+    function rtLog() {
+      const box = el("div", {class: "list rt-log"}, skelRows(5));
+      async function loadLog() {
+        const r = await RG("log");
+        if (!r.ok) { box.replaceChildren(el("div", {class: "banner", style: "margin:0", text: r.error})); return; }
+        const rows = (r.data || []).slice().reverse();
+        box.replaceChildren(...(rows.length ? rows.map((x) => {
+          const t = x.topics || "", bad = /error|critical/.test(t), warn = /warning/.test(t);
+          return el("div", {class: "item rt-line" + (bad ? " bad" : warn ? " warn" : "")}, el("span", {class: "mono rt-time", text: x.time}),
+            el("span", {class: "rt-topics", text: t}), el("span", {class: "grow", text: x.message}));
+        }) : [el("div", {class: "item muted", text: "журнал пуст"})]));
+      }
+      return {el: el("div", {}, errBox, el("div", {class: "bar"}, btn("Обновить", () => loadLog(), "ghost")), box), show: loadLog, update: errBanner};
+    }
+
+    // WebFig — весь интерфейс роутера в браузере модемов хоста (он ходит в частные сети)
+    function rtWebfig() {
+      const res = el("span", {class: "res"});
+      const screen = el("div", {class: "md-screen rt-webfig"});
+      const msg = (t, ...b) => screen.replaceChildren(el("div", {class: "br-empty"}, el("div", {class: "br-empty-t", text: t}), b.length ? el("div", {class: "bar"}, b) : null));
+      const view = mdScreen("host", screen, msg);
+      let opened = false;
+      function show() { if (opened) view.connect(); else open(); }
+      async function open() {
+        const st = await GET("/api/browser/md/host");
+        if (st.ok && st.data && st.data.installed === false) {
+          const jobs = el("div");
+          msg("Браузер ещё не установлен на этом хосте", btn("Установить браузер", async (e) => {
+            const r = await act(e.currentTarget, res, () => POST("/api/browser/install", {}), "ставлю…");
+            if (r && r.ok && r.data && r.data.job) jobs.replaceChildren(jobView(r.data.job, {title: "Установка браузера", onDone: () => open()}));
+          }, "primary"));
+          screen.append(jobs);
+          return;
+        }
+        if (!view.on) msg("Открываю WebFig…");
+        const r = await act(null, res, () => RP("webfig", {}), "открыт");
+        if (!r || !r.ok) { msg("Не открылось: " + ((r && r.error) || "неизвестно")); return; }
+        if (st.ok && st.data && st.data.fake) { screen.replaceChildren(el("div", {class: "br-fake", text: "Фейковая панель: окна браузера нет. На настоящем хосте здесь WebFig роутера " + r.data.opened + "."})); return; }
+        opened = true;
+        view.connect();
+      }
+      const bar = el("div", {class: "bar"}, el("span", {class: "muted", text: "Весь роутер, как в WebFig: окно браузера модемов этого хоста, вход в роутер сохраняется."}),
+        el("span", {class: "spacer"}), res, btn("Открыть заново", () => open(), "ghost", "новая вкладка WebFig в браузере модемов"),
+        btn("В отдельном окне", () => { window.open(location.origin + location.pathname + "#/md/host", "pcs-md-host", "popup=yes,width=1320,height=860"); }, "ghost"),
+        btn("Во весь экран", () => { if (screen.requestFullscreen) screen.requestFullscreen(); }, "ghost"));
+      return {el: el("div", {}, bar, screen), show, hide() { view.close(); }, dispose() { view.close(); }};
+    }
+
+    // подключение: адрес, логин, пароль — проверка и сохранение на этом хосте
+    function rtConf() {
+      const host = el("input", {class: "mono", autocomplete: "off", spellcheck: "false", "aria-label": "адрес роутера"});
+      const user = el("input", {autocomplete: "off", spellcheck: "false", autocapitalize: "off", "aria-label": "логин"});
+      const pw = el("input", {type: "password", autocomplete: "new-password", "aria-label": "пароль"});
+      const https = el("input", {type: "checkbox"}), port = el("input", {class: "mono w-port", inputmode: "numeric", placeholder: "80", "aria-label": "порт"});
+      const hidden = el("input", {type: "checkbox"});
+      const res = el("span", {class: "res"});
+      const save = btn("Проверить и сохранить", async (e) => {
+        const r = await act(e.currentTarget, res, () => RP("save", {host: host.value.trim(), user: user.value.trim(), password: pw.value, https: https.checked,
+          port: port.value.trim() ? +port.value.trim() : null, hidden: hidden.checked}), (d) => "на связи: " + ((d.status || {}).identity || "MikroTik") + " · RouterOS " + ((d.status || {}).version || ""));
+        if (r && r.ok) { pw.value = ""; await load(); refresh(); }
+      }, "primary");
+      const forget = btn("Забыть доступ", async (e) => {
+        if (!window.confirm("Забыть логин и пароль роутера на этом хосте?")) return;
+        const r = await act(e.currentTarget, res, () => RP("forget", {}), "забыт");
+        if (r && r.ok) { await load(); refresh(); }
+      }, "ghost");
+      hidden.addEventListener("change", async () => {
+        if (conf().configured) return;          // подключённый — прячется вместе с сохранением
+        const r = await RP("save", {hidden: hidden.checked});
+        if (r.ok) { toast(hidden.checked ? "роутер не показывается в дереве" : "роутер снова в дереве"); refresh(); }
+      });
+      const intro = el("div", {class: "banner info"});
+      const rows = el("div", {class: "list"},
+        actRow("Адрес", "обычно это шлюз хоста; пусто — шлюз маршрута по умолчанию", host).el,
+        actRow("Пользователь RouterOS", "группа full или своя с правами read, write, api, rest-api, reboot", user).el,
+        actRow("Пароль", "хранится только на этом хосте, в /etc/pcs/router.json (root, 0600)", pw).el,
+        actRow("HTTPS", "если на роутере включена служба www-ssl; иначе — HTTP по своей сети, как WebFig", el("label", {}, https, " по HTTPS"), port).el,
+        actRow("В дереве", "роутер этого хоста не MikroTik или его нет — спрятать строку «Роутер»", el("label", {}, hidden, " не показывать")).el,
+        el("div", {class: "act"}, el("div"), el("div", {class: "ctl"}, save, forget, res)));
+      function update() {
+        errBanner();
+        const c = conf();
+        host.placeholder = c.default_host || "192.168.88.1";
+        if (document.activeElement !== host) host.value = c.host || "";
+        if (document.activeElement !== user) user.value = c.user || "";
+        pw.placeholder = c.password_set ? "сохранён — пусто, чтобы не менять" : "пароль";
+        https.checked = !!c.https;
+        port.value = c.port || "";
+        hidden.checked = !!c.hidden;
+        forget.hidden = !c.configured;
+        intro.replaceChildren(c.configured ? "Доступ к роутеру этого хоста. Панель ходит к нему по REST API (RouterOS 7): то же, что делает WebFig."
+          : "Подключите MikroTik этого хоста: панель покажет его состояние, пробросы портов, устройства в сети и интерфейсы. Нужен RouterOS 7 (REST API) и включённая служба www — как для WebFig. ",
+          c.configured ? null : el("span", {class: "mono", text: "/user add name=pcs group=full password=…"}));
+      }
+      return {el: el("div", {}, errBox, intro, rows), update, show: update};
+    }
+
+    const poll = poller(15000, async () => { if (cur === "" || cur === null) await load(); });
+    load().then(() => { if (!conf().configured && cur !== "conf") location.replace(X.href("/router/conf")); });
+    poll.start();
+    return {kind: "router", node: X.node, el: el("div", {}, ph.el, tb.el, body), show,
+      update() { if (info) head(); for (const x of Object.values(panes)) if (x.update) x.update(); },
+      dispose() { poll.stop(); for (const x of Object.values(panes)) if (x.dispose) x.dispose(); }};
+  }
+
   // ── присоединить хост (VPS или другой Proxmox) ──────────────────────────
   function pageJoin() {
     const f = {addr: el("input", {placeholder: "95.165.83.236 или vps.example.ru", required: true, autocomplete: "off", spellcheck: "false"}),
@@ -2921,6 +3302,7 @@
     if (p[0] === "vm" && /^\d+$/.test(p[1] || "")) return {node, kind: "vm", id: p[1], tab: tabOf(p[2] || "net")};
     if (p[0] === "md" && /^(host|\d+)$/.test(p[1] || "")) return {node, kind: "md", id: p[1]};
     if (p[0] === "create") return {node, kind: "create"};
+    if (p[0] === "router") return {node, kind: "router", tab: p[1] || ""};
     if (p[0] === "job" && p[1]) return {node, kind: "job", id: p[1]};
     if (!node && p[0] === "join") return {kind: "join"};
     if (p[0] === "host") return {node, kind: "host", tab: tabOf(p[1] || "")};
@@ -2931,13 +3313,13 @@
     S.route = r;
     document.body.classList.remove("side-open");
     const same = S.page && (S.page.node || null) === (r.node || null) && S.page.kind === r.kind &&
-      (r.kind === "host" || (r.kind === "vm" && S.page.id === r.id));
+      (r.kind === "host" || r.kind === "router" || (r.kind === "vm" && S.page.id === r.id));
     if (same) { S.page.show(r.tab); renderTree(); renderHeader(); return; }
     if (S.page && S.page.dispose) S.page.dispose();
     const X = ctx(r.node);
     document.body.classList.toggle("viewer", r.kind === "md");
     const page = r.kind === "md" ? pageMd(X, r.id) : r.kind === "vm" ? pageVm(X, r.id) : r.kind === "create" ? pageCreate(X)
-      : r.kind === "job" ? pageJob(X, r.id) : r.kind === "join" ? pageJoin() : pageHost(X);
+      : r.kind === "job" ? pageJob(X, r.id) : r.kind === "join" ? pageJoin() : r.kind === "router" ? pageRouter(X) : pageHost(X);
     S.page = page;
     $("#main").replaceChildren(el("div", {class: "page page-in"}, page.el));
     if (page.update) page.update();
@@ -2957,12 +3339,45 @@
     } catch (e) { return null; }
     return null;
   }
+  // Одно и то же число модемов везде: дерево, шапка ВМ и таблица. Таблица опрашивается сама и
+  // свежее обзора — её счёт сразу кладётся в обзор; пришедший позже обзор, собранный раньше
+  // таблицы, его не перебивает (хаб тоже подставляет последнюю таблицу в обзор).
+  const LIVE = {};          // id ВМ | "host" → {at: когда пришла таблица (часы браузера), modems}
+  function summarize(rows) {
+    const c = {ok: 0, warn: 0, broken: 0, total: 0};
+    for (const r of rows || []) {
+      const st = r && r.state;
+      if (st === "disabled" || st === "stopped") continue;
+      c.total++;
+      if (st === "ok") c.ok++; else if (st === "warn" || st === "rebooting") c.warn++; else c.broken++;
+    }
+    return c;
+  }
+  function liveApply(ov, since) {
+    if (!ov) return;
+    for (const [k, v] of Object.entries(LIVE)) {
+      if (v.at < since) continue;
+      if (k === "host") { if (ov.host) ov.host.modems = v.modems; continue; }
+      const s = (ov.servers || []).find((x) => String(x.id) === k);
+      if (s && s.state === "running") s.modems = v.modems;
+    }
+  }
+  function liveCounts(X, id, rows) {
+    if (X.node) return;                 // у присоединённого хоста своя панель — телепортом
+    const m = summarize(rows), k = String(id), was = LIVE[k];
+    LIVE[k] = {at: Date.now(), modems: m};
+    if (was && JSON.stringify(was.modems) === JSON.stringify(m)) return;
+    liveApply(S.ov, 0);
+    renderHeader(); renderTree();
+    if (S.page && S.page.update) S.page.update();
+  }
   let refreshing = null;
   function refresh() {
     if (refreshing) return refreshing;
     refreshing = (async () => {
+      const sent = Date.now();
       const r = await GET("/api/overview");
-      if (r.ok) { S.ov = r.data; S.ovErr = null; S.ovStale = !!(r.data && r.data.stale); ovCache(r.data); }
+      if (r.ok) { S.ov = r.data; S.ovErr = null; S.ovStale = !!(r.data && r.data.stale); liveApply(S.ov, sent); ovCache(r.data); }
       else S.ovErr = "Хаб: " + r.error;
       renderHeader(); renderTree();
       if (S.page && S.page.update) S.page.update();
