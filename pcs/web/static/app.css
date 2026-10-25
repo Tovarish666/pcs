@@ -29,6 +29,9 @@
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --r1: 7px; --r2: 10px; --r3: 14px;
   --side-w: 280px;
+  /* строки таблиц: чётные — чуть темнее/светлее карточки, наведение — с оттенком акцента */
+  --zebra: color-mix(in srgb, var(--s1) 96.5%, var(--fg));
+  --row-hover: color-mix(in srgb, var(--s1) 90%, var(--accent));
   --ease-out: cubic-bezier(.22, 1, .36, 1);
   --ease-io: cubic-bezier(.65, 0, .35, 1);
   --t-press: 120ms; --t-hover: 160ms; --t-ui: 220ms; --t-page: 380ms;
@@ -223,7 +226,7 @@ main#main { flex: 1; overflow: auto; padding: 28px 28px 64px; min-width: 0; scro
 
 /* ── шапка страницы и вкладки ───────────────────────────────────────────── */
 .ph { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 6px 14px; margin-bottom: 20px; }
-.ph .chip { width: 10px; height: 40px; border-radius: 5px; background: hsl(var(--h, 221) 62% var(--chip-l)); grid-row: span 2; }
+.ph .chip { width: 10px; min-height: 40px; align-self: stretch; border-radius: 5px; background: hsl(var(--h, 221) 62% var(--chip-l)); grid-row: span 2; }
 .ph h1 { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .ph h1 .id { color: var(--fg3); font-weight: 500; font-variant-numeric: tabular-nums; }
 .ph .meta { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 0; font-size: 13px; color: var(--fg2); }
@@ -266,7 +269,8 @@ main#main { flex: 1; overflow: auto; padding: 28px 28px 64px; min-width: 0; scro
 .list { background: var(--s1); border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden; }
 .list .item { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--line); transition: background-color var(--t-hover) ease; }
 .list .item:first-child { border-top: 0; }
-.list .item:hover { background: var(--hover); }
+.list > .item:where(:nth-child(even of .item)) { background: var(--zebra); }
+.list .item:hover { background: var(--row-hover); }
 .item .title { font-weight: 600; }
 .item .title .id { color: var(--fg3); font-weight: 500; margin-right: 6px; font-variant-numeric: tabular-nums; }
 .item .sub { font-size: 12.5px; color: var(--fg2); }
@@ -277,7 +281,8 @@ main#main { flex: 1; overflow: auto; padding: 28px 28px 64px; min-width: 0; scro
 /* строки ВМ на странице хоста */
 .vmrow { display: grid; grid-template-columns: 10px minmax(180px, 1.4fr) minmax(70px, .5fr) minmax(150px, 1fr) minmax(110px, .7fr) 196px; align-items: center; gap: 16px; padding: 12px 16px; border-top: 1px solid var(--line); transition: background-color var(--t-hover) ease; }
 .vmrow:first-child { border-top: 0; }
-.vmrow:hover { background: var(--hover); }
+.vmrow:where(:nth-child(even of .vmrow)) { background: var(--zebra); }
+.vmrow:hover { background: var(--row-hover); }
 .vmrow .who { min-width: 0; }
 .vmrow .who a { color: var(--fg); font-weight: 600; }
 .vmrow .who a .id { color: var(--fg3); font-weight: 500; margin-right: 6px; font-variant-numeric: tabular-nums; }
@@ -377,7 +382,9 @@ table.t th { text-align: left; font-weight: 500; font-size: 12px; color: var(--f
 table.t td { padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 table.t tbody tr:last-child td { border-bottom: 0; }
 table.t tbody tr { transition: background-color var(--t-hover) ease; }
-table.t tbody tr:hover td { background: var(--hover); }
+/* зебра: чётные строки (раскрытые подробности modlink — не в счёт); правки, наведение и строки «новая/удалена» — поверх */
+table.t tbody tr:where(:nth-child(even of :not(.ml-more))) td { background: var(--zebra); }
+table.t tbody tr:hover td { background: var(--row-hover); }
 table.t td.num, table.t td.mono { font-variant-numeric: tabular-nums; }
 table.t td.mono { font-family: var(--mono); font-size: 12.5px; }
 table.t tr.dirty td { background: var(--warn-bg); }
@@ -394,7 +401,8 @@ table.t input.w-l { min-width: 0; width: 330px; }
 /* колонка действий — всегда видна справа, даже когда таблица шире экрана */
 table.t td.acts-cell, table.t th.acts-cell { position: sticky; right: 0; background: var(--s1); white-space: nowrap; text-align: right; z-index: 1; box-shadow: -10px 0 12px -12px rgba(0, 0, 0, .35); }
 table.t th.acts-cell { background: var(--s2); z-index: 2; }
-table.t tbody tr:hover td.acts-cell { background: var(--s3); }
+table.t tbody tr:where(:nth-child(even of :not(.ml-more))) td.acts-cell { background: var(--zebra); }
+table.t tbody tr:hover td.acts-cell { background: var(--row-hover); }
 table.t tr.dirty td.acts-cell { background: color-mix(in srgb, var(--s1) 85%, var(--warn)); }
 .acts-cell .ia { display: inline-flex; gap: 2px; }
 .ia button { border-color: transparent; background: none; color: var(--fg2); padding: 4px 7px; min-width: 30px; justify-content: center; gap: 5px; }
@@ -774,3 +782,25 @@ table.t tr.off td:not(:first-child) { opacity: .5; }
 .rt-log .rt-line.warn .grow { color: var(--warn); }
 .rt-webfig { height: min(78vh, 900px); }
 @media (max-width: 700px) { .rt-log .rt-topics { display: none; } .rt-form .w-port, .rt-form .w-ip { width: 120px; } }
+
+/* ── сведения: подпись мелко, значение под ней, тонкая черта между (шапки, строки над таблицами) ── */
+/* черта — слева у каждого; у первого в каждой строке она уходит за край и обрезается
+   (при переносе вторая строка начинается ровно под первой, без черты и отступа) */
+.facts-line { display: flex; flex-wrap: wrap; align-items: stretch; row-gap: 10px; margin: 0 0 0 -18px; overflow: hidden; }
+.facts-line .fact { display: grid; align-content: start; gap: 2px; margin-left: -1px; padding: 0 18px; border-left: 1px solid var(--line2); min-width: 0; }
+.facts-line dt { font-size: 11.5px; line-height: 16px; color: var(--fg3); white-space: nowrap; }
+.facts-line dd { margin: 0; min-height: 22px; display: flex; align-items: center; gap: 7px; font-size: 13.5px; line-height: 20px; color: var(--fg); white-space: nowrap; }
+.facts-line dd .mono { font-size: 12.5px; }
+.facts-line dd .meter { width: 54px; flex: none; }
+.facts-line dd a { display: inline-flex; align-items: center; gap: 4px; }
+.facts-line dd a .ic { width: 13px; height: 13px; }
+.facts-line .fact.warn dd { color: var(--warn); } .facts-line .fact.bad dd { color: var(--bad); }
+.facts-line .fact.muted dd { color: var(--fg2); }
+.facts-line .copy-mini { padding: 2px; min-width: 0; height: 22px; width: 22px; opacity: 0; transition: opacity var(--t-hover) ease; }
+.facts-line .copy-mini .ic { width: 13px; height: 13px; }
+.facts-line .fact:hover .copy-mini, .facts-line .copy-mini:focus-visible { opacity: 1; }
+@media (hover: none) { .facts-line .copy-mini { opacity: .6; } }
+.ph .meta.has-facts { margin-top: 6px; }
+.srcline .facts-line { flex: 1; }
+.srcline:has(.facts-line) { margin: 0 0 18px; }
+@media (max-width: 700px) { .facts-line dd { white-space: normal; } }

@@ -750,6 +750,36 @@
   const isPve = () => ctx(null).isPve();
 
   // Шапка страницы: имя, строка сведений, состояние и главные действия справа.
+  // Сведения — подпись мелко сверху, значение под ней, между сведениями тонкая черта: шапка ВМ,
+  // хоста и роутера, строки над таблицами модемов. {k, v, cls: ok|warn|bad|muted, title}.
+  function factsEl(list) {
+    return el("dl", {class: "facts-line"}, list.filter(Boolean).map((f) =>
+      el("div", {class: "fact" + (f.cls ? " " + f.cls : ""), title: f.title || null},
+        el("dt", {text: f.k}), el("dd", {}, ...[].concat(f.v == null || f.v === "" ? "—" : f.v)))));
+  }
+  const isFact = (m) => m && typeof m === "object" && !(m instanceof Node) && "k" in m;
+  // адрес с маленькой кнопкой «скопировать»
+  function ipVal(ip) {
+    if (!ip) return el("span", {class: "muted", text: "нет"});
+    return [el("span", {class: "mono", text: ip}), el("button", {type: "button", class: "ghost icon copy-mini", title: "скопировать " + ip, "aria-label": "скопировать " + ip,
+      onclick: async () => { toast(await copy(ip) ? ip + " — скопирован" : "не вышло скопировать", "ok"); }}, ic("copy"))];
+  }
+  // mp.space одним словом: [уровень, текст]
+  function mpFact(v) {
+    if (v && typeof v === "object") {
+      if (!v.installed) return ["off", "не установлен"];
+      if (v.ok || v.running) return ["ok", "работает"];
+      if (v.auth === false) return ["warn", "нет auth.mp"];
+      return ["warn", "не работает"];
+    }
+    if (v === true || v === "running" || v === "ok" || v === "active") return ["ok", "работает"];
+    if (v === "installed") return ["warn", "установлен"];
+    if (v === "stopped" || v === "inactive" || v === "failed") return ["warn", "не работает"];
+    return ["off", "не установлен"];
+  }
+  function modemsVal(c) {
+    return c.total ? [el("span", {class: "num", text: c.ok + " / " + c.total}), meterOf(c)] : el("span", {class: "muted", text: "нет"});
+  }
   function pageHead(opts) {
     const title = el("h1"), meta = el("div", {class: "meta"}), state = el("span", {class: "tag"});
     const right = el("div", {class: "side-r"}, state, opts.actions || null);
@@ -757,7 +787,10 @@
     const box = el("div", {class: "ph" + (chip ? "" : " plain")}, chip, title, right, meta);
     return {el: box, set(t, metas, lv, lvText, hueVal) {
       title.replaceChildren(...[].concat(t));
-      meta.replaceChildren(...metas.filter(Boolean).map((m) => m instanceof Node ? el("span", {}, m) : el("span", {text: m})));
+      const list = metas.filter(Boolean);
+      meta.classList.toggle("has-facts", list.some(isFact));
+      meta.replaceChildren(...(list.some(isFact) ? [factsEl(list.filter(isFact))]
+        : list.map((m) => m instanceof Node ? el("span", {}, m) : el("span", {text: m}))));
       state.className = "tag " + (lv || "");
       state.replaceChildren(el("span", {class: "dot " + (lv || "")}), lvText || "");
       state.hidden = !lvText;
@@ -786,11 +819,15 @@
     function update() {
       const h = (X.ov() && X.ov().host) || {}, c = counts(h);
       const lv = (X.ov() && X.ov().host) ? hostLevel(X) : "";
+      const vms = (X.ov() && X.ov().servers) || [], rt = h.router || {}, mp = mpFact(h.mpspace);
       ph.set([X.node ? X.node : (h.name || "хост"), el("span", {class: "id", text: X.isPve() ? "Proxmox" : "VPS"})],
-        [h.ip ? el("span", {class: "mono", text: h.ip}) : null, h.os || null,
-          X.isPve() ? "ВМ " + ((X.ov() && X.ov().servers) || []).length : "модемы прямо на хосте",
-          h.mode ? "proxyveth " + modeShort(h.mode) + " · " + c.ok + "/" + c.total : null,
-          h.mpspace_ok ? mpText(h.mpspace) : null],
+        [{k: "адрес", v: ipVal(h.ip)},
+          {k: "система", v: h.os || "—"},
+          X.isPve() ? {k: "ВМ", v: el("span", {class: "num", text: vms.filter((v) => v.state === "running").length + " / " + vms.length}), title: "работают / всего"}
+            : {k: "модемы", v: "прямо на хосте"},
+          h.mode ? {k: "proxyveth " + modeShort(h.mode), v: modemsVal(c), cls: c.broken ? "bad" : c.ok < c.total ? "warn" : ""} : null,
+          h.mpspace_ok ? {k: "mp.space", v: [el("span", {class: "dot " + mp[0]}), mp[1]]} : null,
+          rt.configured && !rt.hidden ? {k: "роутер", v: rt.name || "MikroTik", title: rt.model || ""} : null],
         lv, lv ? (lv === "ok" ? "в порядке" : lv === "warn" ? "есть замечания" : "есть проблемы") : "");
     }
     return {el: ph.el, update};
@@ -1055,9 +1092,14 @@
         ph.set(["ВМ ", el("span", {class: "id", text: String(id)})], [X.ov() && (X.ov().servers || []).length ? "нет в списке PCS — удалена или ещё создаётся" : "загрузка…"], "", "", hueOf({id}, X));
         return;
       }
-      const c = counts(s);
+      const c = counts(s), mp = mpFact(s.mpspace), hv = ((X.ov() || {}).host || {}).version;
       ph.set([s.name || "ВМ " + s.id, el("span", {class: "id", text: "ВМ " + s.id})],
-        [el("span", {class: "mono", text: s.ip || "без IP"}), modeLong(s.mode), "модемы " + c.ok + "/" + c.total, mpText(s.mpspace)],
+        [{k: "адрес", v: ipVal(s.ip)},
+          {k: "proxyveth", v: s.mode === "usb" ? "USB" : s.mode === "gw" ? "шлюз" : "не задан", cls: s.mode ? "" : "muted",
+            title: s.mode === "usb" ? "модем как USB Huawei E3372h, до 40 на сервер" : s.mode === "gw" ? "шлюз — без USB и без такого предела" : ""},
+          {k: "модемы", v: modemsVal(c), cls: c.broken ? "bad" : c.ok < c.total ? "warn" : ""},
+          {k: "mp.space", v: [el("span", {class: "dot " + mp[0]}), mp[1]]},
+          s.version && hv && s.version !== hv ? {k: "PCS", v: s.version, cls: "warn", title: "на хосте " + hv + " — обновить: «управление» → «Обновить PCS»"} : null],
         level(s), levelText(s), hueOf(s, X));
       document.title = s.id + " " + (s.name || "") + " — PCS";
     }
@@ -1219,13 +1261,12 @@
           btn("Установить hivelink", (e) => act(e.currentTarget, res, () => X.run(id, "hivelink", ["install"]), "Установлено").then(() => load(false)), "", "драйвер физических модемов Huawei"), res));
         return;
       }
-      info.replaceChildren(...[
-        el("span", {text: data.net === "on" ? "сеть модемов — своя (DHCP и маршруты)" : "сеть модемов — у mp.space, hivelink: USB и связь"}),
-        data.fix ? el("span", {text: "фикс приёма " + (data.fix.active ? "активен" : data.fix.needed ? "НЕ активен" : "не нужен")}) : null,
-        el("span", {class: "muted", text: "чинит сам: дозвон → откл/вкл → перерегистрация → перезагрузка"}),
-        ...(data.hubs || []).map((h) => el("span", {class: "problems", title: "хаб пропал и вернулся: все модемы на нём переподключились разом",
-          text: "⚠ хаб " + h.port + " пропадал " + h.drops + " раз за сутки (" + Object.entries(h.models || {}).map(([k, c]) => c + " × " + k).join(", ")
-            + ")"}))].filter(Boolean));
+      info.replaceChildren(factsEl([
+        {k: "сеть модемов", v: data.net === "on" ? "своя: DHCP и маршруты" : "у mp.space", title: data.net === "on" ? "" : "hivelink отвечает за USB и связь, адреса и маршруты — mp.space"},
+        data.fix ? {k: "фикс приёма", v: data.fix.active ? "активен" : data.fix.needed ? "не активен" : "не нужен", cls: !data.fix.active && data.fix.needed ? "bad" : ""} : null,
+        {k: "чинит сам", v: "дозвон → откл/вкл → перерегистрация → перезагрузка", cls: "muted"},
+        ...(data.hubs || []).map((h) => ({k: "хаб " + h.port, cls: "warn", title: "хаб пропал и вернулся: все модемы на нём переподключились разом",
+          v: "пропадал " + h.drops + " раз за сутки (" + Object.entries(h.models || {}).map(([k, c]) => c + " × " + k).join(", ") + ")"}))]));
       if (!rows.length) {
         box.replaceChildren(el("div", {class: "net-empty", text: "Физических модемов нет — USB-модемов Huawei hivelink не видит."}));
         return;
@@ -1694,22 +1735,27 @@
     }
 
     // одна строка: режим · откуда таблица · когда синхронизирована
+    // proxyveth source --json: {source: ссылка | "local" | null, copy, copy_time} — копия
+    // переписывается при каждом удачном чтении Google, её время и есть «прочитана из Google»
     function renderInfo() {
       const s = X.ent(id) || {};
-      const parts = [el("span", {title: s.mode === "usb" ? "модем как USB Huawei E3372h, до 40 на сервер" : s.mode === "gw" ? "шлюз — без USB и без такого предела" : "",
-        text: s.mode === "usb" ? "режим USB" : s.mode === "gw" ? "режим шлюз" : "режим не задан"})];
+      const f = [{k: "режим", v: s.mode === "usb" ? "USB" : s.mode === "gw" ? "шлюз" : "не задан", cls: s.mode ? "" : "warn",
+        title: s.mode === "usb" ? "модем как USB Huawei E3372h, до 40 на сервер" : s.mode === "gw" ? "шлюз — без USB и без такого предела" : ""}];
       const d = source && source.ok ? source.data : null;
-      if (source && !source.ok) parts.push(el("span", {class: "problems", text: "таблица: " + source.error}));
+      if (source && !source.ok) f.push({k: "таблица", v: source.error, cls: "bad"});
       else if (d && typeof d === "object") {
-        const kind = d.source || d.kind || (d.url ? "google" : null);
+        const local = d.source === "local";
         const url = d.url || (typeof d.source === "string" && /^https?:/.test(d.source) ? d.source : null);
-        const g = url ? el("a", {href: url, target: "_blank", rel: "noopener noreferrer", title: url}, "Google-таблица", ic("out")) : el("span", {text: "Google — не задана"});
-        if (kind === "local") parts.push(el("span", {title: d.local || "/etc/proxyveth/table.csv", text: "главная — локальная копия"}), g);
-        else parts.push(el("span", {}, "главная — ", g), el("span", {class: "mono", title: "локальная копия", text: d.local || "/etc/proxyveth/table.csv"}));
-        parts.push(el("span", {text: "синхронизирована " + ago(d.synced || d.pulled || d.mtime)}));
-        if (d.stale) parts.push(el("span", {class: "problems", text: "Google недоступен — работает локальная копия"}));
-      } else if (!source) parts.push(el("span", {class: "skel", style: "width:260px;display:inline-block"}));
-      info.replaceChildren(...parts);
+        const t = d.copy_time || d.synced || null, old = t && Date.now() / 1000 - t > 30 * 60;
+        f.push({k: "главная таблица", v: local ? "локальная копия" : url
+          ? el("a", {href: url, target: "_blank", rel: "noopener noreferrer", title: url}, "Google-таблица", ic("out")) : "не задана", cls: local || url ? "" : "warn"});
+        f.push({k: local ? "файл" : "копия на сервере", v: el("span", {class: "mono", text: d.copy || d.local || "/etc/proxyveth/table.csv"})});
+        f.push({k: local ? "изменена" : "прочитана из Google", v: t ? ago(t) : local ? "—" : "ещё не читалась",
+          title: t ? new Date(t * 1000).toLocaleString("ru-RU") + (local ? "" : " · таймер читает её раз в 2 минуты") : "",
+          cls: !local && url && (!t || old) ? "warn" : ""});
+        if (!local && url && old) f.push({k: "Google", v: "не читается — модемы по локальной копии", cls: "warn"});
+      }
+      info.replaceChildren(d || (source && !source.ok) ? factsEl(f) : el("span", {class: "skel", style: "width:320px;height:30px;display:inline-block"}));
     }
 
     // счётчики — они же фильтры таблицы
@@ -2896,8 +2942,8 @@
     function head() {
       const st = info && info.status, c = conf();
       ph.set([st ? st.identity || "MikroTik" : "Роутер", el("span", {class: "id", text: st ? st.board || st.model || "MikroTik" : "MikroTik"})],
-        st ? [el("span", {class: "mono", text: (st.where || "").replace(/^https?:\/\//, "")}), "RouterOS " + st.version,
-          "работает " + dur(st.uptime), st.public_ip ? el("span", {class: "mono", text: "снаружи " + st.public_ip}) : null]
+        st ? [{k: "адрес", v: ipVal((st.where || "").replace(/^https?:\/\//, ""))}, {k: "RouterOS", v: st.version},
+          {k: "работает", v: dur(st.uptime)}, st.public_ip ? {k: "снаружи", v: ipVal(st.public_ip)} : null]
           : [info ? (c.configured ? (c.host || c.default_host || "") : "не подключён") : "…"],
         st ? "ok" : info && info.error ? "bad" : "", st ? "на связи" : info && info.error ? "нет связи" : "");
       document.title = "Роутер · " + X.title() + " — PCS";

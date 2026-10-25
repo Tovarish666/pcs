@@ -136,9 +136,9 @@ def _server(sid, name, ip, mode, ns, bad=(), ml=0, cores=4, ram_gb=8, disk_gb=40
     srv = {"id": sid, "name": name, "ip": ip, "state": "running", "mode": mode, "mpspace": "running",
            "cores": cores, "ram_gb": ram_gb, "disk_gb": disk_gb,
            "modems": _modems(sid, mode, ns, bad),
-           "source": {"source": "google",
-                      "url": "https://docs.google.com/spreadsheets/d/1Fake%sTableId/edit#gid=0" % sid,
-                      "local": "/etc/proxyveth/table.csv", "synced": _now() - 95, "stale": False},
+           # как proxyveth source --json: ссылка (или "local"), копия и когда она прочитана
+           "source": {"source": "https://docs.google.com/spreadsheets/d/1Fake%sTableId/edit#gid=0" % sid,
+                      "sheet": None, "copy": "/etc/proxyveth/table.csv", "copy_time": _now() - 95},
            "modlink": _modlink(sid, ns, ml), "ml_log": {}, "ml_speed": {}, "ml_pending": False, "ml_applied": {},
            "hivelink": False, "auth_mp": True}
     srv["ml_applied"] = {r["id"]: dict(r) for r in srv["modlink"]}
@@ -340,7 +340,7 @@ def create_server(params):
                           ram_gb=params.get("ram_gb") or 8, disk_gb=params.get("disk_gb") or 40)
             srv["mpspace"] = "running" if params.get("mpspace") else None
             if not params.get("sheet"):
-                srv["source"] = {"source": None, "url": None, "local": "/etc/proxyveth/table.csv", "synced": None}
+                srv["source"] = {"source": None, "sheet": None, "copy": None, "copy_time": None}
             S[sid] = srv
         return {"id": sid, "ip": ip}
 
@@ -757,7 +757,7 @@ def _pv(srv, a, inp):
         if a[1] == "local":
             srv["source"]["source"] = "local"
         else:
-            srv["source"].update(source="google", url=a[1], synced=_now())
+            srv["source"].update(source=a[1], copy="/etc/proxyveth/table.csv", copy_time=_now())
         return dict(srv["source"])
     if cmd == "mode":
         if len(a) == 1:
@@ -775,7 +775,7 @@ def _pv(srv, a, inp):
         if sub == "show":
             return {"csv": srv["table"], "path": "/etc/proxyveth/table.csv", "source": srv["source"]["source"]}
         if sub == "pull":
-            srv["source"]["synced"] = _now()
+            srv["source"]["copy_time"] = _now()
             return {"csv": srv["table"]}
         if sub == "put":
             if not inp:
@@ -807,7 +807,7 @@ def _pv(srv, a, inp):
             m["real"], m["_login"], m["_pw"] = d[m["n"]]["real"], d[m["n"]]["user"], d[m["n"]]["pw"]
             m["proxy"] = "%s:%d" % (d[m["n"]]["host"], d[m["n"]]["port"])
         srv["modems"] = sorted(keep + add, key=lambda m: m["n"])
-        srv["source"]["synced"] = _now()
+        srv["source"]["copy_time"] = _now()
         return {"created": new, "recreated": [], "removed": gone, "failed": {}, "problems": probs}
     if cmd == "number":
         n = int(a[1]) if len(a) > 1 and a[1].isdigit() else None
